@@ -1272,7 +1272,7 @@ def report_violation(data: ViolationReport, payload=Depends(verify_token)):
             system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"])
             force_msg = "Aday 3 kez sekme/ekran değişimi ihlali yaptı. Mülakatı şimdi sonlandır, mevcut bilgilere göre rapor ver. Düşük puan ver ve raporda ihlal nedeniyle sonlandırıldığını belirt. [MÜLAKATBİTTİ] etiketini kullan."
             response = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=1800, system=system,
+                model="claude-sonnet-4-6", max_tokens=4000, system=system,
                 messages=[{"role": "user", "content": force_msg}]
             )
             result = finalize_interview(data.candidate_id, response.content[0].text,
