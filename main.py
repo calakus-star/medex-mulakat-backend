@@ -1147,7 +1147,7 @@ GÖREV:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None)
         response = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=1200 if should_finish else 260, system=system,
+            model="claude-sonnet-4-6", max_tokens=4000 if should_finish else 260, system=system,
             messages=[{"role": "user", "content": user_payload}]
         )
         reply = response.content[0].text
@@ -1211,7 +1211,7 @@ Mevcut veri rapor için sınırlıdır. Nihai karar için adaydan daha kapsamlı
 """.strip()
 
 def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optional[str] = None):
-    report_match = re.search(r'---RAPOR---([\s\S]*?)---RAPORSON---', reply)
+    report_match = re.search(r'---RAPOR---([\s\S]*?)(?:---RAPORSON---|---STANDARTCV---|\Z)', reply)
     cv_match = re.search(r'---STANDARTCV---([\s\S]*?)---STANDARTCVSON---', reply)
     score_match = re.search(r'TOPLAM PUAN:\s*(\d+)', reply)
     rec_match = re.search(r'Öneri:\s*(İşe Al|Değerlendirmeye Al|Reddet)', reply)
