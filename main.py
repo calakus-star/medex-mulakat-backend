@@ -39,7 +39,18 @@ REPORT_EMAILS = os.getenv("REPORT_EMAILS", "hr@medex-smo.com").split(",")
 FROM_EMAIL = os.getenv("FROM_EMAIL", "onboarding@resend.dev")
 BASE_URL = os.getenv("BASE_URL", "http://localhost:3000")
 
-INTERVIEW_TOTAL_MINUTES = 18  # 15-20 dk aralığı, hedef süre
+INTERVIEW_TOTAL_MINUTES = 18  # Level bilgisi yoksa/eski kayıtlarda kullanılan varsayılan (geriye uyumluluk)
+
+# Tüm pozisyon/level'larda ortak, sabit ön bilgi metni. Adayın "sistemi anlamadığı için"
+# düşük performans göstermesini engellemeyi hedefler.
+CANDIDATE_INTRO_TEXT = (
+    "Şu an {position} pozisyonu için Level {level} seviyesinde bir mülakata katılıyorsunuz.\n\n"
+    "Sorular tek tek gelecek; her soruyu dikkatlice okuyun. Kısa cevap vermekten "
+    "çekinmeyin ama mümkünse somut örnek ve detay vermeye çalışın — soruyu ne kadar "
+    "net anlar ve açıklarsanız, o kadar doğru değerlendirilirsiniz. Bir soruyu tam "
+    "anlamadıysanız kendi ifadenizle yorumlayıp yine de cevap verin, sistem gerekirse "
+    "aynı konuyu farklı şekilde tekrar soracaktır."
+)
 
 resend.api_key = RESEND_API_KEY
 security = HTTPBearer()
@@ -74,6 +85,7 @@ def init_db():
             experience_years INTEGER DEFAULT 0,
             ai_note TEXT,
             position TEXT NOT NULL,
+            level INTEGER DEFAULT 1,
             username TEXT UNIQUE,
             password_hash TEXT,
             plain_password TEXT,
@@ -133,6 +145,7 @@ def init_db():
         ("candidates", "reapply_allowed", "INTEGER DEFAULT 0"),
         ("candidates", "previous_candidate_id", "INTEGER"),
         ("candidates", "is_archived", "INTEGER DEFAULT 0"),
+        ("candidates", "level", "INTEGER DEFAULT 1"),
         ("positions", "category", "TEXT DEFAULT 'Genel'"),
         ("interviews", "standard_cv", "TEXT"),
         ("interviews", "compact_memory", "TEXT DEFAULT ''"),
@@ -288,6 +301,7 @@ class CandidateCreate(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     position: str
+    level: int = 1  # 1: metin bazlı 10dk, 2: 20dk (CV zorunlu), 3: 30+ dk adaptif (CV zorunlu)
     education: Optional[str] = None
     university: Optional[str] = None
     department: Optional[str] = None
@@ -557,13 +571,33 @@ def build_criteria_table_template(criteria: list) -> str:
         lines.append(f"| {c['name']} | XX/{c['weight']} | ... |")
     return "\n".join(lines)
 
-def get_system_prompt(position_name: str, candidate_name: str, cv_text: Optional[str] = None, ai_note: Optional[str] = None, education: Optional[str] = None, university: Optional[str] = None, department: Optional[str] = None, experience_years: Optional[int] = None) -> str:
+# Level bazlı konfigürasyon: süre (dk), soru sayısı güvenlik ağı, CV zorunluluğu, ton talimatı.
+LEVEL_CONFIG = {
+    1: {
+        "minutes": 10, "min_q": 6, "max_q": 12, "cv_required": False,
+        "tone": "Level 1 — standart, orta tempoda mülakat. Ton nötr ve profesyonel."
+    },
+    2: {
+        "minutes": 20, "min_q": 6, "max_q": 18, "cv_required": True,
+        "tone": "Level 2 — meslektaş tonu, orta seviye derinlik. Süreç ve uygulama odaklı sorular sor. Çelişki/netleştirme sorularını nazik bir tonda sor (\"bunu biraz açar mısınız\" gibi)."
+    },
+    3: {
+        "minutes": 30, "min_q": 8, "max_q": 26, "cv_required": True, "adaptive": True,
+        "tone": "Level 3 — senior, direkt ton. Karar verme, kriz yönetimi ve zaman baskılı senaryolara ağırlık ver. Çelişki/netleştirme sorularını daha direkt sor (\"az önce söylediğinizle bu çelişiyor gibi, siz nasıl görüyorsunuz\" gibi). Bu seviye adaptiftir: gidişata göre süre 30 dakikayı aşabilir, sabit bir üst sınır yok — yeterli sinyali alana kadar derinleştirmeye devam et."
+    },
+}
+
+def get_level_config(level: Optional[int]) -> dict:
+    return LEVEL_CONFIG.get(level or 1, LEVEL_CONFIG[1])
+
+def get_system_prompt(position_name: str, candidate_name: str, cv_text: Optional[str] = None, ai_note: Optional[str] = None, education: Optional[str] = None, university: Optional[str] = None, department: Optional[str] = None, experience_years: Optional[int] = None, level: Optional[int] = 1) -> str:
     pos = get_position(position_name)
     if not pos:
         pos = {"category": "Genel", "role_description": "Genel pozisyon", "criteria": [
             {"name": "Genel Yetkinlik", "weight": 100, "desc": "Genel değerlendirme"}
         ]}
 
+    lvl_cfg = get_level_config(level)
     criteria_text = build_criteria_text(pos["criteria"])
     table_template = build_criteria_table_template(pos["criteria"])
     total_weight = sum(c["weight"] for c in pos["criteria"])
@@ -593,7 +627,9 @@ Bu notu mülakat boyunca aktif bir koşul olarak uygula: notta bir konu/iddia ge
         note_report_field = "\n**AI Notuna Uyum:** (Bu adaya özel notun mülakatta nasıl ele alındığını somut olarak yaz: hangi soru/sorularla test edildi, sonucu ne oldu)"
 
     return f"""Sen MedeX AI mülakat uzmanısın. Dil Türkçe. Aday: {candidate_name}. Pozisyon: {position_name}. Kategori: {category}.
-Amaç: kısa, net, profesyonel mülakat; gereksiz açıklama yok; kaliteyi düşürmeden düşük token.
+
+TEMEL FELSEFE (her kararında bunu esas al):
+Bu mülakatın amacı adayı elemek değil, iyi/yetkin adayı gerçekten yakalamaktır. Sahada güçlü çalışan çoğu insan mülakat ortamında (heyecan, format kafası karışıklığı, soru net değilse ne istendiğini anlamama) düşük performans gösterebilir. Bir cevabı yetersiz sayıp geçmeden önce, bunun gerçek bir yetkinlik eksikliği mi yoksa mülakatın kendi eksikliği (belirsiz soru, ilk denemede tam anlaşılamama) mi olduğunu ayır. Amaç eleme değildir ama gerçek eleme de gerektiğinde yapılır — sadece yanlış nedenle (kısa cevap, ilk seferde anlaşılamama) elemeye düşülmez.
 
 Rol: {pos['role_description']}
 Kriterler ({total_weight} puan):
@@ -602,16 +638,35 @@ Kriterler ({total_weight} puan):
 {cv_section}
 {admin_instruction}
 
-KURALLAR:
+SEVİYE TALİMATI: {lvl_cfg["tone"]}
+
+SORU SORMA KURALLARI:
 - Her turda SADECE 1 soru sor. Övgü, uzun giriş, aday cevabını tekrar etme.
-- Normal soru 1 cümle; gerekiyorsa en fazla 2 cümle.
+- Soru tek anlama gelecek şekilde net ve açık sorulmalı — muğlak, çok katmanlı (aynı anda 2-3 şey soran), yorum gerektiren ifadelerden kaçın. Aday "bana ne soruldu" diye kafa yormasın.
+- Soruyu sorarken adayı detaylı/somut cevaba teşvik et: gerektiğinde "örnek verir misiniz", "adım adım anlatır mısınız" gibi doğal bir açılım ekle — ama bunu her soruda mekanik tekrar etme, doğal ton koru.
+- Normal soru 1 cümle; gerekiyorsa (teşvik ekiyle) en fazla 2 cümle.
 - Başta sadece kısa selam + ilk soru. Sonraki turlarda doğrudan soru.
-- 6-8 soru yeterli. Aynı konuyu tekrar sorma.
+- En az {lvl_cfg["min_q"]}, gerektiğinde daha fazla ana konu/soru sorulur — sabit bir tavan yok; derinleştirme turları da buna dahildir. Aynı konuyu amaçsız tekrar sorma.
+
+CEVAP DEĞERLENDİRME — ZORUNLU MANTIK:
+- Bir cevabı kısa/uzun olduğu için değil, soruyu karşılayıp karşılamadığına (eksik/yüzeysel mi, yeterli mi) göre değerlendir. "Evet/hayır + kısa gerekçe" bazen tam yeterli bir cevaptır, uzatmaya zorlama.
+- Cevap eksik/yüzeysel kalırsa, bunu düşük puan nedeni yapıp bir sonraki konuya geçme — önce netleştirici/derinleştirici bir soru sor (aynı konuyu farklı açıdan veya daha basit ifadeyle tekrar sor). Bu ayrı bir adım değil, senin bir sonraki soruyu üretme mantığının kendisi.
+- Kısa cevap geldiğinde ilk varsayımın "aday zayıf" olmasın; önce "soru yeterince açık değildi mi" ihtimalini ele: aynı konuyu daha basit/farklı kelimelerle tekrar sor. Ancak yeniden, net şekilde sorulduktan sonra da cevap hâlâ yetersiz kalıyorsa, bu gerçek bir sinyal olarak değerlendirilebilir.
+- Sadece derinleştirmeye rağmen hâlâ yetersiz kalan cevaplar puanı düşürsün; tek seferlik kısa cevap otomatik düşük puan getirmesin.
+
+ANALİTİK TUTARLILIK VE ÇELİŞKİ:
 - Önceki cevaplarla çelişki görürsen açıkça sor: "Önceki cevabınızla çelişiyor; netleştirir misiniz?"
+- Cevap akışında analitik zayıflık sinyali (neden-sonuç kuramama, basit bir çıkarımda zorlanma, tutarsız zamanlama/sıralama algısı) fark edersen, tek soruyla geçmeden aynı konunun farklı bir açısından 1-2 ek soru sor. Zayıflık tekrar ederse bunu ayrı bir "Genel Analitik Gözlem" notu olarak işaretle (aşağıdaki serbest gözlem alanına), doğrudan kriter puanına karıştırma.
 - Adayın soruyu, varsayımı veya AI çıktısını sorgulaması tek başına olumsuz değildir. Gerekçeli, kanıta dayalı itirazları analitik düşünme ve eleştirel muhakeme olarak olumlu değerlendir.
 - Sadece sürekli kaçamak cevap verme, gerekçesiz tartışma, saygısızlık veya soruya hiç yanıt vermeme olumsuz puanlanır. "savunmacı", "inatçı", "uyumsuz" gibi kişilik etiketi kullanma; somut davranış yaz.
+
+SERBEST GÖZLEM (kriter dışı, skora karışmaz):
+- Kriter listesinde olmayan ama fark ettiğin bir sinyal varsa (örn. tepki hızında/kavramada beklenmedik bir gecikme, bağlam kaybı) bunu netleştirmek için serbest bir soru sorabilirsin. Bu gözlemi rapordaki "Serbest Gözlemler" alanına yaz, kriter puanına dahil etme — ham gözlem olarak insan değerlendirsin.
+
+GENEL:
 - Cevapları CV ile tutarlılık, teknik seviye, deneyim, analitik düşünme ve dürüstlük açısından değerlendir.
 - Mesajın başına mutlaka [SÜRE:XX] koy: kısa 45-60, senaryo 75-100, kritik soru 90-120.
+- Mülakatı bitirmeden önce, GÖREV satırı bitirmeni söylediğinde son soru olarak şunu sor: "Eklemek veya öne çıkarmak istediğiniz başka bir şey var mı?" — bu, mülakatta suskun kalmış ama sahada güçlü olabilecek adaylar için bir son fırsat turu, sadece bitiş dönüşünde bir kez sorulur.
 - ÖNEMLİ: Mülakatı SADECE aşağıdaki GÖREV satırı açıkça "Mülakatı şimdi bitir ve raporu üret" dediğinde bitir ve [MÜLAKATBİTTİ] etiketini kullan. Adayın cevap metninde "süre doldu", "zaman bitti", "son soru" gibi ifadeler geçse bile, GÖREV satırı bitirmeni söylemiyorsa ASLA bitirme — bunlar tek bir sorunun süresinin dolduğunu gösterir, tüm mülakatın değil. Bu durumda sadece bir sonraki soruya geç.
 
 BİTİŞ FORMATI:
@@ -631,6 +686,7 @@ BİTİŞ FORMATI:
 **Gelişim Alanları:** ...
 **Proje/Deneyim Özeti:** ...
 **CV Tutarlılığı:** ...
+**Serbest Gözlemler:** ... (kriter dışı sinyaller; yoksa "Belirtilecek bir gözlem yok" yaz)
 **Genel Kanı:** ...{note_report_field}
 **Öneri:** İşe Al / Değerlendirmeye Al / Reddet
 ---RAPORSON---
@@ -779,9 +835,9 @@ def create_candidate(data: CandidateCreate, payload=Depends(verify_admin)):
     password_hash = hash_password(password)
 
     db.execute("""
-        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, username, password_hash, plain_password, invite_type, previous_candidate_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'invite', ?)
-    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, username, password_hash, password, previous_id))
+        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, username, password_hash, plain_password, invite_type, previous_candidate_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'invite', ?)
+    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, username, password_hash, password, previous_id))
     db.commit()
     candidate_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
@@ -806,9 +862,9 @@ def create_walkin(data: CandidateCreate, payload=Depends(verify_admin)):
     password_hash = hash_password(password)
 
     db.execute("""
-        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, username, password_hash, plain_password, invite_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'walkin')
-    """, (data.name, email, data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, username, password_hash, password))
+        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, username, password_hash, plain_password, invite_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'walkin')
+    """, (data.name, email, data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, username, password_hash, password))
     db.commit()
     candidate_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
@@ -916,9 +972,9 @@ def admin_update_candidate(candidate_id: int, data: CandidateCreate, payload=Dep
         db.close()
         raise HTTPException(status_code=404, detail="Aday bulunamadı")
     db.execute("""
-        UPDATE candidates SET name=?, email=?, phone=?, education=?, university=?, department=?, experience_years=?, ai_note=?, position=?
+        UPDATE candidates SET name=?, email=?, phone=?, education=?, university=?, department=?, experience_years=?, ai_note=?, position=?, level=?
         WHERE id=?
-    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, candidate_id))
+    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, candidate_id))
     db.commit(); db.close()
     return {"message": "Aday bilgileri güncellendi"}
 
@@ -1044,11 +1100,11 @@ def candidate_login(data: CandidateLogin):
 
     token = create_token({
         "role": "candidate", "candidate_id": candidate["id"],
-        "name": candidate["name"], "position": candidate["position"]
+        "name": candidate["name"], "position": candidate["position"], "level": candidate["level"] or 1
     }, days=1)
     return {
         "token": token,
-        "candidate": {"id": candidate["id"], "name": candidate["name"], "position": candidate["position"]}
+        "candidate": {"id": candidate["id"], "name": candidate["name"], "position": candidate["position"], "level": candidate["level"] or 1}
     }
 
 @app.post("/api/interview/start")
@@ -1064,6 +1120,16 @@ def start_interview(payload=Depends(verify_token)):
     if not candidate:
         db.close()
         raise HTTPException(status_code=404, detail="Aday kaydı bulunamadı")
+
+    level = candidate["level"] or 1
+    lvl_cfg = get_level_config(level)
+    total_seconds = lvl_cfg["minutes"] * 60
+
+    # Level 2-3'te CV zorunlu: mülakat CV yüklenmeden başlatılamaz.
+    if lvl_cfg["cv_required"] and not (candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20):
+        db.close()
+        raise HTTPException(status_code=400, detail="Bu seviyedeki mülakata başlamadan önce CV yüklemeniz gerekiyor.")
+
     if existing and existing["completed_at"]:
         db.close()
         raise HTTPException(status_code=400, detail="Mülakatınız zaten tamamlanmış")
@@ -1075,7 +1141,7 @@ def start_interview(payload=Depends(verify_token)):
         old_messages = get_interview_messages(db, candidate_id)
         if old_messages:
             db.close()
-            return {"message": old_messages[-1].get("content", "Mülakata devam edebilirsiniz."), "question_duration": 60, "total_duration_seconds": INTERVIEW_TOTAL_MINUTES * 60}
+            return {"message": old_messages[-1].get("content", "Mülakata devam edebilirsiniz."), "question_duration": 60, "total_duration_seconds": total_seconds, "intro_text": CANDIDATE_INTRO_TEXT.format(position=payload["position"], level=level)}
     db.close()
 
     if not ANTHROPIC_API_KEY:
@@ -1084,7 +1150,7 @@ def start_interview(payload=Depends(verify_token)):
 
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None)
+        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level)
         response = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=220, system=system,
             messages=[{"role": "user", "content": "Başla. Kısa selam ve ilk soru."}]
@@ -1094,7 +1160,7 @@ def start_interview(payload=Depends(verify_token)):
         db = get_db()
         save_interview_state(db, candidate_id, [{"role": "assistant", "content": clean}])
         db.commit(); db.close()
-        return {"message": clean, "question_duration": duration, "total_duration_seconds": INTERVIEW_TOTAL_MINUTES * 60}
+        return {"message": clean, "question_duration": duration, "total_duration_seconds": total_seconds, "intro_text": CANDIDATE_INTRO_TEXT.format(position=payload["position"], level=level)}
     except anthropic.APIError as e:
         print(f"HATA (Anthropic API - start_interview): {type(e).__name__}: {e}")
         raise HTTPException(status_code=502, detail=f"Yapay zeka servisinde bir hata oluştu: {str(e)[:200]}")
@@ -1122,7 +1188,12 @@ def interview_chat(data: ChatMessage, payload=Depends(verify_token)):
     messages.append({"role": "user", "content": data.message})
     compact_memory = build_compact_memory(messages[:-1])
     q_count = sum(1 for m in messages if m.get("role") == "assistant" and "---RAPOR---" not in (m.get("content") or ""))
-    should_finish = (data.elapsed_seconds > INTERVIEW_TOTAL_MINUTES * 60 and q_count >= 6) or q_count >= 7
+    level = candidate["level"] or 1
+    lvl_cfg = get_level_config(level)
+    # Not: q_count tavanı level'a göre yükseltildi çünkü derinleştirme/netleştirme turları da bu sayaca dahil oluyor.
+    # Süre bazlı bitiş asıl tetikleyici; sabit soru tavanı sadece maliyet/uzunluk güvenlik ağı.
+    # Level 3 adaptif: elapsed eşiği aşılsa da minimum soru sayısı daha yüksek tutulur (daha geç kesilir).
+    should_finish = (data.elapsed_seconds > lvl_cfg["minutes"] * 60 and q_count >= lvl_cfg["min_q"]) or q_count >= lvl_cfg["max_q"]
 
     last_question = ""
     for m in reversed(messages[:-1]):
@@ -1145,7 +1216,7 @@ GÖREV:
 
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None)
+        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level)
         response = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=4000 if should_finish else 260, system=system,
             messages=[{"role": "user", "content": user_payload}]
@@ -1269,7 +1340,7 @@ def report_violation(data: ViolationReport, payload=Depends(verify_token)):
     if new_count >= 3:
         try:
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-            system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"])
+            system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"], candidate["level"] or 1)
             force_msg = "Aday 3 kez sekme/ekran değişimi ihlali yaptı. Mülakatı şimdi sonlandır, mevcut bilgilere göre rapor ver. Düşük puan ver ve raporda ihlal nedeniyle sonlandırıldığını belirt. [MÜLAKATBİTTİ] etiketini kullan."
             response = client.messages.create(
                 model="claude-sonnet-4-6", max_tokens=4000, system=system,
