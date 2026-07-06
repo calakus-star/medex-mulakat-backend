@@ -1510,7 +1510,11 @@ def report_violation(data: ViolationReport, payload=Depends(verify_token)):
     db.commit()
     db.close()
 
-    if new_count >= 3:
+    # "prolonged_absence": aday sekmeye 2 dakikadan uzun süre dönmediyse, ihlal sayısı
+    # ne olursa olsun DİREKT sonlandır — bu ayrı ve daha ağır bir sinyal.
+    force_terminate = (new_count >= 3) or (data.violation_type == "prolonged_absence")
+
+    if force_terminate:
         try:
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
             system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"], candidate["level"] or 1, candidate["interview_language"] or "tr", candidate["report_language"] or "tr")
