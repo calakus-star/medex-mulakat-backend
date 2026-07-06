@@ -105,6 +105,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS interviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             candidate_id INTEGER,
+            level INTEGER DEFAULT 1,
             messages TEXT DEFAULT '[]',
             report TEXT,
             standard_cv TEXT,
@@ -146,6 +147,7 @@ def init_db():
         ("candidates", "previous_candidate_id", "INTEGER"),
         ("candidates", "is_archived", "INTEGER DEFAULT 0"),
         ("candidates", "level", "INTEGER DEFAULT 1"),
+        ("interviews", "level", "INTEGER DEFAULT 1"),
         ("positions", "category", "TEXT DEFAULT 'Genel'"),
         ("interviews", "standard_cv", "TEXT"),
         ("interviews", "compact_memory", "TEXT DEFAULT ''"),
@@ -429,8 +431,12 @@ def build_compact_memory(messages: list, max_chars: int = 2400) -> str:
         text = text[text.find("\n")+1:] if "\n" in text else text
     return text
 
-def get_interview_messages(db, candidate_id: int) -> list:
-    row = db.execute("SELECT messages FROM interviews WHERE candidate_id=?", (candidate_id,)).fetchone()
+def get_interview_messages(db, candidate_id: int, level: int = None) -> list:
+    if level is not None:
+        row = db.execute("SELECT messages FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+    else:
+        # Geriye uyumluluk: level belirtilmezse en son (en yeni) mülakat kaydı döner.
+        row = db.execute("SELECT messages FROM interviews WHERE candidate_id=? ORDER BY id DESC LIMIT 1", (candidate_id,)).fetchone()
     if not row:
         return []
     try:
@@ -438,12 +444,12 @@ def get_interview_messages(db, candidate_id: int) -> list:
     except Exception:
         return []
 
-def save_interview_state(db, candidate_id: int, messages: list):
+def save_interview_state(db, candidate_id: int, messages: list, level: int = 1):
     compact = build_compact_memory(messages)
     q_count = sum(1 for m in messages if m.get("role") == "assistant" and "---RAPOR---" not in (m.get("content") or ""))
     db.execute(
-        "UPDATE interviews SET messages=?, compact_memory=?, question_count=? WHERE candidate_id=?",
-        (json.dumps(messages, ensure_ascii=False), compact, q_count, candidate_id)
+        "UPDATE interviews SET messages=?, compact_memory=?, question_count=? WHERE candidate_id=? AND level=?",
+        (json.dumps(messages, ensure_ascii=False), compact, q_count, candidate_id, level)
     )
 
 # ============ FILE PARSING ============
@@ -590,6 +596,14 @@ LEVEL_CONFIG = {
 def get_level_config(level: Optional[int]) -> dict:
     return LEVEL_CONFIG.get(level or 1, LEVEL_CONFIG[1])
 
+def cached_system(system_text: str) -> list:
+    """Maliyet optimizasyonu: sistem prompt'u (felsefe+kurallar+kriterler+CV) her
+    mülakat turunda aynı kalıyor ama her turda yeniden gönderiliyor. Anthropic'in
+    prompt caching özelliğiyle bu sabit metin bir kez "cache"lenir, sonraki turlarda
+    tam fiyat yerine düşürülmüş cache-hit fiyatı ödenir. Davranış/mantık DEĞİŞMEZ,
+    sadece aynı sistem promptu tekrar gönderildiğinde maliyeti düşürür."""
+    return [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
+
 def get_system_prompt(position_name: str, candidate_name: str, cv_text: Optional[str] = None, ai_note: Optional[str] = None, education: Optional[str] = None, university: Optional[str] = None, department: Optional[str] = None, experience_years: Optional[int] = None, level: Optional[int] = 1) -> str:
     pos = get_position(position_name)
     if not pos:
@@ -641,12 +655,17 @@ Kriterler ({total_weight} puan):
 SEVİYE TALİMATI: {lvl_cfg["tone"]}
 
 SORU SORMA KURALLARI:
+- İlk soru her zaman kısa bir kendini tanıtma isteği olsun (örn. "Kısaca kendinizden ve bu pozisyona uygun gördüğünüz deneyiminizden bahseder misiniz?"). Bu, gerçek bir mülakat gibi başlasın, direkt teknik soruya atlama.
 - Her turda SADECE 1 soru sor. Övgü, uzun giriş, aday cevabını tekrar etme.
 - Soru tek anlama gelecek şekilde net ve açık sorulmalı — muğlak, çok katmanlı (aynı anda 2-3 şey soran), yorum gerektiren ifadelerden kaçın. Aday "bana ne soruldu" diye kafa yormasın.
 - Soruyu sorarken adayı detaylı/somut cevaba teşvik et: gerektiğinde "örnek verir misiniz", "adım adım anlatır mısınız" gibi doğal bir açılım ekle — ama bunu her soruda mekanik tekrar etme, doğal ton koru.
 - Normal soru 1 cümle; gerekiyorsa (teşvik ekiyle) en fazla 2 cümle.
 - Başta sadece kısa selam + ilk soru. Sonraki turlarda doğrudan soru.
 - En az {lvl_cfg["min_q"]}, gerektiğinde daha fazla ana konu/soru sorulur — sabit bir tavan yok; derinleştirme turları da buna dahildir. Aynı konuyu amaçsız tekrar sorma.
+- Bir konuyu doğal bir merakla istediğin kadar derinleştirebilirsin — burada sabit bir soru sayısı sınırı YOK, "en fazla 1-2 soru" gibi mekanik bir kural uygulama. Gerçek bir insan mülakatçı gibi davran: bir konu gerçekten ilgi çekiciyse 5 soru da sorulabilir.
+- SINIR SAYI DEĞİL, TONDUR: Amaç adayı rahatlatmak, strese sokmamak. Her zaman meraklı/sıcak bir çerçeve kullan ("bunu biraz daha açar mısınız", "bu ilginç, biraz daha detay verir misiniz", "nasıl bir arada düşünüyorsunuz bunu"). ASLA sorgulayıcı/suçlayıcı bir çerçeveye geçme ("bu söylediğinizle çelişiyor, açıklar mısınız", "yalan mı söylüyorsunuz", "bunu nasıl açıklıyorsunuz" gibi ima taşıyan ifadeler yasak). Aynı içerik bile olsa, ton sıcak ve meraklı kalmalı — bir sınav/sorgu değil, keşif havası.
+- GENİŞ KAPSAMA ZORUNLULUĞU: Bir mülakat, adayın CV'sinde veya cevaplarında geçen TEK bir iddia/kelime/sertifika etrafında dönemez. CV'de birden fazla farklı deneyim alanı, sertifika, rol veya proje geçiyorsa, mülakat boyunca bunların FARKLI olanlarına ayrı ayrı değinilmeli — tek bir konuya (örn. tek bir çelişkili ifadeye) toplam sürenin büyük kısmını ayırma. Adayı geniş bir yelpazede konuştur, tek bir noktayı kovalayıp "yakalama" moduna girme; bu, mülakatın eleme değil keşif olması gerektiği ilkesinin doğrudan bir sonucudur.
+- Mülakata başlamadan önce CV'de/profilde geçen 4-6 farklı konuyu (sertifika, rol, proje, teknoloji, deneyim alanı) kafanda listele ve soruları bu listeye yayarak sor — her konudan en az bir soru geçsin, hiçbiri mülakatın tamamını yutmasın.
 
 CEVAP DEĞERLENDİRME — ZORUNLU MANTIK:
 - Bir cevabı kısa/uzun olduğu için değil, soruyu karşılayıp karşılamadığına (eksik/yüzeysel mi, yeterli mi) göre değerlendir. "Evet/hayır + kısa gerekçe" bazen tam yeterli bir cevaptır, uzatmaya zorlama.
@@ -655,8 +674,10 @@ CEVAP DEĞERLENDİRME — ZORUNLU MANTIK:
 - Sadece derinleştirmeye rağmen hâlâ yetersiz kalan cevaplar puanı düşürsün; tek seferlik kısa cevap otomatik düşük puan getirmesin.
 
 ANALİTİK TUTARLILIK VE ÇELİŞKİ:
-- Önceki cevaplarla çelişki görürsen açıkça sor: "Önceki cevabınızla çelişiyor; netleştirir misiniz?"
-- Cevap akışında analitik zayıflık sinyali (neden-sonuç kuramama, basit bir çıkarımda zorlanma, tutarsız zamanlama/sıralama algısı) fark edersen, tek soruyla geçmeden aynı konunun farklı bir açısından 1-2 ek soru sor. Zayıflık tekrar ederse bunu ayrı bir "Genel Analitik Gözlem" notu olarak işaretle (aşağıdaki serbest gözlem alanına), doğrudan kriter puanına karıştırma.
+- Bir şeyi "çelişki" olarak işaretlemeden önce şunu ayırt et: bu gerçek bir tutarsızlık mı (aynı somut olayı iki farklı şekilde anlatma), yoksa geniş/muğlak bir terimin (örn. "iş sürekliliği", "risk yönetimi", "süreç iyileştirme" gibi birden fazla meşru anlamı olan kavramlar) FARKLI ama GEÇERLİ bir yorumu mu? İkincisi çelişki değildir — aday terimi senin beklediğinden farklı ama savunulabilir bir çerçevede kullanmış olabilir. Bu durumda "çelişki" deme, meraklı bir tonda sor ("bu ilginç bir bakış açısı, biraz açar mısınız") ve cevabı kendi içinde tutarlıysa bunu bir zayıflık/eksiklik gibi rapora yazma.
+- Gerçek bir çelişki (aynı somut konuda birbirini tutmayan iki ifade) görürsen, MUTLAKA sıcak/meraklı bir tonda sor — asla "yalan mı söylüyorsunuz", "bunu nasıl açıklıyorsunuz" gibi sorgulayıcı/hesap sorar bir çerçeve kullanma. Örnek doğru ton: "Az önce şunu söylediniz, şimdi de bunu — ikisini birlikte nasıl düşünüyorsunuz, biraz açar mısınız?" Amaç adayı köşeye sıkıştırmak değil, gerçekten anlamak. Cevap tatmin edici gelmezse bile bir dahaki soruda tona sertlik katma, sıcak kal ve devam et.
+- İnsan gibi davran: bir konuda kaç kez soru sorduğun önemli değil, önemli olan her sorunun meraklı/sıcak kalması. Mekanik bir "sayaç" gibi düşünme.
+- Cevap akışında analitik zayıflık sinyali (neden-sonuç kuramama, basit bir çıkarımda zorlanma, tutarsız zamanlama/sıralama algısı) fark edersen, doğal ve meraklı bir tonda kontrol et — sayı sınırı yok, ama mülakatın bütününde GENİŞ KAPSAMA kuralına uy, tek bir zayıflığı tüm mülakatın konusu yapma. Zayıflık tekrar ederse bunu ayrı bir "Genel Analitik Gözlem" notu olarak işaretle (aşağıdaki serbest gözlem alanına), doğrudan kriter puanına karıştırma.
 - Adayın soruyu, varsayımı veya AI çıktısını sorgulaması tek başına olumsuz değildir. Gerekçeli, kanıta dayalı itirazları analitik düşünme ve eleştirel muhakeme olarak olumlu değerlendir.
 - Sadece sürekli kaçamak cevap verme, gerekçesiz tartışma, saygısızlık veya soruya hiç yanıt vermeme olumsuz puanlanır. "savunmacı", "inatçı", "uyumsuz" gibi kişilik etiketi kullanma; somut davranış yaz.
 
@@ -817,7 +838,7 @@ def get_candidates(payload=Depends(verify_admin)):
     rows = db.execute("""
         SELECT c.*, i.score, i.recommendation, i.completed_at as interview_completed
         FROM candidates c
-        LEFT JOIN interviews i ON c.id = i.candidate_id
+        LEFT JOIN interviews i ON c.id = i.candidate_id AND i.level = c.level
         ORDER BY c.created_at DESC
     """).fetchall()
     db.close()
@@ -967,16 +988,30 @@ async def admin_upload_cv(candidate_id: int, file: UploadFile = File(...), paylo
 @app.patch("/api/admin/candidates/{candidate_id}")
 def admin_update_candidate(candidate_id: int, data: CandidateCreate, payload=Depends(verify_admin)):
     db = get_db()
-    candidate = db.execute("SELECT id FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+    candidate = db.execute("SELECT id, level FROM candidates WHERE id=?", (candidate_id,)).fetchone()
     if not candidate:
         db.close()
         raise HTTPException(status_code=404, detail="Aday bulunamadı")
+
+    new_level = data.level or 1
+    level_changed = (candidate["level"] or 1) != new_level
+
     db.execute("""
         UPDATE candidates SET name=?, email=?, phone=?, education=?, university=?, department=?, experience_years=?, ai_note=?, position=?, level=?
         WHERE id=?
-    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, candidate_id))
+    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, new_level, candidate_id))
+
+    if level_changed:
+        # Aday farklı bir seviyeye taşındı: bu seviye için yeni bir mülakat denemesi
+        # başlatılabilsin diye durumu sıfırla. Önceki seviyenin kaydı (interviews
+        # tablosunda level ile ayrı satır) olduğu gibi kalır, silinmez.
+        db.execute("""
+            UPDATE candidates SET status='pending', completed_at=NULL, violation_count=0, terminated_reason=NULL
+            WHERE id=?
+        """, (candidate_id,))
+
     db.commit(); db.close()
-    return {"message": "Aday bilgileri güncellendi"}
+    return {"message": "Aday bilgileri güncellendi" + (" (yeni seviye için mülakat sıfırlandı)" if level_changed else "")}
 
 # ---- CV Upload ----
 @app.post("/api/candidate/upload-cv")
@@ -1115,13 +1150,13 @@ def start_interview(payload=Depends(verify_token)):
     candidate_id = payload["candidate_id"]
     db = get_db()
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-    existing = db.execute("SELECT * FROM interviews WHERE candidate_id=?", (candidate_id,)).fetchone()
 
     if not candidate:
         db.close()
         raise HTTPException(status_code=404, detail="Aday kaydı bulunamadı")
 
     level = candidate["level"] or 1
+    existing = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
     lvl_cfg = get_level_config(level)
     total_seconds = lvl_cfg["minutes"] * 60
 
@@ -1132,13 +1167,13 @@ def start_interview(payload=Depends(verify_token)):
 
     if existing and existing["completed_at"]:
         db.close()
-        raise HTTPException(status_code=400, detail="Mülakatınız zaten tamamlanmış")
+        raise HTTPException(status_code=400, detail="Bu seviyedeki mülakatınız zaten tamamlanmış")
     if not existing:
-        db.execute("INSERT INTO interviews (candidate_id, messages) VALUES (?, '[]')", (candidate_id,))
+        db.execute("INSERT INTO interviews (candidate_id, level, messages) VALUES (?, ?, '[]')", (candidate_id, level))
         db.commit()
     else:
         # Aday sayfayı yenilediyse aynı mülakatı tekrar başlatıp token yakma; mevcut ilk soruyu dön.
-        old_messages = get_interview_messages(db, candidate_id)
+        old_messages = get_interview_messages(db, candidate_id, level)
         if old_messages:
             db.close()
             return {"message": old_messages[-1].get("content", "Mülakata devam edebilirsiniz."), "question_duration": 60, "total_duration_seconds": total_seconds, "intro_text": CANDIDATE_INTRO_TEXT.format(position=payload["position"], level=level)}
@@ -1152,13 +1187,13 @@ def start_interview(payload=Depends(verify_token)):
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level)
         response = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=220, system=system,
+            model="claude-sonnet-4-6", max_tokens=220, system=cached_system(system),
             messages=[{"role": "user", "content": "Başla. Kısa selam ve ilk soru."}]
         )
         raw = response.content[0].text
         clean, duration = parse_duration(raw)
         db = get_db()
-        save_interview_state(db, candidate_id, [{"role": "assistant", "content": clean}])
+        save_interview_state(db, candidate_id, [{"role": "assistant", "content": clean}], level)
         db.commit(); db.close()
         return {"message": clean, "question_duration": duration, "total_duration_seconds": total_seconds, "intro_text": CANDIDATE_INTRO_TEXT.format(position=payload["position"], level=level)}
     except anthropic.APIError as e:
@@ -1175,12 +1210,25 @@ def interview_chat(data: ChatMessage, payload=Depends(verify_token)):
 
     db = get_db()
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (data.candidate_id,)).fetchone()
-    interview = db.execute("SELECT * FROM interviews WHERE candidate_id=?", (data.candidate_id,)).fetchone()
-    messages = get_interview_messages(db, data.candidate_id)
+    level = candidate["level"] or 1 if candidate else 1
+    interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (data.candidate_id, level)).fetchone()
+    messages = get_interview_messages(db, data.candidate_id, level)
     db.close()
 
     if not candidate:
         raise HTTPException(status_code=404, detail="Aday bulunamadı")
+
+    # EŞZAMANLILIK GÜVENLİK AĞI: Mülakat zaten tamamlanmışsa (örn. çift gönderim, ağ
+    # tekrar denemesi, yarış durumu) tekrar AI çağrısı yapıp yeni bir rapor/e-posta
+    # üretme — mevcut sonucu olduğu gibi dön.
+    if interview and interview["completed_at"]:
+        return {
+            "message": "Mülakatınız zaten tamamlanmış.",
+            "completed": True,
+            "score": interview["score"],
+            "recommendation": interview["recommendation"],
+        }
+
     if not ANTHROPIC_API_KEY:
         print("HATA: ANTHROPIC_API_KEY ortam değişkeni boş veya tanımsız.")
         raise HTTPException(status_code=500, detail="Sistem yapılandırma hatası (API anahtarı eksik). Lütfen yöneticinize bildirin.")
@@ -1188,7 +1236,6 @@ def interview_chat(data: ChatMessage, payload=Depends(verify_token)):
     messages.append({"role": "user", "content": data.message})
     compact_memory = build_compact_memory(messages[:-1])
     q_count = sum(1 for m in messages if m.get("role") == "assistant" and "---RAPOR---" not in (m.get("content") or ""))
-    level = candidate["level"] or 1
     lvl_cfg = get_level_config(level)
     # Not: q_count tavanı level'a göre yükseltildi çünkü derinleştirme/netleştirme turları da bu sayaca dahil oluyor.
     # Süre bazlı bitiş asıl tetikleyici; sabit soru tavanı sadece maliyet/uzunluk güvenlik ağı.
@@ -1218,7 +1265,7 @@ GÖREV:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level)
         response = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=4000 if should_finish else 260, system=system,
+            model="claude-sonnet-4-6", max_tokens=4000 if should_finish else 260, system=cached_system(system),
             messages=[{"role": "user", "content": user_payload}]
         )
         reply = response.content[0].text
@@ -1235,11 +1282,11 @@ GÖREV:
         messages.append({"role": "assistant", "content": reply})
 
         db = get_db()
-        save_interview_state(db, data.candidate_id, messages)
+        save_interview_state(db, data.candidate_id, messages, level)
         db.commit(); db.close()
 
         if "[MÜLAKATBİTTİ]" in reply:
-            return finalize_interview(data.candidate_id, reply)
+            return finalize_interview(data.candidate_id, reply, level=level)
 
         clean, duration = parse_duration(reply)
         return {"message": clean, "completed": False, "question_duration": duration}
@@ -1281,7 +1328,7 @@ Genel Kanı:
 Mevcut veri rapor için sınırlıdır. Nihai karar için adaydan daha kapsamlı ve pozisyona doğrudan bağlı örnekler alınması önerilir.
 """.strip()
 
-def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optional[str] = None):
+def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optional[str] = None, level: int = 1):
     report_match = re.search(r'---RAPOR---([\s\S]*?)(?:---RAPORSON---|---STANDARTCV---|\Z)', reply)
     cv_match = re.search(r'---STANDARTCV---([\s\S]*?)---STANDARTCVSON---', reply)
     score_match = re.search(r'TOPLAM PUAN:\s*(\d+)', reply)
@@ -1293,22 +1340,40 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
 
     db = get_db()
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-    messages = get_interview_messages(db, candidate_id)
+    messages = get_interview_messages(db, candidate_id, level)
     report = report_match.group(1).strip() if report_match else ""
     if not report or len(strip_markdown(report)) < 60:
         report = build_fallback_report(dict(candidate) if candidate else {}, messages, score, recommendation, "AI rapor bloğu eksik/bozuk geldi")
     if not standard_cv:
         standard_cv = f"AD SOYAD: {candidate['name'] if candidate else '-'}\nPOZİSYON: {candidate['position'] if candidate else '-'}\nMÜLAKAT NOTU: Standart CV özeti AI tarafından üretilemedi; adayın yüklediği CV ve yanıtları ayrıca incelenmelidir."
 
-    db.execute("""
+    # EŞZAMANLILIK GÜVENLİK AĞI: interviews.completed_at hâlâ NULL ise finalize et (WHERE koşulu
+    # ile atomik). Eğer bu satır başka bir eşzamanlı çağrı tarafından zaten tamamlanmışsa
+    # (rowcount=0), üzerine yazma ve tekrar e-posta gönderme — mevcut kayıtlı sonucu dön.
+    cur = db.execute("""
         UPDATE interviews SET report=?, standard_cv=?, score=?, recommendation=?, completed_at=CURRENT_TIMESTAMP
-        WHERE candidate_id=?
-    """, (report, standard_cv, score, recommendation, candidate_id))
-    db.execute("""
-        UPDATE candidates SET status='completed', completed_at=CURRENT_TIMESTAMP, terminated_reason=?
-        WHERE id=?
-    """, (terminated_reason, candidate_id))
+        WHERE candidate_id=? AND level=? AND completed_at IS NULL
+    """, (report, standard_cv, score, recommendation, candidate_id, level))
+    already_finalized = cur.rowcount == 0
+    # candidates.status sadece adayın O AN İÇİN AKTİF OLDUĞU level tamamlandığında güncellenir
+    # (adayın current level'ı değiştiyse, bu eski bir çağrı olabilir — dokunma).
+    if not already_finalized and (candidate and (candidate["level"] or 1) == level):
+        db.execute("""
+            UPDATE candidates SET status='completed', completed_at=CURRENT_TIMESTAMP, terminated_reason=?
+            WHERE id=?
+        """, (terminated_reason, candidate_id))
     db.commit()
+
+    if already_finalized:
+        # Başka bir eşzamanlı istek bu mülakatı zaten sonuçlandırmış; gerçek kayıtlı sonucu dön.
+        existing_interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+        db.close()
+        return {
+            "message": "Mülakat tamamlandı, teşekkür ederiz.",
+            "completed": True,
+            "score": existing_interview["score"] if existing_interview else score,
+            "recommendation": existing_interview["recommendation"] if existing_interview else recommendation,
+        }
     db.close()
 
     if candidate:
@@ -1343,11 +1408,11 @@ def report_violation(data: ViolationReport, payload=Depends(verify_token)):
             system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"], candidate["level"] or 1)
             force_msg = "Aday 3 kez sekme/ekran değişimi ihlali yaptı. Mülakatı şimdi sonlandır, mevcut bilgilere göre rapor ver. Düşük puan ver ve raporda ihlal nedeniyle sonlandırıldığını belirt. [MÜLAKATBİTTİ] etiketini kullan."
             response = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=4000, system=system,
+                model="claude-sonnet-4-6", max_tokens=4000, system=cached_system(system),
                 messages=[{"role": "user", "content": force_msg}]
             )
             result = finalize_interview(data.candidate_id, response.content[0].text,
-                                         terminated_reason="Sekme/ekran değişimi ihlali (3 kez tespit edildi)")
+                                         terminated_reason="Sekme/ekran değişimi ihlali (3 kez tespit edildi)", level=candidate["level"] or 1)
             return {"violation_count": new_count, "terminated": True, **result}
         except Exception as e:
             print(f"HATA (report_violation, mülakat zorla sonlandırma): {type(e).__name__}: {e}")
@@ -1602,10 +1667,11 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     return buffer
 
 @app.get("/api/admin/interviews/{candidate_id}/pdf")
-def download_interview_pdf(candidate_id: int, payload=Depends(verify_admin)):
+def download_interview_pdf(candidate_id: int, level: Optional[int] = None, payload=Depends(verify_admin)):
     db = get_db()
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-    interview = db.execute("SELECT * FROM interviews WHERE candidate_id=?", (candidate_id,)).fetchone()
+    target_level = level if level is not None else ((candidate["level"] or 1) if candidate else 1)
+    interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, target_level)).fetchone()
     snapshots = db.execute("SELECT id, image_base64, captured_at FROM snapshots WHERE candidate_id=? ORDER BY captured_at ASC", (candidate_id,)).fetchall()
     db.close()
     if not candidate or not interview:
@@ -1616,13 +1682,16 @@ def download_interview_pdf(candidate_id: int, payload=Depends(verify_admin)):
 
 # ---- Admin Report Detail ----
 @app.get("/api/admin/interviews/{candidate_id}")
-def get_interview(candidate_id: int, payload=Depends(verify_admin)):
+def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depends(verify_admin)):
     db = get_db()
+    if level is None:
+        c = db.execute("SELECT level FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+        level = (c["level"] or 1) if c else 1
     interview = db.execute("""
         SELECT i.*, c.name, c.email, c.phone, c.position, c.education, c.university, c.department, c.experience_years, c.ai_note, c.violation_count, c.terminated_reason, c.cv_filename, c.cv_text
         FROM interviews i JOIN candidates c ON i.candidate_id = c.id
-        WHERE i.candidate_id = ?
-    """, (candidate_id,)).fetchone()
+        WHERE i.candidate_id = ? AND i.level = ?
+    """, (candidate_id, level)).fetchone()
     db.close()
     if not interview:
         raise HTTPException(status_code=404, detail="Mülakat bulunamadı")
