@@ -1886,3 +1886,32 @@ def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depend
     if not interview:
         raise HTTPException(status_code=404, detail="Mülakat bulunamadı")
     return dict(interview)
+
+# ============ MEDEX V2 - OPENAI REALTIME L2 FIRST TEST ============
+# Bu endpoint mevcut v1 interview akışını bozmaz. Sadece /mulakat/sesli ekranının
+# tarayıcıda OpenAI Realtime WebRTC bağlantısı kurabilmesi için kısa ömürlü
+# client_secret üretir. OPENAI_API_KEY asla frontend'e gönderilmez.
+from ai.realtime_openai import create_realtime_session, RealtimeConfigError
+
+class RealtimeSessionRequest(BaseModel):
+    candidate_id: Optional[int] = None
+    candidate_name: str = "Aday"
+    position: str = "Genel Pozisyon"
+    level: int = 2
+    language: str = "tr"
+
+@app.post("/api/realtime/session")
+async def api_realtime_session(payload: RealtimeSessionRequest, request: Request):
+    safety_identifier = f"medex-candidate-{payload.candidate_id or 'anonymous'}"
+    try:
+        return await create_realtime_session(
+            candidate_name=payload.candidate_name,
+            position=payload.position,
+            level=payload.level,
+            language=payload.language,
+            safety_identifier=safety_identifier,
+        )
+    except RealtimeConfigError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Realtime session hatası: {exc}")
