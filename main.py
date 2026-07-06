@@ -79,8 +79,10 @@ resend.api_key = RESEND_API_KEY
 security = HTTPBearer()
 
 # ============ DB ============
+DB_PATH = os.getenv("DB_PATH", "medex_mulakat.db")  # Railway'de kalıcı Volume'a işaret etsin (örn. /data/medex_mulakat.db)
+
 def get_db():
-    conn = sqlite3.connect("medex_mulakat.db", check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
