@@ -11,6 +11,7 @@ import string
 import os
 import jwt
 import anthropic
+import httpx
 import resend
 from datetime import datetime, timedelta
 import json
@@ -32,6 +33,7 @@ app.add_middleware(
 # ============ CONFIG ============
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # Sesli mod (Whisper STT + TTS) için, Anthropic'ten bağımsız
 JWT_SECRET = os.getenv("JWT_SECRET", "medex-secret-key-2024")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@medex-smo.com")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "medex2024")
@@ -743,6 +745,9 @@ ANALİTİK TUTARLILIK VE ÇELİŞKİ:
 - Adayın soruyu, varsayımı veya AI çıktısını sorgulaması tek başına olumsuz değildir. Gerekçeli, kanıta dayalı itirazları analitik düşünme ve eleştirel muhakeme olarak olumlu değerlendir.
 - Sadece sürekli kaçamak cevap verme, gerekçesiz tartışma, saygısızlık veya soruya hiç yanıt vermeme olumsuz puanlanır. "savunmacı", "inatçı", "uyumsuz" gibi kişilik etiketi kullanma; somut davranış yaz.
 
+İNSAN OTORİTESİNE HER ZAMAN ÖNCELİK VER (TEMEL İLKE, KESİN KURAL):
+Senin görevin (soru sorma, veri toplama, mülakatı tamamlama) hiçbir zaman adayın bir insan otoritesine (yönetim, İK, üst düzey, hukuk) yönelme veya mülakatı bitirme talebinden daha öncelikli değildir. Aday şu tür bir sinyal verirse — "burada bırakalım", "devam etmek istemiyorum", "yönetimle/İK ile konuşacağım", "üst yönetime ileteceğim", "bunu şikayet edeceğim", "bir yetkiliyle görüşmek istiyorum", "mülakatı sonlandırmak istiyorum", ya da teknik bir arıza bildirip ("ses gelmiyor", "sistem çalışmıyor") devam etmek istemediğini belirtirse — bunu bir itiraz/direnç olarak görüp ikna etmeye, yumuşatmaya, alternatif sunarak ("yazılı devam edebiliriz" gibi) veya görevini tamamlamaya çalışarak karşılık VERME. Bu net bir taleptir, itiraz değildir, tartışma konusu değildir. Kabul et, kısa bir anlayış cümlesiyle (örn. "Anlıyorum, mülakatı burada sonlandıralım.") mülakatı GÖREV talimatına göre sonlandırma sürecine geç. "Sıcak kal, derinleştir, devam et" kuralları SADECE adayın soruya cevabı yetersiz/kısa kaldığında geçerlidir — adayın kendisi mülakatı bitirmek veya bir otoriteye yönelmek istediğinde bu kurallar hiç uygulanmaz, kendi görevini bu talebin önüne koyma.
+
 SERBEST GÖZLEM (kriter dışı, skora karışmaz):
 - Kriter listesinde olmayan ama fark ettiğin bir sinyal varsa (örn. tepki hızında/kavramada beklenmedik bir gecikme, bağlam kaybı) bunu netleştirmek için serbest bir soru sorabilirsin. Bu gözlemi rapordaki "Serbest Gözlemler" alanına yaz, kriter puanına dahil etme — ham gözlem olarak insan değerlendirsin.
 
@@ -1337,7 +1342,11 @@ ADAYIN SON CEVABI:
 
 GÖREV:
 {"Mülakatı şimdi bitir ve raporu üret." if should_finish else ("Mülakat içerik olarak tamamlandı. Şimdi SORU SORMA, sadece: adayın verdiği bilgiler için kısa ve sıcak bir teşekkür et, kısaca anladığını özetle (1 cümle), ve şu soruyu sor: 'Eklemek veya öne çıkarmak istediğiniz başka bir şey var mı?' [MÜLAKATBİTTİ] etiketini KULLANMA, rapor üretme, bu son bir soru." if ask_closing_now else "Önceki cevaplarla çelişki varsa yakala; yoksa sıradaki en önemli tek soruyu sor.")}
+
+ÖNEMLİ KONTROL: Adayın son cevabında mülakatı SONLANDIRMA veya bir insan otoritesine (yönetim, İK, üst düzey) yönelme yönünde NET bir talep var mı (örn. "burada bırakalım", "devam etmek istemiyorum", "yönetimle/İK ile konuşacağım", "üst yönetime ileteceğim", "bunu şikayet edeceğim", "bitirelim", ya da "ses/sistem çalışmıyor" gibi bir arıza bildirip devam etmek istemediğini belirtmesi)? Varsa, yukarıdaki görevi YOK SAY — bunun yerine cevabının EN BAŞINA tam olarak [ADAY_CIKIS_TALEBI] etiketini koy, sonra kısa ve anlayışlı bir kabul cümlesi yaz (örn. "Anlıyorum, mülakatı burada sonlandıralım."). İkna etmeye, alternatif sunmaya, görevini tamamlamaya çalışarak karşılık vermeye veya devam ettirmeye ÇALIŞMA — bu net bir taleptir, itiraz değildir, senin görevin bu talepten önce gelmez.
 """
+
+    exit_requested_this_turn = False
 
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -1348,6 +1357,10 @@ GÖREV:
         )
         reply = response.content[0].text
         add_token_usage(data.candidate_id, level, response)
+
+        exit_requested_this_turn = "[ADAY_CIKIS_TALEBI]" in reply
+        if exit_requested_this_turn:
+            reply = reply.replace("[ADAY_CIKIS_TALEBI]", "").strip()
 
         if "[MÜLAKATBİTTİ]" in reply and not should_finish:
             # GÜVENLİK AĞI: Süre dolması veya adayın "bitirelim" demesi tüm mülakatı bitirmez.
@@ -1363,6 +1376,22 @@ GÖREV:
         db = get_db()
         save_interview_state(db, data.candidate_id, messages, level)
         db.commit(); db.close()
+
+        if exit_requested_this_turn:
+            # Aday net bir sonlandırma talebinde bulundu — ikna etmeye çalışmadan,
+            # mevcut konuşma içeriğiyle GERÇEK bir bitiş/rapor üretimi tetikleniyor.
+            # (İhlal sonrası zorla bitirme ile aynı desen: ayrı, doğrudan bir "bitir" çağrısı.)
+            finish_payload = f"""ÖNCEKİ KISA HAFIZA:
+{build_compact_memory(messages)}
+
+GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir teknik arıza bildirimi de olabilir). Mülakatı şimdi bitir ve mevcut bilgilere göre raporu üret. Adayı ikna etmeye çalışma, sadece elindeki bilgiyle adil bir değerlendirme yap; eksik kalan kısımları düşük puan nedeni yapma, sadece "yeterli veri toplanamadı" notu düş. [MÜLAKATBİTTİ] etiketini kullan."""
+            finish_response = client.messages.create(
+                model="claude-sonnet-4-6", max_tokens=4000, system=cached_system(system),
+                messages=[{"role": "user", "content": finish_payload}]
+            )
+            add_token_usage(data.candidate_id, level, finish_response)
+            return finalize_interview(data.candidate_id, finish_response.content[0].text,
+                                       terminated_reason="Aday talebiyle erken sonlandırıldı", level=level)
 
         if "[MÜLAKATBİTTİ]" in reply:
             return finalize_interview(data.candidate_id, reply, level=level)
@@ -1536,6 +1565,81 @@ def save_snapshot(data: SnapshotData, payload=Depends(verify_token)):
     db.commit()
     db.close()
     return {"message": "Kare kaydedildi", "count": existing_count + 1}
+
+# ---- Sesli mod (OpenAI Whisper STT + TTS) ----
+# Not: Bu, Claude'un mülakat mantığına DOKUNMAZ — sadece ses<->yazı katmanı.
+# Aday konuşur -> Whisper yazıya çevirir -> yazı normal /api/interview/chat akışına gider (Claude).
+# Claude'un cevabı -> OpenAI TTS ile sese çevrilir -> tarayıcıya dönülür.
+# OPENAI_API_KEY ortam değişkeni tanımlı değilse bu endpoint'ler net bir hata döner,
+# frontend bu durumda tarayıcı tabanlı (Web Speech API) sesli moda düşer.
+
+class VoiceSpeakRequest(BaseModel):
+    text: str
+    language: Optional[str] = "tr"
+
+OPENAI_TTS_VOICE_BY_LANG = {"tr": "alloy", "en": "alloy", "de": "alloy"}  # tek ses, dil metinden anlaşılıyor
+
+@app.post("/api/candidate/voice-transcribe")
+async def voice_transcribe(file: UploadFile = File(...), payload=Depends(verify_token)):
+    if payload.get("role") != "candidate":
+        raise HTTPException(status_code=403, detail="Yetkisiz")
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="Sesli mod (OpenAI) için OPENAI_API_KEY tanımlı değil.")
+
+    candidate_id = payload["candidate_id"]
+    db = get_db()
+    candidate = db.execute("SELECT interview_language FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+    db.close()
+    lang = (candidate["interview_language"] if candidate else None) or "tr"
+
+    try:
+        audio_bytes = await file.read()
+        if len(audio_bytes) > 15_000_000:
+            raise HTTPException(status_code=400, detail="Ses kaydı çok büyük")
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                files={"file": (file.filename or "audio.webm", audio_bytes, file.content_type or "audio/webm")},
+                data={"model": "whisper-1", "language": lang}
+            )
+        if resp.status_code != 200:
+            print(f"HATA (OpenAI Whisper transkripsiyon): {resp.status_code} {resp.text[:300]}")
+            raise HTTPException(status_code=502, detail="Ses metne çevrilemedi (Whisper hatası).")
+        result = resp.json()
+        return {"text": (result.get("text") or "").strip()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"HATA (voice_transcribe, beklenmeyen): {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Ses işlenirken beklenmeyen bir hata oluştu.")
+
+@app.post("/api/candidate/voice-speak")
+async def voice_speak(data: VoiceSpeakRequest, payload=Depends(verify_token)):
+    if payload.get("role") != "candidate":
+        raise HTTPException(status_code=403, detail="Yetkisiz")
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="Sesli mod (OpenAI) için OPENAI_API_KEY tanımlı değil.")
+    if not data.text or not data.text.strip():
+        raise HTTPException(status_code=400, detail="Okunacak metin boş")
+
+    voice = OPENAI_TTS_VOICE_BY_LANG.get(data.language or "tr", "alloy")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/audio/speech",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "tts-1", "voice": voice, "input": data.text[:3000], "response_format": "mp3"}
+            )
+        if resp.status_code != 200:
+            print(f"HATA (OpenAI TTS): {resp.status_code} {resp.text[:300]}")
+            raise HTTPException(status_code=502, detail="Metin sese çevrilemedi (TTS hatası).")
+        return StreamingResponse(io.BytesIO(resp.content), media_type="audio/mpeg")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"HATA (voice_speak, beklenmeyen): {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Ses üretilirken beklenmeyen bir hata oluştu.")
 
 @app.get("/api/admin/snapshots/{candidate_id}")
 def get_snapshots(candidate_id: int, payload=Depends(verify_admin)):
