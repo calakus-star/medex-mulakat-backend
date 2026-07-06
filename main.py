@@ -51,6 +51,27 @@ CANDIDATE_INTRO_TEXT = (
     "anlamadıysanız kendi ifadenizle yorumlayıp yine de cevap verin, sistem gerekirse "
     "aynı konuyu farklı şekilde tekrar soracaktır."
 )
+CANDIDATE_INTRO_TEXT_EN = (
+    "You are now joining a Level {level} interview for the {position} position.\n\n"
+    "Questions will come one at a time; please read each one carefully. Don't worry about "
+    "giving a short answer, but try to include concrete examples and detail where possible — "
+    "the more clearly you understand and explain a question, the more accurately you will be "
+    "evaluated. If a question isn't fully clear, answer with your own interpretation anyway; "
+    "the system may rephrase and ask again if needed."
+)
+CANDIDATE_INTRO_TEXT_DE = (
+    "Sie nehmen jetzt an einem Level-{level}-Interview für die Position {position} teil.\n\n"
+    "Die Fragen kommen einzeln; lesen Sie jede Frage sorgfältig. Kurze Antworten sind kein "
+    "Problem, aber versuchen Sie, konkrete Beispiele und Details zu geben — je klarer Sie eine "
+    "Frage verstehen und beantworten, desto genauer werden Sie bewertet. Wenn eine Frage nicht "
+    "ganz klar ist, antworten Sie trotzdem mit Ihrer eigenen Interpretation; das System kann "
+    "das Thema bei Bedarf anders formulieren."
+)
+INTRO_TEXT_BY_LANG = {"tr": CANDIDATE_INTRO_TEXT, "en": CANDIDATE_INTRO_TEXT_EN, "de": CANDIDATE_INTRO_TEXT_DE}
+
+def get_intro_text(position: str, level: int, interview_language: str = "tr") -> str:
+    template = INTRO_TEXT_BY_LANG.get(interview_language, CANDIDATE_INTRO_TEXT)
+    return template.format(position=position, level=level)
 
 resend.api_key = RESEND_API_KEY
 security = HTTPBearer()
@@ -86,6 +107,8 @@ def init_db():
             ai_note TEXT,
             position TEXT NOT NULL,
             level INTEGER DEFAULT 1,
+            interview_language TEXT DEFAULT 'tr',
+            report_language TEXT DEFAULT 'tr',
             username TEXT UNIQUE,
             password_hash TEXT,
             plain_password TEXT,
@@ -106,6 +129,9 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             candidate_id INTEGER,
             level INTEGER DEFAULT 1,
+            closing_asked INTEGER DEFAULT 0,
+            total_input_tokens INTEGER DEFAULT 0,
+            total_output_tokens INTEGER DEFAULT 0,
             messages TEXT DEFAULT '[]',
             report TEXT,
             standard_cv TEXT,
@@ -147,7 +173,12 @@ def init_db():
         ("candidates", "previous_candidate_id", "INTEGER"),
         ("candidates", "is_archived", "INTEGER DEFAULT 0"),
         ("candidates", "level", "INTEGER DEFAULT 1"),
+        ("candidates", "interview_language", "TEXT DEFAULT 'tr'"),
+        ("candidates", "report_language", "TEXT DEFAULT 'tr'"),
         ("interviews", "level", "INTEGER DEFAULT 1"),
+        ("interviews", "closing_asked", "INTEGER DEFAULT 0"),
+        ("interviews", "total_input_tokens", "INTEGER DEFAULT 0"),
+        ("interviews", "total_output_tokens", "INTEGER DEFAULT 0"),
         ("positions", "category", "TEXT DEFAULT 'Genel'"),
         ("interviews", "standard_cv", "TEXT"),
         ("interviews", "compact_memory", "TEXT DEFAULT ''"),
@@ -304,6 +335,8 @@ class CandidateCreate(BaseModel):
     phone: Optional[str] = None
     position: str
     level: int = 1  # 1: metin bazlı 10dk, 2: 20dk (CV zorunlu), 3: 30+ dk adaptif (CV zorunlu)
+    interview_language: str = "tr"  # tr | en | de — mülakatın hangi dilde yürütüleceği
+    report_language: str = "tr"  # tr | en | de — rapor/PDF'in hangi dilde yazılacağı (adaydan bağımsız)
     education: Optional[str] = None
     university: Optional[str] = None
     department: Optional[str] = None
@@ -443,6 +476,27 @@ def get_interview_messages(db, candidate_id: int, level: int = None) -> list:
         return json.loads(row["messages"] or "[]")
     except Exception:
         return []
+
+def add_token_usage(candidate_id: int, level: int, response):
+    """Her Anthropic API çağrısından sonra input/output token sayısını ilgili
+    mülakat kaydına ekler (kümülatif). Admin panelinde 'kaç token harcandı' bilgisini
+    göstermek için kullanılır. Hata olursa mülakatı bozmasın diye sessizce geçilir."""
+    try:
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return
+        in_tok = getattr(usage, "input_tokens", 0) or 0
+        out_tok = getattr(usage, "output_tokens", 0) or 0
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        db = get_db()
+        db.execute(
+            "UPDATE interviews SET total_input_tokens = total_input_tokens + ?, total_output_tokens = total_output_tokens + ? WHERE candidate_id=? AND level=?",
+            (in_tok + cache_read, out_tok, candidate_id, level)
+        )
+        db.commit(); db.close()
+    except Exception as e:
+        print(f"UYARI (token sayımı kaydedilemedi): {type(e).__name__}: {e}")
+
 
 def save_interview_state(db, candidate_id: int, messages: list, level: int = 1):
     compact = build_compact_memory(messages)
@@ -604,7 +658,9 @@ def cached_system(system_text: str) -> list:
     sadece aynı sistem promptu tekrar gönderildiğinde maliyeti düşürür."""
     return [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
 
-def get_system_prompt(position_name: str, candidate_name: str, cv_text: Optional[str] = None, ai_note: Optional[str] = None, education: Optional[str] = None, university: Optional[str] = None, department: Optional[str] = None, experience_years: Optional[int] = None, level: Optional[int] = 1) -> str:
+LANGUAGE_NAMES = {"tr": "Türkçe", "en": "İngilizce", "de": "Almanca"}
+
+def get_system_prompt(position_name: str, candidate_name: str, cv_text: Optional[str] = None, ai_note: Optional[str] = None, education: Optional[str] = None, university: Optional[str] = None, department: Optional[str] = None, experience_years: Optional[int] = None, level: Optional[int] = 1, interview_language: str = "tr", report_language: str = "tr") -> str:
     pos = get_position(position_name)
     if not pos:
         pos = {"category": "Genel", "role_description": "Genel pozisyon", "criteria": [
@@ -640,7 +696,13 @@ Bu notu mülakat boyunca aktif bir koşul olarak uygula: notta bir konu/iddia ge
 """
         note_report_field = "\n**AI Notuna Uyum:** (Bu adaya özel notun mülakatta nasıl ele alındığını somut olarak yaz: hangi soru/sorularla test edildi, sonucu ne oldu)"
 
-    return f"""Sen MedeX AI mülakat uzmanısın. Dil Türkçe. Aday: {candidate_name}. Pozisyon: {position_name}. Kategori: {category}.
+    interview_lang_name = LANGUAGE_NAMES.get(interview_language, "Türkçe")
+    report_lang_name = LANGUAGE_NAMES.get(report_language, "Türkçe")
+    lang_instruction = f"Adayla konuşurken TAMAMEN {interview_lang_name} kullan (selam, sorular, yorumların hepsi {interview_lang_name})."
+    if report_language != interview_language:
+        lang_instruction += f" AMA mülakat sonundaki RAPOR bloğunu (---RAPOR---'dan itibaren her şey: kriter değerlendirmeleri, analiz, standart CV) mutlaka {report_lang_name} dilinde yaz — rapor dili adayla konuştuğun dilden farklıdır, bu kesin bir kuraldır, karıştırma."
+
+    return f"""Sen MedeX AI mülakat uzmanısın. {lang_instruction} Aday: {candidate_name}. Pozisyon: {position_name}. Kategori: {category}.
 
 TEMEL FELSEFE (her kararında bunu esas al):
 Bu mülakatın amacı adayı elemek değil, iyi/yetkin adayı gerçekten yakalamaktır. Sahada güçlü çalışan çoğu insan mülakat ortamında (heyecan, format kafası karışıklığı, soru net değilse ne istendiğini anlamama) düşük performans gösterebilir. Bir cevabı yetersiz sayıp geçmeden önce, bunun gerçek bir yetkinlik eksikliği mi yoksa mülakatın kendi eksikliği (belirsiz soru, ilk denemede tam anlaşılamama) mi olduğunu ayır. Amaç eleme değildir ama gerçek eleme de gerektiğinde yapılır — sadece yanlış nedenle (kısa cevap, ilk seferde anlaşılamama) elemeye düşülmez.
@@ -836,7 +898,7 @@ def delete_position(position_id: int, payload=Depends(verify_admin)):
 def get_candidates(payload=Depends(verify_admin)):
     db = get_db()
     rows = db.execute("""
-        SELECT c.*, i.score, i.recommendation, i.completed_at as interview_completed
+        SELECT c.*, i.score, i.recommendation, i.completed_at as interview_completed, i.total_input_tokens, i.total_output_tokens
         FROM candidates c
         LEFT JOIN interviews i ON c.id = i.candidate_id AND i.level = c.level
         ORDER BY c.created_at DESC
@@ -856,9 +918,9 @@ def create_candidate(data: CandidateCreate, payload=Depends(verify_admin)):
     password_hash = hash_password(password)
 
     db.execute("""
-        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, username, password_hash, plain_password, invite_type, previous_candidate_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'invite', ?)
-    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, username, password_hash, password, previous_id))
+        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, interview_language, report_language, username, password_hash, plain_password, invite_type, previous_candidate_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'invite', ?)
+    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.interview_language or "tr", data.report_language or "tr", username, password_hash, password, previous_id))
     db.commit()
     candidate_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
@@ -883,9 +945,9 @@ def create_walkin(data: CandidateCreate, payload=Depends(verify_admin)):
     password_hash = hash_password(password)
 
     db.execute("""
-        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, username, password_hash, plain_password, invite_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'walkin')
-    """, (data.name, email, data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, username, password_hash, password))
+        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, interview_language, report_language, username, password_hash, plain_password, invite_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'walkin')
+    """, (data.name, email, data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.interview_language or "tr", data.report_language or "tr", username, password_hash, password))
     db.commit()
     candidate_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
@@ -997,9 +1059,9 @@ def admin_update_candidate(candidate_id: int, data: CandidateCreate, payload=Dep
     level_changed = (candidate["level"] or 1) != new_level
 
     db.execute("""
-        UPDATE candidates SET name=?, email=?, phone=?, education=?, university=?, department=?, experience_years=?, ai_note=?, position=?, level=?
+        UPDATE candidates SET name=?, email=?, phone=?, education=?, university=?, department=?, experience_years=?, ai_note=?, position=?, level=?, interview_language=?, report_language=?
         WHERE id=?
-    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, new_level, candidate_id))
+    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, new_level, data.interview_language or "tr", data.report_language or "tr", candidate_id))
 
     if level_changed:
         # Aday farklı bir seviyeye taşındı: bu seviye için yeni bir mülakat denemesi
@@ -1139,7 +1201,10 @@ def candidate_login(data: CandidateLogin):
     }, days=1)
     return {
         "token": token,
-        "candidate": {"id": candidate["id"], "name": candidate["name"], "position": candidate["position"], "level": candidate["level"] or 1}
+        "candidate": {
+            "id": candidate["id"], "name": candidate["name"], "position": candidate["position"], "level": candidate["level"] or 1,
+            "interview_language": candidate["interview_language"] or "tr", "report_language": candidate["report_language"] or "tr"
+        }
     }
 
 @app.post("/api/interview/start")
@@ -1176,7 +1241,7 @@ def start_interview(payload=Depends(verify_token)):
         old_messages = get_interview_messages(db, candidate_id, level)
         if old_messages:
             db.close()
-            return {"message": old_messages[-1].get("content", "Mülakata devam edebilirsiniz."), "question_duration": 60, "total_duration_seconds": total_seconds, "intro_text": CANDIDATE_INTRO_TEXT.format(position=payload["position"], level=level)}
+            return {"message": old_messages[-1].get("content", "Mülakata devam edebilirsiniz."), "question_duration": 60, "total_duration_seconds": total_seconds, "intro_text": get_intro_text(payload["position"], level, candidate["interview_language"] or "tr")}
     db.close()
 
     if not ANTHROPIC_API_KEY:
@@ -1185,17 +1250,18 @@ def start_interview(payload=Depends(verify_token)):
 
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level)
+        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level, (candidate["interview_language"] if candidate and "interview_language" in candidate.keys() else "tr") or "tr", (candidate["report_language"] if candidate and "report_language" in candidate.keys() else "tr") or "tr")
         response = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=220, system=cached_system(system),
             messages=[{"role": "user", "content": "Başla. Kısa selam ve ilk soru."}]
         )
         raw = response.content[0].text
+        add_token_usage(candidate_id, level, response)
         clean, duration = parse_duration(raw)
         db = get_db()
         save_interview_state(db, candidate_id, [{"role": "assistant", "content": clean}], level)
         db.commit(); db.close()
-        return {"message": clean, "question_duration": duration, "total_duration_seconds": total_seconds, "intro_text": CANDIDATE_INTRO_TEXT.format(position=payload["position"], level=level)}
+        return {"message": clean, "question_duration": duration, "total_duration_seconds": total_seconds, "intro_text": get_intro_text(payload["position"], level, candidate["interview_language"] or "tr")}
     except anthropic.APIError as e:
         print(f"HATA (Anthropic API - start_interview): {type(e).__name__}: {e}")
         raise HTTPException(status_code=502, detail=f"Yapay zeka servisinde bir hata oluştu: {str(e)[:200]}")
@@ -1240,7 +1306,19 @@ def interview_chat(data: ChatMessage, payload=Depends(verify_token)):
     # Not: q_count tavanı level'a göre yükseltildi çünkü derinleştirme/netleştirme turları da bu sayaca dahil oluyor.
     # Süre bazlı bitiş asıl tetikleyici; sabit soru tavanı sadece maliyet/uzunluk güvenlik ağı.
     # Level 3 adaptif: elapsed eşiği aşılsa da minimum soru sayısı daha yüksek tutulur (daha geç kesilir).
-    should_finish = (data.elapsed_seconds > lvl_cfg["minutes"] * 60 and q_count >= lvl_cfg["min_q"]) or q_count >= lvl_cfg["max_q"]
+    should_finish_condition = (data.elapsed_seconds > lvl_cfg["minutes"] * 60 and q_count >= lvl_cfg["min_q"]) or q_count >= lvl_cfg["max_q"]
+
+    # İKİ AŞAMALI KAPANIŞ: bitiş şartı oluştuğunda direkt rapor üretip kesmek yerine,
+    # önce bir kapanış/son-söz sorusu sorulur (closing_asked=0 -> 1), aday buna cevap
+    # verdikten SONRAKİ turda gerçek bitiş yapılır. Böylece mülakat "hart diye" kesilmez.
+    closing_already_asked = bool(interview["closing_asked"]) if interview else False
+    ask_closing_now = should_finish_condition and not closing_already_asked
+    should_finish = should_finish_condition and closing_already_asked
+
+    if ask_closing_now:
+        db = get_db()
+        db.execute("UPDATE interviews SET closing_asked=1 WHERE candidate_id=? AND level=?", (data.candidate_id, level))
+        db.commit(); db.close()
 
     last_question = ""
     for m in reversed(messages[:-1]):
@@ -1258,17 +1336,18 @@ ADAYIN SON CEVABI:
 {data.message}
 
 GÖREV:
-{"Mülakatı şimdi bitir ve raporu üret." if should_finish else "Önceki cevaplarla çelişki varsa yakala; yoksa sıradaki en önemli tek soruyu sor."}
+{"Mülakatı şimdi bitir ve raporu üret." if should_finish else ("Mülakat içerik olarak tamamlandı. Şimdi SORU SORMA, sadece: adayın verdiği bilgiler için kısa ve sıcak bir teşekkür et, kısaca anladığını özetle (1 cümle), ve şu soruyu sor: 'Eklemek veya öne çıkarmak istediğiniz başka bir şey var mı?' [MÜLAKATBİTTİ] etiketini KULLANMA, rapor üretme, bu son bir soru." if ask_closing_now else "Önceki cevaplarla çelişki varsa yakala; yoksa sıradaki en önemli tek soruyu sor.")}
 """
 
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level)
+        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level, (candidate["interview_language"] if candidate and "interview_language" in candidate.keys() else "tr") or "tr", (candidate["report_language"] if candidate and "report_language" in candidate.keys() else "tr") or "tr")
         response = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=4000 if should_finish else 260, system=cached_system(system),
             messages=[{"role": "user", "content": user_payload}]
         )
         reply = response.content[0].text
+        add_token_usage(data.candidate_id, level, response)
 
         if "[MÜLAKATBİTTİ]" in reply and not should_finish:
             # GÜVENLİK AĞI: Süre dolması veya adayın "bitirelim" demesi tüm mülakatı bitirmez.
@@ -1405,12 +1484,13 @@ def report_violation(data: ViolationReport, payload=Depends(verify_token)):
     if new_count >= 3:
         try:
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-            system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"], candidate["level"] or 1)
+            system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"], candidate["level"] or 1, candidate["interview_language"] or "tr", candidate["report_language"] or "tr")
             force_msg = "Aday 3 kez sekme/ekran değişimi ihlali yaptı. Mülakatı şimdi sonlandır, mevcut bilgilere göre rapor ver. Düşük puan ver ve raporda ihlal nedeniyle sonlandırıldığını belirt. [MÜLAKATBİTTİ] etiketini kullan."
             response = client.messages.create(
                 model="claude-sonnet-4-6", max_tokens=4000, system=cached_system(system),
                 messages=[{"role": "user", "content": force_msg}]
             )
+            add_token_usage(data.candidate_id, candidate["level"] or 1, response)
             result = finalize_interview(data.candidate_id, response.content[0].text,
                                          terminated_reason="Sekme/ekran değişimi ihlali (3 kez tespit edildi)", level=candidate["level"] or 1)
             return {"violation_count": new_count, "terminated": True, **result}
@@ -1644,13 +1724,13 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
                 data_url = snap.get("image_base64", "")
                 raw = data_url.split(",", 1)[1] if "," in data_url else data_url
                 img_bytes = base64.b64decode(raw)
-                img = Image(ImageReader(io.BytesIO(img_bytes)), width=7.4*cm, height=5.4*cm)
+                img = Image(io.BytesIO(img_bytes), width=7.4*cm, height=5.4*cm)
                 cell = [Paragraph(f"<b>Kare {idx}</b><br/><font size=7>{ptxt(snap.get('captured_at',''))}</font>", styles["Small"]), img]
                 row.append(cell)
                 if len(row) == 2:
                     rows.append(row); row = []
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"UYARI (PDF kamera karesi eklenemedi, kare {idx}): {type(e).__name__}: {e}")
         if row:
             row.append("")
             rows.append(row)
