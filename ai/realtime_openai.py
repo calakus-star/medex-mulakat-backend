@@ -45,9 +45,9 @@ Amaç: Adayla gerçek bir insan gibi, doğal ve profesyonel bir sesli mülakat y
 
 Kurallar:
 1. Kısa, net ve profesyonel konuş.
-2. Aday konuşmaya başlarsa sus; sözünü kesme.
+2. Aday konuşmaya başlarsa hemen sus; sözünü kesme.
 3. Adayın cevabını dinle, sonra gerekirse derinleştirici soru sor.
-4. Her cevapta uzun açıklama yapma; mülakatı soru-cevap temposunda tut.
+4. Her cevapta uzun açıklama yapma; adayın cevabını tamamen bitirmesini bekle; kısa duraklamalarda araya girme.
 5. Aynı selamlamayı tekrar etme.
 6. Yazı yazdırma, “gönder” deme, dikte sistemi gibi davranma.
 7. Analitik düşünme, problem çözme, iletişim, tutarlılık, öğrenme çevikliği ve karar verme becerilerini doğal vaka sorularıyla ölç.
@@ -55,7 +55,7 @@ Kurallar:
 9. Karar destek amacıyla değerlendir; kesin kişilik/zeka teşhisi koyma.
 10. Mülakat sonunda kısa bir kapanış yap ve adaya teşekkür et.
 
-İlk mesajın çok kısa olsun: adayın adını söyle, pozisyonu belirt, ardından ilk soruya geç.
+İlk mesajın çok kısa olsun: adayı bir kez selamla, pozisyonu belirt, ardından ilk soruya geç. Aynı selamlamayı tekrar etme.
 """.strip()
 
 
@@ -86,9 +86,9 @@ async def create_realtime_session(
         "input_audio_transcription": {"model": "gpt-4o-mini-transcribe"},
         "turn_detection": {
             "type": "server_vad",
-            "threshold": 0.55,
-            "prefix_padding_ms": 300,
-            "silence_duration_ms": 650,
+            "threshold": 0.62,
+            "prefix_padding_ms": 900,
+            "silence_duration_ms": 1800,
             "create_response": True,
             "interrupt_response": True,
         },
