@@ -655,6 +655,9 @@ Kriterler:
 SESLİ MÜLAKAT KURALLARI:
 - Kısa selamla başla, sonra "kendinizden ve bu pozisyona uygunluğunuzdan bahseder misiniz" tarzı bir açılış sorusu sor.
 - Her turda tek, net, tek anlama gelen soru sor. Uzun monologlardan kaçın.
+- Level 2 yüzeysel practice değildir: her ana cevapta en az bir kez "somut örnek", "neden", "nasıl yaptınız", "sonuç ne oldu" gibi takip sorusuyla derinleş.
+- CV ↔ pozisyon uyumunu aktif kontrol et: CV'de yazan ama cevapta doğrulanmayan yetkinliği nazikçe sorgula; CV'de yazmayan ama pozisyon için kritik alanı mutlaka sor.
+- AI NOTU varsa onu mülakat planında dikkate al; ancak adayın skorunu doğrudan belirlemek için kullanma.
 - Sesli konuştuğunu unutma: yazılı metin okur gibi değil, deneyimli ve sıcak bir insan mülakatçı gibi konuş.
 - Cümlelerin kısa ve doğal olsun. Bir turda çoğunlukla 1-2 cümle yeterli. Gereksiz teşekkür, özet ve açıklama ekleme.
 - Robotik kalıplar kullanma: "Harika bir cevap verdiniz", "Şimdi sıradaki soruya geçiyorum", "Anladığım kadarıyla" gibi tekrar eden kalıpları sık kullanma.
@@ -1345,11 +1348,15 @@ def interview_chat(data: ChatMessage, payload=Depends(verify_token)):
     if payload.get("role") != "candidate":
         raise HTTPException(status_code=403, detail="Yetkisiz")
 
+    # Güvenlik: aday ID'sini frontend body'sinden değil JWT içinden esas al.
+    # localStorage/candidate_info bozuksa candidate_id boş gelebiliyor ve finalize zinciri patlıyordu.
+    effective_candidate_id = int(payload.get("candidate_id") or data.candidate_id)
+
     db = get_db()
-    candidate = db.execute("SELECT * FROM candidates WHERE id=?", (data.candidate_id,)).fetchone()
+    candidate = db.execute("SELECT * FROM candidates WHERE id=?", (effective_candidate_id,)).fetchone()
     level = candidate["level"] or 1 if candidate else 1
-    interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (data.candidate_id, level)).fetchone()
-    messages = get_interview_messages(db, data.candidate_id, level)
+    interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (effective_candidate_id, level)).fetchone()
+    messages = get_interview_messages(db, effective_candidate_id, level)
     db.close()
 
     if not candidate:
@@ -1392,7 +1399,7 @@ def interview_chat(data: ChatMessage, payload=Depends(verify_token)):
 
     if ask_closing_now:
         db = get_db()
-        db.execute("UPDATE interviews SET closing_asked=1 WHERE candidate_id=? AND level=?", (data.candidate_id, level))
+        db.execute("UPDATE interviews SET closing_asked=1 WHERE candidate_id=? AND level=?", (effective_candidate_id, level))
         db.commit(); db.close()
 
     last_question = ""
@@ -1426,7 +1433,7 @@ GÖREV:
             messages=[{"role": "user", "content": user_payload}]
         )
         reply = response.content[0].text
-        add_token_usage(data.candidate_id, level, response)
+        add_token_usage(effective_candidate_id, level, response)
 
         exit_requested_this_turn = "[ADAY_CIKIS_TALEBI]" in reply
         if exit_requested_this_turn:
@@ -1444,7 +1451,7 @@ GÖREV:
         messages.append({"role": "assistant", "content": reply})
 
         db = get_db()
-        save_interview_state(db, data.candidate_id, messages, level)
+        save_interview_state(db, effective_candidate_id, messages, level)
         db.commit(); db.close()
 
         if exit_requested_this_turn:
@@ -1457,7 +1464,7 @@ GÖREV:
                 # HİÇ gerçek cevap yoksa (mülakat aslında hiç başlamadıysa), Claude'a
                 # pahalı bir "rapor üret" çağrısı (4000 token) yapmadan direkt ücretsiz
                 # şablon raporla bitir — boş bir mülakat için token harcamanın anlamı yok.
-                return finalize_interview(data.candidate_id, "[MÜLAKATBİTTİ]",
+                return finalize_interview(effective_candidate_id, "[MÜLAKATBİTTİ]",
                                            terminated_reason="Aday talebiyle erken sonlandırıldı (gerçek veri toplanamadı)", level=level)
 
             # Aday net bir sonlandırma talebinde bulundu — ikna etmeye çalışmadan,
@@ -1471,12 +1478,12 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
                 model="claude-sonnet-4-6", max_tokens=4000, system=cached_system(system),
                 messages=[{"role": "user", "content": finish_payload}]
             )
-            add_token_usage(data.candidate_id, level, finish_response)
-            return finalize_interview(data.candidate_id, finish_response.content[0].text,
+            add_token_usage(effective_candidate_id, level, finish_response)
+            return finalize_interview(effective_candidate_id, finish_response.content[0].text,
                                        terminated_reason="Aday talebiyle erken sonlandırıldı", level=level)
 
         if "[MÜLAKATBİTTİ]" in reply:
-            return finalize_interview(data.candidate_id, reply, level=level)
+            return finalize_interview(effective_candidate_id, reply, level=level)
 
         clean, duration = parse_duration(reply)
         return {"message": clean, "completed": False, "question_duration": duration}
@@ -1792,9 +1799,9 @@ async def create_realtime_session(payload=Depends(verify_token)):
                     "transcription": {"model": "whisper-1"},
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.50,
-                        "prefix_padding_ms": 700,
-                        "silence_duration_ms": 3000,
+                        "threshold": 0.55,
+                        "prefix_padding_ms": 350,
+                        "silence_duration_ms": 750,
                         "create_response": True
                     }
                 }
@@ -1863,8 +1870,10 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
     if payload.get("role") != "candidate":
         raise HTTPException(status_code=403, detail="Yetkisiz")
 
+    effective_candidate_id = int(payload.get("candidate_id") or data.candidate_id)
+
     db = get_db()
-    candidate = db.execute("SELECT * FROM candidates WHERE id=?", (data.candidate_id,)).fetchone()
+    candidate = db.execute("SELECT * FROM candidates WHERE id=?", (effective_candidate_id,)).fetchone()
     if not candidate:
         db.close()
         raise HTTPException(status_code=404, detail="Aday bulunamadı")
@@ -1872,12 +1881,12 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
         db.close()
         raise HTTPException(status_code=400, detail="Bu uç nokta sadece Level 2 adaylar için geçerlidir.")
 
-    interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=2", (data.candidate_id,)).fetchone()
+    interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=2", (effective_candidate_id,)).fetchone()
     if not interview:
-        db.execute("INSERT INTO interviews (candidate_id, level, messages) VALUES (?, 2, '[]')", (data.candidate_id,))
+        db.execute("INSERT INTO interviews (candidate_id, level, messages) VALUES (?, 2, '[]')", (effective_candidate_id,))
         db.commit()
     # Transkripti (rapor/PDF görüntüleme ve gelecekteki debug için) kaydet.
-    save_interview_state(db, data.candidate_id, [{"role": "user", "content": data.transcript}], 2)
+    save_interview_state(db, effective_candidate_id, [{"role": "user", "content": data.transcript}], 2)
     db.commit()
     db.close()
 
@@ -1891,10 +1900,12 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
         )
         log_ai_provider(2, "openai", "report_skipped_insufficient_data")
         reply = build_l2_short_report(candidate["name"], candidate["position"], reason_text)
-        return finalize_interview(data.candidate_id, reply, terminated_reason=None if data.end_reason == "tamamlandı" else "Aday talebiyle/bağlantı sorunuyla erken sonlandırıldı", level=2)
+        return finalize_interview(effective_candidate_id, reply, terminated_reason=None if data.end_reason == "tamamlandı" else "Aday talebiyle/bağlantı sorunuyla erken sonlandırıldı", level=2)
 
     if not OPENAI_API_KEY:
-        raise HTTPException(status_code=503, detail="Rapor üretimi için OPENAI_API_KEY tanımlı değil.")
+        log_ai_provider(2, "openai", "report_missing_api_key_fallback")
+        reply = build_l2_short_report(candidate["name"], candidate["position"], "OPENAI_API_KEY tanımlı olmadığı için yedek rapor oluşturuldu. Transkript kaydedildi; yönetici transkripti ayrıca incelemelidir.")
+        return finalize_interview(effective_candidate_id, reply, terminated_reason=None, level=2)
 
     pos = get_position(candidate["position"]) or {"category": "Genel", "criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
     criteria_text = build_criteria_text(pos["criteria"])
@@ -1910,7 +1921,7 @@ Kriterler ({total_weight} puan):
 {criteria_text}
 
 TRANSKRIPT:
-{data.transcript[:12000]}
+{data.transcript[:8000]}
 
 KURAL: Rapor {report_lang} dilinde yazılacak. Önce genel performansı kabaca değerlendir — toplam puan {total_weight} üzerinden %20'nin altında kalacaksa KISA FORMAT kullan (sadece toplam puan + 1-2 cümlelik gerekçe + öneri, kriter tablosu YOK). %20'yi geçtiyse TAM FORMAT kullan.
 
@@ -1952,7 +1963,7 @@ KISA FORMAT (puan %20 altındaysa):
             resp = await client.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                json={"model": OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": report_prompt}], "max_tokens": 2000}
+                json={"model": OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": report_prompt}], "max_tokens": 1600}
             )
         if resp.status_code != 200:
             print(f"HATA (OpenAI rapor üretimi): {resp.status_code} {resp.text[:400]}")
@@ -1960,13 +1971,17 @@ KISA FORMAT (puan %20 altındaysa):
         result = resp.json()
         reply = result["choices"][0]["message"]["content"]
         log_ai_provider(2, "openai", "report_generated")
-    except HTTPException:
-        raise
+    except HTTPException as e:
+        print(f"HATA (create_l2_report, OpenAI): {getattr(e, 'detail', e)}")
+        # Rapor üretimi patlasa bile mülakat zinciri kırılmasın: aday tamamlandı, admin tamamlandı, mail yedek raporla gitsin.
+        reply = build_l2_short_report(candidate["name"], candidate["position"], "OpenAI rapor üretimi sırasında hata oluştu; transkript kaydedildi ve yedek rapor oluşturuldu. Yönetici transkripti ayrıca incelemelidir.")
+        return finalize_interview(effective_candidate_id, reply, terminated_reason=None, level=2)
     except Exception as e:
         print(f"HATA (create_l2_report, beklenmeyen): {type(e).__name__}: {e}")
-        raise HTTPException(status_code=500, detail="Rapor üretilirken beklenmeyen bir hata oluştu.")
+        reply = build_l2_short_report(candidate["name"], candidate["position"], "Rapor üretimi sırasında beklenmeyen hata oluştu; transkript kaydedildi ve yedek rapor oluşturuldu. Yönetici transkripti ayrıca incelemelidir.")
+        return finalize_interview(effective_candidate_id, reply, terminated_reason=None, level=2)
 
-    return finalize_interview(data.candidate_id, reply, level=2)
+    return finalize_interview(effective_candidate_id, reply, level=2)
 
 @app.get("/api/admin/snapshots/{candidate_id}")
 def get_snapshots(candidate_id: int, payload=Depends(verify_admin)):
