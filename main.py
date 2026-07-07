@@ -1788,7 +1788,8 @@ async def create_realtime_session(payload=Depends(verify_token)):
                         "type": "server_vad",
                         "threshold": 0.50,
                         "prefix_padding_ms": 700,
-                        "silence_duration_ms": 3000
+                        "silence_duration_ms": 3000,
+                        "create_response": True
                     }
                 }
             },
