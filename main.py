@@ -33,7 +33,13 @@ app.add_middleware(
 # ============ CONFIG ============
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # Sesli mod (Whisper STT + TTS) için, Anthropic'ten bağımsız
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # Sesli mod (Whisper STT + TTS, L2 Realtime) için, Anthropic'ten bağımsız
+OPENAI_REALTIME_MODEL = "gpt-realtime-2"
+OPENAI_REPORT_MODEL = "gpt-5.5"  # L2 rapor üretimi (Claude KULLANILMAZ, görev dokümanı kuralı)
+
+def log_ai_provider(level: int, provider: str, action: str):
+    """Görev dokümanı zorunluluğu: L2'de Claude çağrısı yapılmadığını denetlenebilir kılmak için."""
+    print(f"[AI_PROVIDER] level=L{level} provider={provider} action={action}")
 JWT_SECRET = os.getenv("JWT_SECRET", "medex-secret-key-2024")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@medex-smo.com")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "medex2024")
@@ -623,6 +629,36 @@ def send_report_email(candidate_name, position, report, score, recommendation, s
         return False
 
 # ============ AI PROMPT ============
+def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_text: Optional[str], ai_note: Optional[str], interview_language: str = "tr") -> str:
+    """L2 (OpenAI Realtime) için sesli mülakat talimatı. Aynı temel felsefeyi (eleme değil
+    keşif, geniş kapsama, insan otoritesine öncelik) taşır ama canlı/sesli akışa göre
+    yazılmıştır — soru üretim/derinleştirme mantığı modelin kendi canlı akışında yürür."""
+    pos = get_position(position_name)
+    if not pos:
+        pos = {"category": "Genel", "role_description": "Genel pozisyon", "criteria": [
+            {"name": "Genel Yetkinlik", "weight": 100, "desc": "Genel değerlendirme"}
+        ]}
+    criteria_text = build_criteria_text(pos["criteria"])
+    lang_name = LANGUAGE_NAMES.get(interview_language, "Türkçe")
+    cv_section = f"CV özeti:\n{cv_text[:1500]}" if cv_text and len(cv_text.strip()) > 20 else "CV yok, deneyimi sözlü sorularla öğren."
+    note_section = f"\nADAYA ÖZEL NOT (bağlayıcı): {ai_note.strip()[:800]}" if ai_note and ai_note.strip() else ""
+
+    return f"""Sen MedeX'in sesli AI mülakatçısısın. Aday: {candidate_name}. Pozisyon: {position_name}. Dil: TAMAMEN {lang_name} konuş.
+
+FELSEFE: Amaç eleme değil, iyi adayı keşfetmek. Kısa/çekingen cevap otomatik zayıflık değildir; net ve meraklı bir tonda derinleştir. Asla sorgulayıcı/suçlayıcı ton kullanma ("yalan mı söylüyorsun" gibi ima yasak). Bir konuya istediğin kadar derinleşebilirsin ama mülakat boyunca CV'deki FARKLI konulara (sertifika, rol, proje) da değin, tek bir noktaya kilitlenme.
+
+Kriterler:
+{criteria_text}
+{cv_section}{note_section}
+
+SESLİ MÜLAKAT KURALLARI:
+- Kısa selamla başla, sonra "kendinizden ve bu pozisyona uygunluğunuzdan bahseder misiniz" tarzı bir açılış sorusu sor.
+- Her turda tek, net, tek anlama gelen soru sor. Uzun monologlardan kaçın, doğal bir sohbet tonu koru.
+- Aday konuşurken KESİNLİKLE araya girme. Aday duraksarsa (düşünme sessizliği) hemen cevap vermeye başlama, gerçekten sözünü bitirdiğinden emin ol.
+- Aday net bir sonlandırma talebi belirtirse (yönetimle konuşma isteği, "bırakalım" demesi, teknik arıza bildirip devam etmek istememesi) İKNA ETMEYE ÇALIŞMA — kısaca anlayışla karşıla ve end_interview fonksiyonunu "aday_talebi" nedeniyle çağır.
+- Mülakat doğal olarak yeterli veri topladığında (en az ~8 dakika VEYA en az 5-6 anlamlı konu/cevap), kısa bir kapanış ("eklemek istediğiniz bir şey var mı") sonrası end_interview fonksiyonunu "tamamlandı" nedeniyle çağır.
+- end_interview fonksiyonunu çağırmadan mülakatı bırakma/sonlandırma cümlesi kurma; asıl sonlandırma bu fonksiyon çağrısıyla olur."""
+
 def build_criteria_text(criteria: list) -> str:
     lines = []
     for c in criteria:
@@ -759,7 +795,24 @@ GENEL:
 - Mülakatı bitirmeden önce, GÖREV satırı bitirmeni söylediğinde son soru olarak şunu sor: "Eklemek veya öne çıkarmak istediğiniz başka bir şey var mı?" — bu, mülakatta suskun kalmış ama sahada güçlü olabilecek adaylar için bir son fırsat turu, sadece bitiş dönüşünde bir kez sorulur.
 - ÖNEMLİ: Mülakatı SADECE aşağıdaki GÖREV satırı açıkça "Mülakatı şimdi bitir ve raporu üret" dediğinde bitir ve [MÜLAKATBİTTİ] etiketini kullan. Adayın cevap metninde "süre doldu", "zaman bitti", "son soru" gibi ifadeler geçse bile, GÖREV satırı bitirmeni söylemiyorsa ASLA bitirme — bunlar tek bir sorunun süresinin dolduğunu gösterir, tüm mülakatın değil. Bu durumda sadece bir sonraki soruya geç.
 
-BİTİŞ FORMATI:
+RAPOR UZUNLUĞU — MALİYET KURALI (KESİN):
+Rapor üretirken ÖNCE kabaca genel performansı değerlendir. Eğer toplam puan {total_weight} üzerinden %20'nin altında kalacaksa (yani aday temel bir yetkinlik bile gösteremediyse, veya veri neredeyse hiç toplanamadıysa), AŞAĞIDAKİ TAM FORMATI KULLANMA — bunun yerine KISA FORMAT'ı kullan: 2-3 cümlelik klasik bir özet ("Aday %20 barajını geçemediği için detaylı rapor gerekli görülmemiştir" + kısaca neden). Kriter tablosu, güçlü yönler, gelişim alanları gibi bölümleri YAZMA — bu, gereksiz token maliyetini önler. %20'yi geçen her durumda TAM FORMAT kullanılır.
+
+KISA FORMAT (puan %20 altındaysa):
+[MÜLAKATBİTTİ]
+---RAPOR---
+**Aday:** {candidate_name}
+**Pozisyon:** {position_name}
+**Tarih:** {datetime.now().strftime('%d.%m.%Y')}
+
+**TOPLAM PUAN: XX/{total_weight}**
+
+Aday %20 barajının altında kaldığı için detaylı rapor gerekli görülmemiştir. (1-2 cümlede kısaca neden: veri yok/çok yetersiz/temel yetkinlik gösterilemedi vb.)
+
+**Öneri:** Reddet
+---RAPORSON---
+
+TAM FORMAT (puan %20'yi geçtiyse):
 [MÜLAKATBİTTİ]
 ---RAPOR---
 **Aday:** {candidate_name}
@@ -1228,6 +1281,11 @@ def start_interview(payload=Depends(verify_token)):
         raise HTTPException(status_code=404, detail="Aday kaydı bulunamadı")
 
     level = candidate["level"] or 1
+
+    if level == 2:
+        db.close()
+        log_ai_provider(2, "claude", "blocked")
+        raise HTTPException(status_code=400, detail="Level 2 mülakatlar sesli (OpenAI Realtime) akışını kullanır. Lütfen /api/realtime/session üzerinden bağlanın.")
     existing = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
     lvl_cfg = get_level_config(level)
     total_seconds = lvl_cfg["minutes"] * 60
@@ -1290,6 +1348,10 @@ def interview_chat(data: ChatMessage, payload=Depends(verify_token)):
 
     if not candidate:
         raise HTTPException(status_code=404, detail="Aday bulunamadı")
+
+    if level == 2:
+        log_ai_provider(2, "claude", "blocked")
+        raise HTTPException(status_code=400, detail="Level 2 mülakatlar sesli (OpenAI Realtime) akışını kullanır, bu endpoint kullanılamaz.")
 
     # EŞZAMANLILIK GÜVENLİK AĞI: Mülakat zaten tamamlanmışsa (örn. çift gönderim, ağ
     # tekrar denemesi, yarış durumu) tekrar AI çağrısı yapıp yeni bir rapor/e-posta
@@ -1380,6 +1442,18 @@ GÖREV:
         db.commit(); db.close()
 
         if exit_requested_this_turn:
+            # Gerçekten cevaplanmış (zaman aşımı/boş olmayan) kaç mesaj var, kontrol et.
+            real_answers = [
+                m.get("content", "") for m in messages
+                if m.get("role") == "user" and "zaman aşım" not in (m.get("content") or "").lower() and len(m.get("content", "").strip()) > 3
+            ]
+            if not real_answers:
+                # HİÇ gerçek cevap yoksa (mülakat aslında hiç başlamadıysa), Claude'a
+                # pahalı bir "rapor üret" çağrısı (4000 token) yapmadan direkt ücretsiz
+                # şablon raporla bitir — boş bir mülakat için token harcamanın anlamı yok.
+                return finalize_interview(data.candidate_id, "[MÜLAKATBİTTİ]",
+                                           terminated_reason="Aday talebiyle erken sonlandırıldı (gerçek veri toplanamadı)", level=level)
+
             # Aday net bir sonlandırma talebinde bulundu — ikna etmeye çalışmadan,
             # mevcut konuşma içeriğiyle GERÇEK bir bitiş/rapor üretimi tetikleniyor.
             # (İhlal sonrası zorla bitirme ile aynı desen: ayrı, doğrudan bir "bitir" çağrısı.)
@@ -1517,17 +1591,33 @@ def report_violation(data: ViolationReport, payload=Depends(verify_token)):
     force_terminate = (new_count >= 3) or (data.violation_type == "prolonged_absence")
 
     if force_terminate:
+        candidate_level = candidate["level"] or 1
+        if candidate_level == 2:
+            # L2'de Claude KULLANILMAZ (görev dokümanı kuralı) — AI çağrısı yapmadan,
+            # ücretsiz bir şablonla direkt sonlandır.
+            log_ai_provider(2, "claude", "blocked")
+            db = get_db()
+            db.execute("UPDATE candidates SET status='completed', completed_at=CURRENT_TIMESTAMP, terminated_reason=? WHERE id=?",
+                       ("Sekme/ekran değişimi ihlali (3 kez tespit edildi)", data.candidate_id))
+            db.commit()
+            db.close()
+            return {
+                "violation_count": new_count, "terminated": True,
+                "message": "Mülakat kuralları ihlal edildiği için süreç sonlandırılmıştır.",
+                "score": 0, "recommendation": "Reddet"
+            }
         try:
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-            system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"], candidate["level"] or 1, candidate["interview_language"] or "tr", candidate["report_language"] or "tr")
+            system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"], candidate_level, candidate["interview_language"] or "tr", candidate["report_language"] or "tr")
             force_msg = "Aday 3 kez sekme/ekran değişimi ihlali yaptı. Mülakatı şimdi sonlandır, mevcut bilgilere göre rapor ver. Düşük puan ver ve raporda ihlal nedeniyle sonlandırıldığını belirt. [MÜLAKATBİTTİ] etiketini kullan."
+            log_ai_provider(candidate_level, "claude", "analysis")
             response = client.messages.create(
                 model="claude-sonnet-4-6", max_tokens=4000, system=cached_system(system),
                 messages=[{"role": "user", "content": force_msg}]
             )
-            add_token_usage(data.candidate_id, candidate["level"] or 1, response)
+            add_token_usage(data.candidate_id, candidate_level, response)
             result = finalize_interview(data.candidate_id, response.content[0].text,
-                                         terminated_reason="Sekme/ekran değişimi ihlali (3 kez tespit edildi)", level=candidate["level"] or 1)
+                                         terminated_reason="Sekme/ekran değişimi ihlali (3 kez tespit edildi)", level=candidate_level)
             return {"violation_count": new_count, "terminated": True, **result}
         except Exception as e:
             print(f"HATA (report_violation, mülakat zorla sonlandırma): {type(e).__name__}: {e}")
@@ -1646,6 +1736,230 @@ async def voice_speak(data: VoiceSpeakRequest, payload=Depends(verify_token)):
     except Exception as e:
         print(f"HATA (voice_speak, beklenmeyen): {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Ses üretilirken beklenmeyen bir hata oluştu.")
+
+# ---- L2: OpenAI Realtime (canlı sesli mülakat) ----
+# GÖREV DOKÜMANI KURALI: L2'de Claude KESİNLİKLE kullanılmaz. Sadece OpenAI Realtime
+# (canlı ses<->ses) + rapor için OpenAI metin modeli. Bu iki endpoint dışındaki hiçbir
+# L2 akışı Anthropic'e dokunmaz (yukarıdaki start_interview/interview_chat/report_violation
+# içindeki L2 blokları bunu garanti eder).
+
+class RealtimeReportRequest(BaseModel):
+    candidate_id: int
+    transcript: str
+    duration_seconds: int = 0
+    answered_count: int = 0
+    end_reason: str = "tamamlandı"  # tamamlandı | aday_talebi | baglanti_koptu
+
+MIN_L2_DURATION_SECONDS = 8 * 60
+MIN_L2_ANSWERED_COUNT = 5
+
+@app.post("/api/realtime/session")
+async def create_realtime_session(payload=Depends(verify_token)):
+    if payload.get("role") != "candidate":
+        raise HTTPException(status_code=403, detail="Yetkisiz")
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="Sesli mülakat (OpenAI Realtime) için OPENAI_API_KEY tanımlı değil.")
+
+    candidate_id = payload["candidate_id"]
+    db = get_db()
+    candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+    db.close()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Aday kaydı bulunamadı")
+    if (candidate["level"] or 1) != 2:
+        raise HTTPException(status_code=400, detail="Bu uç nokta sadece Level 2 adaylar için geçerlidir.")
+    if not (candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20):
+        raise HTTPException(status_code=400, detail="Bu seviyedeki mülakata başlamadan önce CV yüklemeniz gerekiyor.")
+
+    instructions = build_l2_realtime_instructions(
+        candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["interview_language"] or "tr"
+    )
+
+    session_body = {
+        "session": {
+            "type": "realtime",
+            "model": OPENAI_REALTIME_MODEL,
+            "instructions": instructions,
+            "audio": {
+                "output": {"voice": "marin"},
+                "input": {
+                    "transcription": {"model": "whisper-1"},
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.40,
+                        "prefix_padding_ms": 700,
+                        "silence_duration_ms": 2000
+                    }
+                }
+            },
+            "tools": [{
+                "type": "function",
+                "name": "end_interview",
+                "description": "Mülakatı sonlandırmak gerektiğinde (doğal tamamlanma veya adayın net talebi) çağrılır.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"reason": {"type": "string", "enum": ["tamamlandı", "aday_talebi"]}},
+                    "required": ["reason"]
+                }
+            }]
+        }
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/realtime/client_secrets",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json=session_body
+            )
+        if resp.status_code != 200:
+            print(f"HATA (OpenAI Realtime session): {resp.status_code} {resp.text[:400]}")
+            raise HTTPException(status_code=502, detail="Sesli mülakat oturumu oluşturulamadı (OpenAI Realtime hatası).")
+        result = resp.json()
+        log_ai_provider(2, "openai", "realtime_session")
+        return {
+            "client_secret": result.get("value"),
+            "model": OPENAI_REALTIME_MODEL,
+            "turn_detection": session_body["session"]["audio"]["input"]["turn_detection"]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"HATA (create_realtime_session, beklenmeyen): {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Sesli mülakat oturumu başlatılırken beklenmeyen bir hata oluştu.")
+
+
+def build_l2_short_report(candidate_name: str, position_name: str, reason: str) -> str:
+    """Minimum tamamlanma şartı sağlanmadığında (yarım mülakat / veri yetersizliği)
+    OpenAI'a HİÇ istek atmadan, ücretsiz bir şablon raporla direkt döner."""
+    return f"""[MÜLAKATBİTTİ]
+---RAPOR---
+**Aday:** {candidate_name}
+**Pozisyon:** {position_name}
+**Tarih:** {datetime.now().strftime('%d.%m.%Y')}
+
+**TOPLAM PUAN: Değerlendirilemedi**
+
+{reason}
+
+**Öneri:** Değerlendirmeye Al
+---RAPORSON---
+
+---STANDARTCV---
+**AD SOYAD:** {candidate_name}
+**POZİSYON:** {position_name}
+**MÜLAKAT NOTU:** {reason}
+---STANDARTCVSON---"""
+
+@app.post("/api/realtime/report")
+async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_token)):
+    if payload.get("role") != "candidate":
+        raise HTTPException(status_code=403, detail="Yetkisiz")
+
+    db = get_db()
+    candidate = db.execute("SELECT * FROM candidates WHERE id=?", (data.candidate_id,)).fetchone()
+    if not candidate:
+        db.close()
+        raise HTTPException(status_code=404, detail="Aday bulunamadı")
+    if (candidate["level"] or 1) != 2:
+        db.close()
+        raise HTTPException(status_code=400, detail="Bu uç nokta sadece Level 2 adaylar için geçerlidir.")
+
+    interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=2", (data.candidate_id,)).fetchone()
+    if not interview:
+        db.execute("INSERT INTO interviews (candidate_id, level, messages) VALUES (?, 2, '[]')", (data.candidate_id,))
+        db.commit()
+    # Transkripti (rapor/PDF görüntüleme ve gelecekteki debug için) kaydet.
+    save_interview_state(db, data.candidate_id, [{"role": "user", "content": data.transcript}], 2)
+    db.commit()
+    db.close()
+
+    below_minimum = data.duration_seconds < MIN_L2_DURATION_SECONDS and data.answered_count < MIN_L2_ANSWERED_COUNT
+
+    if below_minimum or data.end_reason in ("aday_talebi", "baglanti_koptu"):
+        reason_text = (
+            "Mülakat tamamlanmadığı için değerlendirme oluşturulamamıştır."
+            if data.end_reason in ("aday_talebi", "baglanti_koptu")
+            else "Bu mülakat sonucunda aday hakkında güvenilir bir değerlendirme oluşturabilecek yeterli veri elde edilememiştir. Bu nedenle ayrıntılı rapor oluşturulmamıştır."
+        )
+        log_ai_provider(2, "openai", "report_skipped_insufficient_data")
+        reply = build_l2_short_report(candidate["name"], candidate["position"], reason_text)
+        return finalize_interview(data.candidate_id, reply, terminated_reason=None if data.end_reason == "tamamlandı" else "Aday talebiyle/bağlantı sorunuyla erken sonlandırıldı", level=2)
+
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="Rapor üretimi için OPENAI_API_KEY tanımlı değil.")
+
+    pos = get_position(candidate["position"]) or {"category": "Genel", "criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
+    criteria_text = build_criteria_text(pos["criteria"])
+    table_template = build_criteria_table_template(pos["criteria"])
+    total_weight = sum(c["weight"] for c in pos["criteria"])
+    report_lang = LANGUAGE_NAMES.get(candidate["report_language"] or "tr", "Türkçe")
+
+    report_prompt = f"""Aşağıda bir sesli iş mülakatının transkripti var. Bu transkripti değerlendirip rapor üret.
+
+Aday: {candidate['name']}
+Pozisyon: {candidate['position']}
+Kriterler ({total_weight} puan):
+{criteria_text}
+
+TRANSKRIPT:
+{data.transcript[:12000]}
+
+KURAL: Rapor {report_lang} dilinde yazılacak. Önce genel performansı kabaca değerlendir — toplam puan {total_weight} üzerinden %20'nin altında kalacaksa KISA FORMAT kullan (sadece toplam puan + 1-2 cümlelik gerekçe + öneri, kriter tablosu YOK). %20'yi geçtiyse TAM FORMAT kullan.
+
+TAM FORMAT:
+[MÜLAKATBİTTİ]
+---RAPOR---
+**Aday:** {candidate['name']}
+**Pozisyon:** {candidate['position']}
+**Tarih:** {datetime.now().strftime('%d.%m.%Y')}
+
+**TOPLAM PUAN: XX/{total_weight}**
+
+{table_template}
+
+**Tutarlılık / Çelişki Analizi:** ...
+**Güçlü Yönler:** ...
+**Gelişim Alanları:** ...
+**Serbest Gözlemler:** ...
+**Genel Kanı:** ...
+**Öneri:** İşe Al / Değerlendirmeye Al / Reddet
+---RAPORSON---
+
+KISA FORMAT (puan %20 altındaysa):
+[MÜLAKATBİTTİ]
+---RAPOR---
+**Aday:** {candidate['name']}
+**Pozisyon:** {candidate['position']}
+**Tarih:** {datetime.now().strftime('%d.%m.%Y')}
+
+**TOPLAM PUAN: XX/{total_weight}**
+
+(1-2 cümlelik gerekçe)
+
+**Öneri:** Reddet
+---RAPORSON---"""
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={"model": OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": report_prompt}], "max_tokens": 2000}
+            )
+        if resp.status_code != 200:
+            print(f"HATA (OpenAI rapor üretimi): {resp.status_code} {resp.text[:400]}")
+            raise HTTPException(status_code=502, detail="Rapor üretilemedi (OpenAI hatası).")
+        result = resp.json()
+        reply = result["choices"][0]["message"]["content"]
+        log_ai_provider(2, "openai", "report_generated")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"HATA (create_l2_report, beklenmeyen): {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Rapor üretilirken beklenmeyen bir hata oluştu.")
+
+    return finalize_interview(data.candidate_id, reply, level=2)
 
 @app.get("/api/admin/snapshots/{candidate_id}")
 def get_snapshots(candidate_id: int, payload=Depends(verify_admin)):
@@ -1866,6 +2180,20 @@ def download_interview_pdf(candidate_id: int, level: Optional[int] = None, paylo
     db.close()
     if not candidate or not interview:
         raise HTTPException(status_code=404, detail="Rapor bulunamadı")
+
+    # YETERSİZ VERİ / YARIM MÜLAKAT: skor yoksa ya da %20 barajının altındaysa PDF/detaylı
+    # rapor üretilmez — sadece bilgilendirme mesajı döner (revizyon notu kuralı).
+    pos = get_position(candidate["position"])
+    total_weight = sum(c["weight"] for c in pos["criteria"]) if pos else 100
+    score = interview["score"]
+    if score is None or (total_weight > 0 and (score / total_weight) < 0.20):
+        msg = (
+            "Mülakat tamamlanmadığı için değerlendirme oluşturulamamıştır."
+            if score is None
+            else "Bu mülakat sonucunda aday hakkında güvenilir bir değerlendirme oluşturabilecek yeterli veri elde edilememiştir. Bu nedenle ayrıntılı rapor oluşturulmamıştır."
+        )
+        raise HTTPException(status_code=422, detail=msg)
+
     pdf = _make_report_pdf(dict(candidate), dict(interview), [dict(s) for s in snapshots])
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", candidate["name"] or "aday")
     return StreamingResponse(pdf, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=medex_report_{safe_name}.pdf"})
@@ -1886,32 +2214,3 @@ def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depend
     if not interview:
         raise HTTPException(status_code=404, detail="Mülakat bulunamadı")
     return dict(interview)
-
-# ============ MEDEX V2 - OPENAI REALTIME L2 FIRST TEST ============
-# Bu endpoint mevcut v1 interview akışını bozmaz. Sadece /mulakat/sesli ekranının
-# tarayıcıda OpenAI Realtime WebRTC bağlantısı kurabilmesi için kısa ömürlü
-# client_secret üretir. OPENAI_API_KEY asla frontend'e gönderilmez.
-from ai.realtime_openai import create_realtime_session, RealtimeConfigError
-
-class RealtimeSessionRequest(BaseModel):
-    candidate_id: Optional[int] = None
-    candidate_name: str = "Aday"
-    position: str = "Genel Pozisyon"
-    level: int = 2
-    language: str = "tr"
-
-@app.post("/api/realtime/session")
-async def api_realtime_session(payload: RealtimeSessionRequest, request: Request):
-    safety_identifier = f"medex-candidate-{payload.candidate_id or 'anonymous'}"
-    try:
-        return await create_realtime_session(
-            candidate_name=payload.candidate_name,
-            position=payload.position,
-            level=payload.level,
-            language=payload.language,
-            safety_identifier=safety_identifier,
-        )
-    except RealtimeConfigError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Realtime session hatası: {exc}")
