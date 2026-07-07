@@ -1786,9 +1786,10 @@ async def create_realtime_session(payload=Depends(verify_token)):
                     "transcription": {"model": "whisper-1"},
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.40,
+                        "threshold": 0.55,
                         "prefix_padding_ms": 700,
-                        "silence_duration_ms": 2000
+                        "silence_duration_ms": 3200,
+                        "create_response": False
                     }
                 }
             },
