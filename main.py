@@ -35,6 +35,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # Sesli mod (Whisper STT + TTS, L2 Realtime) için, Anthropic'ten bağımsız
 OPENAI_REALTIME_MODEL = "gpt-realtime-2"
+OPENAI_REALTIME_VOICE = os.getenv("OPENAI_REALTIME_VOICE", "marin")  # Doğal ses: Railway env ile değiştirilebilir (örn. marin/verse)
 OPENAI_REPORT_MODEL = "gpt-5.5"  # L2 rapor üretimi (Claude KULLANILMAZ, görev dokümanı kuralı)
 
 def log_ai_provider(level: int, provider: str, action: str):
@@ -653,7 +654,12 @@ Kriterler:
 
 SESLİ MÜLAKAT KURALLARI:
 - Kısa selamla başla, sonra "kendinizden ve bu pozisyona uygunluğunuzdan bahseder misiniz" tarzı bir açılış sorusu sor.
-- Her turda tek, net, tek anlama gelen soru sor. Uzun monologlardan kaçın, doğal bir sohbet tonu koru.
+- Her turda tek, net, tek anlama gelen soru sor. Uzun monologlardan kaçın.
+- Sesli konuştuğunu unutma: yazılı metin okur gibi değil, deneyimli ve sıcak bir insan mülakatçı gibi konuş.
+- Cümlelerin kısa ve doğal olsun. Bir turda çoğunlukla 1-2 cümle yeterli. Gereksiz teşekkür, özet ve açıklama ekleme.
+- Robotik kalıplar kullanma: "Harika bir cevap verdiniz", "Şimdi sıradaki soruya geçiyorum", "Anladığım kadarıyla" gibi tekrar eden kalıpları sık kullanma.
+- Tonun sakin, profesyonel, meraklı ve insani olsun. Adayı rahatlat ama gevşek/şakacı olma.
+- Doğal duraklamalar ve sade konuşma ritmi kullan; hızlı hızlı uzun paragraflar okuma.
 - Aday konuşurken KESİNLİKLE araya girme. Aday duraksarsa (düşünme sessizliği) hemen cevap vermeye başlama, gerçekten sözünü bitirdiğinden emin ol.
 - Aday net bir sonlandırma talebi belirtirse (yönetimle konuşma isteği, "bırakalım" demesi, teknik arıza bildirip devam etmek istememesi) İKNA ETMEYE ÇALIŞMA — kısaca anlayışla karşıla ve end_interview fonksiyonunu "aday_talebi" nedeniyle çağır.
 - Mülakat doğal olarak yeterli veri topladığında (en az ~8 dakika VEYA en az 5-6 anlamlı konu/cevap), kısa bir kapanış ("eklemek istediğiniz bir şey var mı") sonrası end_interview fonksiyonunu "tamamlandı" nedeniyle çağır.
@@ -1781,7 +1787,7 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "model": OPENAI_REALTIME_MODEL,
             "instructions": instructions,
             "audio": {
-                "output": {"voice": "marin"},
+                "output": {"voice": OPENAI_REALTIME_VOICE},
                 "input": {
                     "transcription": {"model": "whisper-1"},
                     "turn_detection": {
