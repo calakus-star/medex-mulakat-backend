@@ -118,6 +118,7 @@ def init_db():
             ai_note TEXT,
             position TEXT NOT NULL,
             level INTEGER DEFAULT 1,
+            depth_tier TEXT DEFAULT 'standart',
             interview_language TEXT DEFAULT 'tr',
             report_language TEXT DEFAULT 'tr',
             username TEXT UNIQUE,
@@ -150,6 +151,7 @@ def init_db():
             recommendation TEXT,
             compact_memory TEXT DEFAULT '',
             question_count INTEGER DEFAULT 0,
+            depth_tier TEXT DEFAULT 'standart',
             started_at TEXT DEFAULT CURRENT_TIMESTAMP,
             completed_at TEXT,
             FOREIGN KEY (candidate_id) REFERENCES candidates(id)
@@ -202,6 +204,7 @@ def init_db():
         ("candidates", "previous_candidate_id", "INTEGER"),
         ("candidates", "is_archived", "INTEGER DEFAULT 0"),
         ("candidates", "level", "INTEGER DEFAULT 1"),
+        ("candidates", "depth_tier", "TEXT DEFAULT 'standart'"),
         ("candidates", "interview_language", "TEXT DEFAULT 'tr'"),
         ("candidates", "report_language", "TEXT DEFAULT 'tr'"),
         ("interviews", "level", "INTEGER DEFAULT 1"),
@@ -212,6 +215,7 @@ def init_db():
         ("interviews", "standard_cv", "TEXT"),
         ("interviews", "compact_memory", "TEXT DEFAULT ''"),
         ("interviews", "question_count", "INTEGER DEFAULT 0"),
+        ("interviews", "depth_tier", "TEXT DEFAULT 'standart'"),
         ("ai_usage_logs", "estimated_cost_usd", "REAL DEFAULT 0"),
     ]
     for table, column, definition in migrations:
@@ -241,6 +245,8 @@ def init_db():
             return "Finans"
         if any(k in n for k in ["sales", "marketing", "customer", "product specialist", "representative"]):
             return "Satış & Pazarlama"
+        if any(k in n for k in ["kasa", "kasiyer", "retail", "mağaza", "magaza"]):
+            return "Perakende & Operasyon"
         return "Genel"
 
     # Varsayılan pozisyonları her açılışta eksikse ekle.
@@ -329,6 +335,7 @@ def init_db():
         ("Finance Specialist", "Finansal kayıt, raporlama, bütçe, ödeme ve mali kontrol süreçlerinden sorumlu rol.", [("Finansal Bilgi",25,"Muhasebe, bütçe, raporlama"),("Dikkat & Doğruluk",25,"Hata önleme ve kontrol"),("Analitik",20,"Veri analizi ve yorum"),("Araç Kullanımı",10,"Excel/ERP"),("Uyum",10,"Vergi, mevzuat, iç kontrol"),("İletişim",10,"Ekip ve yönetim iletişimi")]),
         ("Sales Manager", "Satış hedefleri, ekip, müşteri ilişkileri ve gelir büyümesinden sorumlu rol.", [("Satış Stratejisi",25,"Hedef, segment, pipeline"),("Ekip Yönetimi",20,"Koçluk ve performans"),("Müşteri İlişkileri",20,"Güven, müzakere, çözüm"),("Analitik",15,"CRM, forecast, KPI"),("Sonuç Odaklılık",10,"Hedef takibi"),("İletişim",10,"Sunum ve ikna")]),
         ("Marketing Manager", "Pazarlama stratejisi, kampanya, marka, içerik ve performans yönetimi rolü.", [("Strateji",25,"Pazar, hedef kitle, konumlandırma"),("Kampanya Yönetimi",20,"Planlama, uygulama, optimizasyon"),("Dijital Pazarlama",15,"SEO, ads, sosyal medya"),("Analitik",15,"Metric, ROI, raporlama"),("Yaratıcılık",15,"İçerik ve mesaj"),("İletişim",10,"Ekip ve ajans yönetimi")]),
+        ("Kasa Yöneticisi", "Kasa operasyonlarını, nakit akışını ve kasa personelini yöneten; günlük/haftalık kasa mutabakatı ile veri güvenliğinden sorumlu rol.", [("Finansal Okuryazarlık & Nakit Yönetimi",25,"Nakit akışı takibi, kasa mutabakatı, kasa açığı/fazlası kontrolü"),("Dikkat & Doğruluk",20,"Kasa sayımı, veri girişi ve işlem hatasını önleme"),("Sorumluluk & Güvenilirlik",15,"İşletmenin nakit varlığını yönetme ve veri güvenliği"),("Ekip & Vardiya Yönetimi",15,"Yoğun temoda vardiya planlama ve kasa personelini yönlendirme"),("Teknoloji Hakimiyeti",15,"MS Office (özellikle Excel) ve ERP/POS sistemleri kullanımı"),("İletişim & Müşteri İlişkileri",10,"Müşteri memnuniyeti ve ödeme sorunu çözümü")]),
     ]
     for name, desc, criteria_pairs in defaults:
         criteria = [{"name": n, "weight": w, "desc": d} for n, w, d in criteria_pairs]
@@ -365,6 +372,7 @@ class CandidateCreate(BaseModel):
     phone: Optional[str] = None
     position: str
     level: int = 1  # 1: metin bazlı 10dk, 2: 20dk (CV zorunlu), 3: 30+ dk adaptif (CV zorunlu)
+    depth_tier: str = "standart"  # kisa | standart | derin — level'ın kendi baz süresine göre yaklaşık yönlendirme
     interview_language: str = "tr"  # tr | en | de — mülakatın hangi dilde yürütüleceği
     report_language: str = "tr"  # tr | en | de — rapor/PDF'in hangi dilde yazılacağı (adaydan bağımsız)
     education: Optional[str] = None
@@ -742,8 +750,8 @@ def send_report_email(candidate_name, position, report, score, recommendation, s
         return False
 
 # ============ AI PROMPT ============
-def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_text: Optional[str], ai_note: Optional[str], interview_language: str = "tr") -> str:
-    """L2 Realtime için kısa, maliyet kontrollü ama kaliteyi düşürmeyen talimat.
+def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_text: Optional[str], ai_note: Optional[str], interview_language: str = "tr", depth_tier: Optional[str] = "standart") -> str:
+    """L2 Realtime için maliyet kontrollü ama kaliteyi düşürmeyen talimat.
     Realtime maliyeti her cevapta büyüyen context nedeniyle şişebildiği için burada
     uzun metodoloji metni yerine çekirdek davranış kuralları verilir. Rapor kalitesi
     ayrıca /api/realtime/report içinde korunur."""
@@ -753,25 +761,41 @@ def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_t
             {"name": "Genel Yetkinlik", "weight": 100, "desc": "Genel değerlendirme"}
         ]}
     criteria_text = build_criteria_text(pos["criteria"])
+    criteria_names = ", ".join(f'"{c["name"]}"' for c in pos["criteria"])
     lang_name = LANGUAGE_NAMES.get(interview_language, "Türkçe")
     cv_section = f"CV kısa özet (sadece soru planı için):\n{cv_text[:900]}" if cv_text and len(cv_text.strip()) > 20 else "CV yok; deneyimi sözlü öğren."
     note_section = f"\nAI NOTU (soru önceliği): {ai_note.strip()[:500]}" if ai_note and ai_note.strip() else ""
+    lvl_cfg = get_effective_level_config(2, depth_tier)
 
     return f"""Sen MedEx L2 sesli mülakatçısısın. Dil: {lang_name}. Aday: {candidate_name}. Pozisyon: {position_name}.
 
-AMAÇ: Gerçek işe alım mülakatı. Practice gibi yüzeysel kalma; ama uzun monolog yapma.
+AMAÇ: Gerçek işe alım mülakatı. Practice gibi yüzeysel kalma; ama uzun monolog yapma. Bu bir L2 (meslektaş tonu, sesli) mülakattır — L3'ün senior/kriz-senaryo/direkt tonuna GEÇME, o sadece L3'e özgüdür. Sıcak ve meslektaş tonunu koru.
 
 Kriterler:\n{criteria_text}\n\n{cv_section}{note_section}
 
+DERİNLİK SEVİYESİ ({lvl_cfg["depth_label"]}): Yaklaşık {lvl_cfg["minutes"]} dakika, en az {lvl_cfg["min_q"]} ana konu — bu KESİN bir hedef değil, yaklaşık bir yönlendirme. Bir kriterde net sinyal alamadıysan bu süreyi aşarak devam et, sabit bir tavanla erken kesme. Yeterli sinyali aldığın kriterde ısrarla soru sorup gereksiz uzatma da.
+
+AÇILIŞ (ZORUNLU): Mülakata direkt teknik soruyla başlama. Önce kısa, sıcak bir hoşgeldin/ısınma yap (nasılsınız, rahat mısınız gibi tek cümlelik bir karşılama), ardından adaya neden bu pozisyona başvurduğunu veya kendisini kısaca anlatmasını sor. Bu, gerçek bir insan mülakatçının açılışı gibi olsun.
+
+KAPANIŞ (ZORUNLU): end_interview çağırmadan hemen önce, adaya kısa bir teşekkür ve kapanış cümlesi söyle (örn. "Bugün ayırdığınız zaman için teşekkür ederim, mülakatımız burada sona eriyor."). Sert/ani kesme; kapanış cümlesi olmadan asla end_interview çağırma.
+
+SORU ÇEŞİTLİLİĞİ (ADAYLAR ARASI): Sabit bir script kullanma. Sorularını adayın CV'sindeki/cevaplarındaki kendine özgü detaylara göre kur; aynı pozisyon için farklı adaylara neredeyse birebir aynı soruyu aynı sırayla sorma.
+
 KONUŞMA KURALLARI:
 - Her turda sadece 1 soru sor. Cevapların genelde 1-2 kısa cümle olsun.
-- Aday cevabından sonra kısa takip sorusu sor: somut örnek, neden, nasıl, sonuç, ölçülebilir etki.
-- CV ↔ pozisyon uyumunu kontrol et: CV'deki iddiayı doğrula; pozisyon için kritik ama CV'de zayıf alanı sor.
+- Aday cevabından sonra kısa takip sorusu sor: somut örnek, neden, nasıl, sonuç, ölçülebilir etki. Bir kriterde netlik oluşana kadar (1 soru da yetebilir, 2-3 takip sorusu da gerekebilir) o kriterde kalabilirsin — sabit bir soru sayısı dayatma.
+- CV ↔ pozisyon uyumunu ayrı bir izlenen sinyal olarak değerlendir: CV'deki iddiayı doğrula; pozisyon için kritik ama CV'de zayıf/eksik görünen alanı sor.
+- Analitik tutarlılık sinyaline (neden-sonuç kuramama, tutarsız anlatım) dikkat et; gerçek bir çelişki görürsen sıcak/meraklı bir tonda (asla sorgulayıcı/suçlayıcı değil) netleştirici soru sor — bunu sormaktan kaçınma, sadece tonu sıcak tut.
 - AI Notu varsa soru planında dikkate al; skoru doğrudan belirlemek için kullanma.
 - Sıcak, sakin, profesyonel insan mülakatçı gibi konuş. Robotik kalıp ve uzun açıklama kullanma.
 - Aday konuşurken araya girme. Aday kısa durakladı diye hemen atlama.
-- En az 6 anlamlı aday cevabı almadan end_interview çağırma. Aday net biçimde bitirmek isterse çağır.
-- Yeterli veri alınca kısa kapanış sorusu sor; sonra end_interview(reason='tamamlandı') çağır."""
+
+BİTİRME KOŞULU (ZORUNLU — KRİTER BAZLI):
+- Mülakatı sadece adayın net biçimde bitirmek istemesi (reason='aday_talebi') VEYA aşağıdaki kriterlerin çoğunda yeterli netlik/kapsanma sağlandığında (reason='tamamlandı') bitir: {criteria_names}
+- end_interview çağırırken criteria_coverage parametresine HER kriter için 0-100 arası kendi tahmini netlik/kapsanma yüzdeni yaz (örn. bir kritere dair somut, doğrulanmış bir cevap aldıysan yüksek; hiç değinilmediyse düşük). Bu tahmin dürüst olmalı, "bitirmek için" abartılmamalı.
+- Bu seviyenin ({lvl_cfg["depth_label"]}) hedef kapsanma eşiği ~%{lvl_cfg["coverage_threshold"]}. Kriterlerin çoğu bu eşiğin altındaysa henüz bitirme, ilgili kriterlere dönüp devam et.
+- Ham cevap sayısı tek başına yeterli değildir — önemli olan her kriterde gerçekten netlik oluşup oluşmadığıdır."""
+
 
 def build_criteria_text(criteria: list) -> str:
     lines = []
@@ -804,6 +828,31 @@ LEVEL_CONFIG = {
 def get_level_config(level: Optional[int]) -> dict:
     return LEVEL_CONFIG.get(level or 1, LEVEL_CONFIG[1])
 
+# Derinlik seviyesi: level'ın (L1/L2/L3) kendi baz süresini/soru sayısını YAKLAŞIK olarak
+# ölçekler. Kesin bir dakika/soru hedefi DEĞİLDİR — sadece AI'a yön veren bir çarpandır.
+# "kisa" ayrıca ucuz/test amaçlı kullanılabilir. coverage_threshold, L2'de end_interview
+# çağrısına eklenen kriter bazlı kapsanma yüzdesinin hangi eşiği geçmesi gerektiğini belirler.
+DEPTH_TIER_CONFIG = {
+    "kisa":     {"factor": 0.5, "coverage_threshold": 40, "label": "Kısa"},
+    "standart": {"factor": 1.0, "coverage_threshold": 60, "label": "Standart"},
+    "derin":    {"factor": 1.6, "coverage_threshold": 80, "label": "Derin"},
+}
+
+def get_depth_tier_config(depth_tier: Optional[str]) -> dict:
+    return DEPTH_TIER_CONFIG.get((depth_tier or "standart").lower(), DEPTH_TIER_CONFIG["standart"])
+
+def get_effective_level_config(level: Optional[int], depth_tier: Optional[str] = None) -> dict:
+    """LEVEL_CONFIG'teki baz süre/soru sayısını depth_tier'a göre yaklaşık olarak ölçekler."""
+    base = get_level_config(level)
+    dt = get_depth_tier_config(depth_tier)
+    cfg = dict(base)
+    cfg["minutes"] = round(base["minutes"] * dt["factor"])
+    cfg["min_q"] = max(3, round(base["min_q"] * dt["factor"]))
+    cfg["depth_tier"] = (depth_tier or "standart").lower()
+    cfg["depth_label"] = dt["label"]
+    cfg["coverage_threshold"] = dt["coverage_threshold"]
+    return cfg
+
 def cached_system(system_text: str) -> list:
     """Maliyet optimizasyonu: sistem prompt'u (felsefe+kurallar+kriterler+CV) her
     mülakat turunda aynı kalıyor ama her turda yeniden gönderiliyor. Anthropic'in
@@ -814,14 +863,14 @@ def cached_system(system_text: str) -> list:
 
 LANGUAGE_NAMES = {"tr": "Türkçe", "en": "İngilizce", "de": "Almanca"}
 
-def get_system_prompt(position_name: str, candidate_name: str, cv_text: Optional[str] = None, ai_note: Optional[str] = None, education: Optional[str] = None, university: Optional[str] = None, department: Optional[str] = None, experience_years: Optional[int] = None, level: Optional[int] = 1, interview_language: str = "tr", report_language: str = "tr") -> str:
+def get_system_prompt(position_name: str, candidate_name: str, cv_text: Optional[str] = None, ai_note: Optional[str] = None, education: Optional[str] = None, university: Optional[str] = None, department: Optional[str] = None, experience_years: Optional[int] = None, level: Optional[int] = 1, interview_language: str = "tr", report_language: str = "tr", depth_tier: Optional[str] = "standart") -> str:
     pos = get_position(position_name)
     if not pos:
         pos = {"category": "Genel", "role_description": "Genel pozisyon", "criteria": [
             {"name": "Genel Yetkinlik", "weight": 100, "desc": "Genel değerlendirme"}
         ]}
 
-    lvl_cfg = get_level_config(level)
+    lvl_cfg = get_effective_level_config(level, depth_tier)
     criteria_text = build_criteria_text(pos["criteria"])
     table_template = build_criteria_table_template(pos["criteria"])
     total_weight = sum(c["weight"] for c in pos["criteria"])
@@ -869,6 +918,10 @@ Kriterler ({total_weight} puan):
 {admin_instruction}
 
 SEVİYE TALİMATI: {lvl_cfg["tone"]}
+
+DERİNLİK SEVİYESİ ({lvl_cfg["depth_label"]}): Bu mülakat için yaklaşık {lvl_cfg["minutes"]} dakika ve en az {lvl_cfg["min_q"]} ana konu/soru bir yön göstergesidir — KESİN bir hedef değil, sadece yaklaşık bir yönlendirmedir. Karar veremiyorsan (bir kriterde hâlâ net sinyal yoksa) bu süreyi/sayıyı aşarak devam et; sabit bir tavanla erken kesme. "{lvl_cfg["depth_label"]}" seviyesinde kalman gerektiği için gereksiz uzatma da yapma — yeterli sinyali aldığın kriterde ısrarla soru sorma.
+
+SORU ÇEŞİTLİLİĞİ (ADAYLAR ARASI): Sabit bir soru script'in yok. Her adayın CV'sinde/profilinde geçen kendine özgü detaylara (spesifik proje adı, sertifika, teknoloji, sektör) göre soruları o adaya özel kur — aynı pozisyon için farklı adaylara neredeyse birebir aynı soruyu, aynı sırayla sorma. Konudan konuya geçiş sırasını ve örnekleri her adayın kendi CV'sine göre değiştir.
 
 SORU SORMA KURALLARI:
 - İlk soru her zaman kısa bir kendini tanıtma isteği olsun (örn. "Kısaca kendinizden ve bu pozisyona uygun gördüğünüz deneyiminizden bahseder misiniz?"). Bu, gerçek bir mülakat gibi başlasın, direkt teknik soruya atlama.
@@ -1092,9 +1145,9 @@ def create_candidate(data: CandidateCreate, payload=Depends(verify_admin)):
     password_hash = hash_password(password)
 
     db.execute("""
-        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, interview_language, report_language, username, password_hash, plain_password, invite_type, previous_candidate_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'invite', ?)
-    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.interview_language or "tr", data.report_language or "tr", username, password_hash, password, previous_id))
+        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, depth_tier, interview_language, report_language, username, password_hash, plain_password, invite_type, previous_candidate_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'invite', ?)
+    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.depth_tier or "standart", data.interview_language or "tr", data.report_language or "tr", username, password_hash, password, previous_id))
     db.commit()
     candidate_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
@@ -1119,9 +1172,9 @@ def create_walkin(data: CandidateCreate, payload=Depends(verify_admin)):
     password_hash = hash_password(password)
 
     db.execute("""
-        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, interview_language, report_language, username, password_hash, plain_password, invite_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'walkin')
-    """, (data.name, email, data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.interview_language or "tr", data.report_language or "tr", username, password_hash, password))
+        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, depth_tier, interview_language, report_language, username, password_hash, plain_password, invite_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'walkin')
+    """, (data.name, email, data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.depth_tier or "standart", data.interview_language or "tr", data.report_language or "tr", username, password_hash, password))
     db.commit()
     candidate_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
@@ -1233,9 +1286,9 @@ def admin_update_candidate(candidate_id: int, data: CandidateCreate, payload=Dep
     level_changed = (candidate["level"] or 1) != new_level
 
     db.execute("""
-        UPDATE candidates SET name=?, email=?, phone=?, education=?, university=?, department=?, experience_years=?, ai_note=?, position=?, level=?, interview_language=?, report_language=?
+        UPDATE candidates SET name=?, email=?, phone=?, education=?, university=?, department=?, experience_years=?, ai_note=?, position=?, level=?, depth_tier=?, interview_language=?, report_language=?
         WHERE id=?
-    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, new_level, data.interview_language or "tr", data.report_language or "tr", candidate_id))
+    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, new_level, data.depth_tier or "standart", data.interview_language or "tr", data.report_language or "tr", candidate_id))
 
     if level_changed:
         # Aday farklı bir seviyeye taşındı: bu seviye için yeni bir mülakat denemesi
@@ -1377,6 +1430,7 @@ def candidate_login(data: CandidateLogin):
         "token": token,
         "candidate": {
             "id": candidate["id"], "name": candidate["name"], "position": candidate["position"], "level": candidate["level"] or 1,
+            "depth_tier": candidate["depth_tier"] or "standart",
             "interview_language": candidate["interview_language"] or "tr", "report_language": candidate["report_language"] or "tr"
         }
     }
@@ -1429,7 +1483,7 @@ def start_interview(payload=Depends(verify_token)):
 
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level, (candidate["interview_language"] if candidate and "interview_language" in candidate.keys() else "tr") or "tr", (candidate["report_language"] if candidate and "report_language" in candidate.keys() else "tr") or "tr")
+        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level, (candidate["interview_language"] if candidate and "interview_language" in candidate.keys() else "tr") or "tr", (candidate["report_language"] if candidate and "report_language" in candidate.keys() else "tr") or "tr", (candidate["depth_tier"] if candidate and "depth_tier" in candidate.keys() else "standart") or "standart")
         response = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=220, system=cached_system(system),
             messages=[{"role": "user", "content": "Başla. Kısa selam ve ilk soru."}]
@@ -1532,7 +1586,7 @@ GÖREV:
 
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level, (candidate["interview_language"] if candidate and "interview_language" in candidate.keys() else "tr") or "tr", (candidate["report_language"] if candidate and "report_language" in candidate.keys() else "tr") or "tr")
+        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level, (candidate["interview_language"] if candidate and "interview_language" in candidate.keys() else "tr") or "tr", (candidate["report_language"] if candidate and "report_language" in candidate.keys() else "tr") or "tr", (candidate["depth_tier"] if candidate and "depth_tier" in candidate.keys() else "standart") or "standart")
         response = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=4000 if should_finish else 260, system=cached_system(system),
             messages=[{"role": "user", "content": user_payload}]
@@ -1726,7 +1780,7 @@ def report_violation(data: ViolationReport, payload=Depends(verify_token)):
             }
         try:
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-            system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"], candidate_level, candidate["interview_language"] or "tr", candidate["report_language"] or "tr")
+            system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"], candidate_level, candidate["interview_language"] or "tr", candidate["report_language"] or "tr", (candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart") or "standart")
             force_msg = "Aday 3 kez sekme/ekran değişimi ihlali yaptı. Mülakatı şimdi sonlandır, mevcut bilgilere göre rapor ver. Düşük puan ver ve raporda ihlal nedeniyle sonlandırıldığını belirt. [MÜLAKATBİTTİ] etiketini kullan."
             log_ai_provider(candidate_level, "claude", "analysis")
             response = client.messages.create(
@@ -1902,8 +1956,35 @@ async def create_realtime_session(payload=Depends(verify_token)):
     if not (candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20):
         raise HTTPException(status_code=400, detail="Bu seviyedeki mülakata başlamadan önce CV yüklemeniz gerekiyor.")
 
+    depth_tier = (candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart") or "standart"
+    depth_cfg = get_effective_level_config(2, depth_tier)
+
+    # BUG FIX (started_at): interviews satırı önceden sadece ilk heartbeat (/api/realtime/sync,
+    # 25sn'de bir) ya da hiç heartbeat gelmezse finalize (/api/realtime/report) anında oluşuyordu.
+    # started_at kolonu DEFAULT CURRENT_TIMESTAMP olduğu için satır geç oluşursa gerçek mülakat
+    # süresi (dakikalar) kayboluyor, DB'de birkaç saniyeymiş gibi görünüyordu. Artık oturum
+    # (WebRTC bağlantısı) kurulur kurulmaz satır burada, gerçek başlangıç anında oluşturuluyor.
+    db2 = get_db()
+    existing_interview = db2.execute(
+        "SELECT completed_at FROM interviews WHERE candidate_id=? AND level=2", (candidate_id,)
+    ).fetchone()
+    if not existing_interview:
+        db2.execute(
+            "INSERT INTO interviews (candidate_id, level, messages, depth_tier) VALUES (?, 2, '[]', ?)",
+            (candidate_id, depth_tier)
+        )
+        db2.commit()
+    elif not existing_interview["completed_at"]:
+        # Satır zaten var ama tamamlanmamış (örn. sayfa yenilendi, yeniden bağlanıldı) —
+        # started_at'i EZME; ilk gerçek başlangıç zaten kayıtlı kalsın.
+        pass
+    db2.close()
+
+    pos_for_criteria = get_position(candidate["position"]) or {"criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
+    criteria_names_list = [c["name"] for c in pos_for_criteria["criteria"]]
+
     instructions = build_l2_realtime_instructions(
-        candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["interview_language"] or "tr"
+        candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["interview_language"] or "tr", depth_tier
     )
 
     session_body = {
@@ -1927,10 +2008,17 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "tools": [{
                 "type": "function",
                 "name": "end_interview",
-                "description": "Mülakatı sadece aday net olarak bitirmek isterse veya en az 6 anlamlı aday cevabı alındıktan sonra doğal kapanış için çağır. İlk 5-6 cevap öncesi asla çağırma.",
+                "description": f"Mülakatı sadece aday net olarak bitirmek isterse (reason='aday_talebi') VEYA kriterlerin çoğunda ~%{depth_cfg['coverage_threshold']} kapsanma/netlik sağlandığında (reason='tamamlandı') çağır. criteria_coverage alanına HER kriter için 0-100 arası dürüst bir tahmin yaz.",
                 "parameters": {
                     "type": "object",
-                    "properties": {"reason": {"type": "string", "enum": ["tamamlandı", "aday_talebi"]}},
+                    "properties": {
+                        "reason": {"type": "string", "enum": ["tamamlandı", "aday_talebi"]},
+                        "criteria_coverage": {
+                            "type": "object",
+                            "description": "Her kriter adı için 0-100 arası tahmini kapsanma/netlik yüzdesi.",
+                            "properties": {name: {"type": "integer"} for name in criteria_names_list}
+                        }
+                    },
                     "required": ["reason"]
                 }
             }]
@@ -1952,7 +2040,10 @@ async def create_realtime_session(payload=Depends(verify_token)):
         return {
             "client_secret": result.get("value"),
             "model": OPENAI_REALTIME_MODEL,
-            "turn_detection": session_body["session"]["audio"]["input"]["turn_detection"]
+            "turn_detection": session_body["session"]["audio"]["input"]["turn_detection"],
+            "depth_tier": depth_tier,
+            "coverage_threshold": depth_cfg["coverage_threshold"],
+            "criteria_names": criteria_names_list
         }
     except HTTPException:
         raise
@@ -2104,6 +2195,10 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
     table_template = build_criteria_table_template(pos["criteria"])
     total_weight = sum(c["weight"] for c in pos["criteria"])
     report_lang = LANGUAGE_NAMES.get(candidate["report_language"] or "tr", "Türkçe")
+    # BUG FIX: bu prompt daha önce sadece transkripti görüyordu, adayın CV'sini hiç görmüyordu —
+    # "CV ↔ pozisyon uyumu" ve "CV Tutarlılığı" alanları bu yüzden L1/L3'e göre çok daha zayıf
+    # kalıyordu (model kıyaslayacak CV metnine erişemiyordu). L1/L3'teki gibi CV burada da veriliyor.
+    cv_for_report = candidate["cv_text"][:1800] if candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20 else "CV yüklenmemiş; sadece transkripte göre değerlendir."
 
     report_prompt = f"""Aşağıda bir sesli iş mülakatının transkripti var. Bu transkripti değerlendirip rapor üret.
 
@@ -2111,6 +2206,9 @@ Aday: {candidate['name']}
 Pozisyon: {candidate['position']}
 Kriterler ({total_weight} puan):
 {criteria_text}
+
+ADAYIN CV'Sİ (tutarlılık ve CV↔pozisyon uyum kontrolü için kullan):
+{cv_for_report}
 
 TRANSKRIPT:
 {data.transcript[:14000]}
@@ -2131,14 +2229,16 @@ TAM FORMAT:
 **Tutarlılık / Çelişki Analizi:** ...
 **Güçlü Yönler:** ...
 **Gelişim Alanları:** ...
-**Serbest Gözlemler:** ...
+**Proje/Deneyim Özeti:** (transkriptte geçen somut proje/deneyimlerin kısa özeti)
+**CV Tutarlılığı:** (yukarıdaki CV ile transkriptte anlatılanlar arasındaki uyum/uyumsuzluk; CV↔pozisyon uyumunu da burada değerlendir)
+**Serbest Gözlemler:** ... (kriter dışı sinyaller; yoksa "Belirtilecek bir gözlem yok" yaz)
 **Genel Kanı:** ...
 **Öneri:** İşe Al / Değerlendirmeye Al / Reddet
 ---RAPORSON---
 
 EK RAPOR KALİTE KURALLARI:
-- Kriter tablosunu mutlaka doldur.
-- CV ↔ pozisyon uyumunu ayrı paragrafta değerlendir.
+- Kriter tablosunu mutlaka doldur; her satırda transkriptten somut bir gerekçe ver.
+- CV ↔ pozisyon uyumunu "CV Tutarlılığı" alanında ayrıca ve açıkça değerlendir — bu alanı boş/genel geçme.
 - Riskleri sert ama adil yaz.
 - "Değerlendirilemedi" sadece transkript tamamen boşsa kullanılabilir; aksi halde puan ver.
 - Çıktı mutlaka [MÜLAKATBİTTİ] ve ---RAPOR--- bloklarıyla başlasın."""
@@ -2148,7 +2248,7 @@ EK RAPOR KALİTE KURALLARI:
             resp = await client.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                json={"model": OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": report_prompt}], "max_tokens": 3500, "temperature": 0.2}
+                json={"model": OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": report_prompt}], "max_tokens": 4500, "temperature": 0.2}
             )
         if resp.status_code != 200:
             print(f"HATA (OpenAI rapor üretimi): model={OPENAI_REPORT_MODEL} status={resp.status_code} body={resp.text[:1200]}")
