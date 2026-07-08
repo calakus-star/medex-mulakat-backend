@@ -2019,7 +2019,7 @@ async def create_realtime_session(payload=Depends(verify_token)):
                             "properties": {name: {"type": "integer"} for name in criteria_names_list}
                         }
                     },
-                    "required": ["reason"]
+                    "required": ["reason", "criteria_coverage"]
                 }
             }]
         }
@@ -2199,6 +2199,14 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
     # "CV ↔ pozisyon uyumu" ve "CV Tutarlılığı" alanları bu yüzden L1/L3'e göre çok daha zayıf
     # kalıyordu (model kıyaslayacak CV metnine erişemiyordu). L1/L3'teki gibi CV burada da veriliyor.
     cv_for_report = candidate["cv_text"][:1800] if candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20 else "CV yüklenmemiş; sadece transkripte göre değerlendir."
+    # BUG FIX: ai_note (adminin adaya özel bağlayıcı talimatı) daha önce bu rapor promptuna
+    # hiç verilmiyordu — bu yüzden L2 raporlarında L1/L3'te var olan "AI Notuna Uyum" alanı
+    # hiç üretilemiyordu (model notun ne olduğunu bilmiyordu). Artık veriliyor.
+    ai_note_section = ""
+    ai_note_report_field = ""
+    if candidate["ai_note"] and candidate["ai_note"].strip():
+        ai_note_section = f"\n\nADAY ÖZEL AI NOTU (bu mülakatta bu konuya öncelik verilmiş olmalı, transkriptte nasıl ele alındığını değerlendir):\n{candidate['ai_note'].strip()[:1200]}"
+        ai_note_report_field = "\n**AI Notuna Uyum:** (bu adaya özel notun transkriptte nasıl ele alındığını somut olarak yaz: hangi soru/turlarda test edildi, sonucu ne oldu)"
 
     report_prompt = f"""Aşağıda bir sesli iş mülakatının transkripti var. Bu transkripti değerlendirip rapor üret.
 
@@ -2208,7 +2216,7 @@ Kriterler ({total_weight} puan):
 {criteria_text}
 
 ADAYIN CV'Sİ (tutarlılık ve CV↔pozisyon uyum kontrolü için kullan):
-{cv_for_report}
+{cv_for_report}{ai_note_section}
 
 TRANSKRIPT:
 {data.transcript[:14000]}
@@ -2232,13 +2240,24 @@ TAM FORMAT:
 **Proje/Deneyim Özeti:** (transkriptte geçen somut proje/deneyimlerin kısa özeti)
 **CV Tutarlılığı:** (yukarıdaki CV ile transkriptte anlatılanlar arasındaki uyum/uyumsuzluk; CV↔pozisyon uyumunu da burada değerlendir)
 **Serbest Gözlemler:** ... (kriter dışı sinyaller; yoksa "Belirtilecek bir gözlem yok" yaz)
-**Genel Kanı:** ...
+**Genel Kanı:** ...{ai_note_report_field}
 **Öneri:** İşe Al / Değerlendirmeye Al / Reddet
 ---RAPORSON---
+
+---STANDARTCV---
+**AD SOYAD:** {candidate['name']}
+**POZİSYON:** {candidate['position']}
+**EĞİTİM:** ... (CV'den veya transkriptten)
+**DENEYİM:** ... (kronolojik kısa özet)
+**TEKNİK YETKİNLİKLER:** ...
+**DİL BECERİLERİ:** ... (bilinmiyorsa "Belirtilmedi" yaz)
+**MÜLAKAT NOTU:** ... (puan ve önerinin 1-2 cümlelik özeti)
+---STANDARTCVSON---
 
 EK RAPOR KALİTE KURALLARI:
 - Kriter tablosunu mutlaka doldur; her satırda transkriptten somut bir gerekçe ver.
 - CV ↔ pozisyon uyumunu "CV Tutarlılığı" alanında ayrıca ve açıkça değerlendir — bu alanı boş/genel geçme.
+- ---STANDARTCV--- bloğunu da MUTLAKA doldur — bu, admin panelinde adayın standart özet CV'si olarak gösterilir, boş/placeholder bırakılamaz.
 - Riskleri sert ama adil yaz.
 - "Değerlendirilemedi" sadece transkript tamamen boşsa kullanılabilir; aksi halde puan ver.
 - Çıktı mutlaka [MÜLAKATBİTTİ] ve ---RAPOR--- bloklarıyla başlasın."""
