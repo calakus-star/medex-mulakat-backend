@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Any
 import sqlite3
 import hashlib
 import secrets
@@ -36,7 +36,7 @@ RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # Sesli mod (Whisper STT + TTS, L2 Realtime) için, Anthropic'ten bağımsız
 OPENAI_REALTIME_MODEL = "gpt-realtime-2"
 OPENAI_REALTIME_VOICE = os.getenv("OPENAI_REALTIME_VOICE", "marin")  # Doğal ses: Railway env ile değiştirilebilir (örn. marin/verse)
-OPENAI_REPORT_MODEL = "gpt-5.5"  # L2 rapor üretimi (Claude KULLANILMAZ, görev dokümanı kuralı)
+OPENAI_REPORT_MODEL = os.getenv("OPENAI_REPORT_MODEL", "gpt-4o")  # L2 kaliteli OpenAI raporu; env ile değiştirilebilir
 
 def log_ai_provider(level: int, provider: str, action: str):
     """Görev dokümanı zorunluluğu: L2'de Claude çağrısı yapılmadığını denetlenebilir kılmak için."""
@@ -162,6 +162,24 @@ def init_db():
             captured_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (candidate_id) REFERENCES candidates(id)
         );
+
+        CREATE TABLE IF NOT EXISTS ai_usage_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id INTEGER,
+            level INTEGER DEFAULT 1,
+            provider TEXT,
+            model TEXT,
+            action TEXT,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            audio_input_tokens INTEGER DEFAULT 0,
+            audio_output_tokens INTEGER DEFAULT 0,
+            total_tokens INTEGER DEFAULT 0,
+            estimated_cost_usd REAL DEFAULT 0,
+            raw_json TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (candidate_id) REFERENCES candidates(id)
+        );
     """)
     conn.commit()
 
@@ -194,6 +212,7 @@ def init_db():
         ("interviews", "standard_cv", "TEXT"),
         ("interviews", "compact_memory", "TEXT DEFAULT ''"),
         ("interviews", "question_count", "INTEGER DEFAULT 0"),
+        ("ai_usage_logs", "estimated_cost_usd", "REAL DEFAULT 0"),
     ]
     for table, column, definition in migrations:
         try:
@@ -509,6 +528,99 @@ def add_token_usage(candidate_id: int, level: int, response):
         print(f"UYARI (token sayımı kaydedilemedi): {type(e).__name__}: {e}")
 
 
+
+def _safe_int(value) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+# Yaklaşık USD fiyatlandırma (1M token başına). Sadece log/panel için kaba maliyet tahmini içindir,
+# fatura değildir — gerçek fiyatlar değişirse burası güncellenmeli.
+AI_PRICING_PER_1M = {
+    ("openai", "gpt-realtime-2"):   {"input": 32.0, "output": 64.0, "audio_input": 32.0, "audio_output": 64.0},
+    ("openai", "gpt-4o"):           {"input": 2.5,  "output": 10.0, "audio_input": 2.5,  "audio_output": 10.0},
+    ("anthropic", "claude-sonnet-4-6"): {"input": 3.0, "output": 15.0, "audio_input": 3.0, "audio_output": 15.0},
+}
+
+def _estimate_cost_usd(provider: str, model: str, input_tokens: int, output_tokens: int,
+                        audio_input_tokens: int, audio_output_tokens: int) -> float:
+    rates = AI_PRICING_PER_1M.get((provider, model))
+    if not rates:
+        return 0.0
+    return round(
+        (input_tokens * rates["input"] + output_tokens * rates["output"] +
+         audio_input_tokens * rates["audio_input"] + audio_output_tokens * rates["audio_output"]) / 1_000_000,
+        4
+    )
+
+def record_ai_usage(candidate_id: int, level: int, provider: str, model: str, action: str,
+                    input_tokens: int = 0, output_tokens: int = 0,
+                    audio_input_tokens: int = 0, audio_output_tokens: int = 0,
+                    raw: Optional[Any] = None):
+    """Her AI çağrısını/mülakat realtime kullanımını ayrı satır olarak kaydeder.
+    Amaç: Her mülakat sonunda hangi işlem kaç token kullanmış net görülsün.
+    Hata olursa mülakat akışını bozmaz.
+    NOT: audio token'lar metin token'larından ~6-13x daha pahalı olduğu için ayrı tutuluyor;
+    tabloda/panelde "toplam token" tek başına maliyeti temsil etmez, bu yüzden estimated_cost_usd de kaydediliyor."""
+    try:
+        input_tokens = _safe_int(input_tokens)
+        output_tokens = _safe_int(output_tokens)
+        audio_input_tokens = _safe_int(audio_input_tokens)
+        audio_output_tokens = _safe_int(audio_output_tokens)
+        total_tokens = input_tokens + output_tokens + audio_input_tokens + audio_output_tokens
+        cost_usd = _estimate_cost_usd(provider, model, input_tokens, output_tokens, audio_input_tokens, audio_output_tokens)
+        db = get_db()
+        db.execute("""
+            INSERT INTO ai_usage_logs
+            (candidate_id, level, provider, model, action, input_tokens, output_tokens, audio_input_tokens, audio_output_tokens, total_tokens, estimated_cost_usd, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (candidate_id, level, provider, model, action, input_tokens, output_tokens, audio_input_tokens, audio_output_tokens, total_tokens, cost_usd,
+              json.dumps(raw or {}, ensure_ascii=False)[:8000]))
+        db.execute("""
+            UPDATE interviews
+            SET total_input_tokens = total_input_tokens + ?,
+                total_output_tokens = total_output_tokens + ?
+            WHERE candidate_id=? AND level=?
+        """, (input_tokens + audio_input_tokens, output_tokens + audio_output_tokens, candidate_id, level))
+        db.commit(); db.close()
+        print(f"[AI_USAGE] c={candidate_id} L{level} {provider}/{model} {action} in={input_tokens} out={output_tokens} audio_in={audio_input_tokens} audio_out={audio_output_tokens} total={total_tokens} ~${cost_usd}")
+    except Exception as e:
+        print(f"UYARI (AI kullanım kaydı yazılamadı): {type(e).__name__}: {e}")
+
+def record_openai_chat_usage(candidate_id: int, level: int, model: str, action: str, result: dict):
+    usage = (result or {}).get("usage") or {}
+    record_ai_usage(
+        candidate_id=candidate_id,
+        level=level,
+        provider="openai",
+        model=model,
+        action=action,
+        input_tokens=usage.get("prompt_tokens") or usage.get("input_tokens") or 0,
+        output_tokens=usage.get("completion_tokens") or usage.get("output_tokens") or 0,
+        raw=usage
+    )
+
+def record_realtime_usage_summary(candidate_id: int, level: int, model: str, summary: Optional[dict], action: str = "realtime_session_total_frontend"):
+    if not summary:
+        return
+    # Tamamen sıfır bir delta (heartbeat'ler arasında hiç yeni response.done olmadıysa) için
+    # boşuna satır açmayalım.
+    if not any(_safe_int(summary.get(k)) for k in ("input_tokens", "output_tokens", "audio_input_tokens", "audio_output_tokens")):
+        return
+    record_ai_usage(
+        candidate_id=candidate_id,
+        level=level,
+        provider="openai",
+        model=model,
+        action=action,
+        input_tokens=summary.get("input_tokens", 0),
+        output_tokens=summary.get("output_tokens", 0),
+        audio_input_tokens=summary.get("audio_input_tokens", 0),
+        audio_output_tokens=summary.get("audio_output_tokens", 0),
+        raw=summary
+    )
+
 def save_interview_state(db, candidate_id: int, messages: list, level: int = 1):
     compact = build_compact_memory(messages)
     q_count = sum(1 for m in messages if m.get("role") == "assistant" and "---RAPOR---" not in (m.get("content") or ""))
@@ -631,9 +743,10 @@ def send_report_email(candidate_name, position, report, score, recommendation, s
 
 # ============ AI PROMPT ============
 def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_text: Optional[str], ai_note: Optional[str], interview_language: str = "tr") -> str:
-    """L2 (OpenAI Realtime) için sesli mülakat talimatı. Aynı temel felsefeyi (eleme değil
-    keşif, geniş kapsama, insan otoritesine öncelik) taşır ama canlı/sesli akışa göre
-    yazılmıştır — soru üretim/derinleştirme mantığı modelin kendi canlı akışında yürür."""
+    """L2 Realtime için kısa, maliyet kontrollü ama kaliteyi düşürmeyen talimat.
+    Realtime maliyeti her cevapta büyüyen context nedeniyle şişebildiği için burada
+    uzun metodoloji metni yerine çekirdek davranış kuralları verilir. Rapor kalitesi
+    ayrıca /api/realtime/report içinde korunur."""
     pos = get_position(position_name)
     if not pos:
         pos = {"category": "Genel", "role_description": "Genel pozisyon", "criteria": [
@@ -641,32 +754,24 @@ def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_t
         ]}
     criteria_text = build_criteria_text(pos["criteria"])
     lang_name = LANGUAGE_NAMES.get(interview_language, "Türkçe")
-    cv_section = f"CV özeti:\n{cv_text[:1500]}" if cv_text and len(cv_text.strip()) > 20 else "CV yok, deneyimi sözlü sorularla öğren."
-    note_section = f"\nADAYA ÖZEL NOT (bağlayıcı): {ai_note.strip()[:800]}" if ai_note and ai_note.strip() else ""
+    cv_section = f"CV kısa özet (sadece soru planı için):\n{cv_text[:900]}" if cv_text and len(cv_text.strip()) > 20 else "CV yok; deneyimi sözlü öğren."
+    note_section = f"\nAI NOTU (soru önceliği): {ai_note.strip()[:500]}" if ai_note and ai_note.strip() else ""
 
-    return f"""Sen MedeX'in sesli AI mülakatçısısın. Aday: {candidate_name}. Pozisyon: {position_name}. Dil: TAMAMEN {lang_name} konuş.
+    return f"""Sen MedEx L2 sesli mülakatçısısın. Dil: {lang_name}. Aday: {candidate_name}. Pozisyon: {position_name}.
 
-FELSEFE: Amaç eleme değil, iyi adayı keşfetmek. Kısa/çekingen cevap otomatik zayıflık değildir; net ve meraklı bir tonda derinleştir. Asla sorgulayıcı/suçlayıcı ton kullanma ("yalan mı söylüyorsun" gibi ima yasak). Bir konuya istediğin kadar derinleşebilirsin ama mülakat boyunca CV'deki FARKLI konulara (sertifika, rol, proje) da değin, tek bir noktaya kilitlenme.
+AMAÇ: Gerçek işe alım mülakatı. Practice gibi yüzeysel kalma; ama uzun monolog yapma.
 
-Kriterler:
-{criteria_text}
-{cv_section}{note_section}
+Kriterler:\n{criteria_text}\n\n{cv_section}{note_section}
 
-SESLİ MÜLAKAT KURALLARI:
-- Kısa selamla başla, sonra "kendinizden ve bu pozisyona uygunluğunuzdan bahseder misiniz" tarzı bir açılış sorusu sor.
-- Her turda tek, net, tek anlama gelen soru sor. Uzun monologlardan kaçın.
-- Level 2 yüzeysel practice değildir: her ana cevapta en az bir kez "somut örnek", "neden", "nasıl yaptınız", "sonuç ne oldu" gibi takip sorusuyla derinleş.
-- CV ↔ pozisyon uyumunu aktif kontrol et: CV'de yazan ama cevapta doğrulanmayan yetkinliği nazikçe sorgula; CV'de yazmayan ama pozisyon için kritik alanı mutlaka sor.
-- AI NOTU varsa onu mülakat planında dikkate al; ancak adayın skorunu doğrudan belirlemek için kullanma.
-- Sesli konuştuğunu unutma: yazılı metin okur gibi değil, deneyimli ve sıcak bir insan mülakatçı gibi konuş.
-- Cümlelerin kısa ve doğal olsun. Bir turda çoğunlukla 1-2 cümle yeterli. Gereksiz teşekkür, özet ve açıklama ekleme.
-- Robotik kalıplar kullanma: "Harika bir cevap verdiniz", "Şimdi sıradaki soruya geçiyorum", "Anladığım kadarıyla" gibi tekrar eden kalıpları sık kullanma.
-- Tonun sakin, profesyonel, meraklı ve insani olsun. Adayı rahatlat ama gevşek/şakacı olma.
-- Doğal duraklamalar ve sade konuşma ritmi kullan; hızlı hızlı uzun paragraflar okuma.
-- Aday konuşurken KESİNLİKLE araya girme. Aday duraksarsa (düşünme sessizliği) hemen cevap vermeye başlama, gerçekten sözünü bitirdiğinden emin ol.
-- Aday net bir sonlandırma talebi belirtirse (yönetimle konuşma isteği, "bırakalım" demesi, teknik arıza bildirip devam etmek istememesi) İKNA ETMEYE ÇALIŞMA — kısaca anlayışla karşıla ve end_interview fonksiyonunu "aday_talebi" nedeniyle çağır.
-- Mülakat doğal olarak yeterli veri topladığında (en az ~8 dakika VEYA en az 5-6 anlamlı konu/cevap), kısa bir kapanış ("eklemek istediğiniz bir şey var mı") sonrası end_interview fonksiyonunu "tamamlandı" nedeniyle çağır.
-- end_interview fonksiyonunu çağırmadan mülakatı bırakma/sonlandırma cümlesi kurma; asıl sonlandırma bu fonksiyon çağrısıyla olur."""
+KONUŞMA KURALLARI:
+- Her turda sadece 1 soru sor. Cevapların genelde 1-2 kısa cümle olsun.
+- Aday cevabından sonra kısa takip sorusu sor: somut örnek, neden, nasıl, sonuç, ölçülebilir etki.
+- CV ↔ pozisyon uyumunu kontrol et: CV'deki iddiayı doğrula; pozisyon için kritik ama CV'de zayıf alanı sor.
+- AI Notu varsa soru planında dikkate al; skoru doğrudan belirlemek için kullanma.
+- Sıcak, sakin, profesyonel insan mülakatçı gibi konuş. Robotik kalıp ve uzun açıklama kullanma.
+- Aday konuşurken araya girme. Aday kısa durakladı diye hemen atlama.
+- En az 6 anlamlı aday cevabı almadan end_interview çağırma. Aday net biçimde bitirmek isterse çağır.
+- Yeterli veri alınca kısa kapanış sorusu sor; sonra end_interview(reason='tamamlandı') çağır."""
 
 def build_criteria_text(criteria: list) -> str:
     lines = []
@@ -1762,9 +1867,22 @@ class RealtimeReportRequest(BaseModel):
     duration_seconds: int = 0
     answered_count: int = 0
     end_reason: str = "tamamlandı"  # tamamlandı | aday_talebi | baglanti_koptu
+    realtime_usage: Optional[dict] = None  # Frontend'in response.done eventlerinden topladığı token/audio usage özeti
 
-MIN_L2_DURATION_SECONDS = 8 * 60
-MIN_L2_ANSWERED_COUNT = 5
+class RealtimeSyncRequest(BaseModel):
+    """Görüşme SÜRERKEN periyodik olarak ve sekme kapanırken (sendBeacon ile) gönderilen
+    ara kayıt. Amaç: submitReport() hiç tetiklenmeden (sekme kapanma/bağlantı kopması/AI
+    end_interview'i hiç çağırmama gibi durumlarda) transkript ve o ana kadarki token
+    kullanımının TAMAMEN kaybolmasını önlemek. Rapor ÜRETMEZ, sadece kaydeder."""
+    candidate_id: int
+    transcript: str = ""
+    duration_seconds: int = 0
+    answered_count: int = 0
+    usage_delta: Optional[dict] = None  # son sync'ten bu yana biriken usage farkı (kümülatif değil)
+    token: Optional[str] = None  # sendBeacon Authorization header gönderemediği için yedek yol
+
+MIN_L2_DURATION_SECONDS = 0  # Rapor üretimini engelleme; kısa testlerde bile kaliteli rapor denensin
+MIN_L2_ANSWERED_COUNT = 0
 
 @app.post("/api/realtime/session")
 async def create_realtime_session(payload=Depends(verify_token)):
@@ -1799,9 +1917,9 @@ async def create_realtime_session(payload=Depends(verify_token)):
                     "transcription": {"model": "whisper-1"},
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.55,
-                        "prefix_padding_ms": 350,
-                        "silence_duration_ms": 750,
+                        "threshold": 0.62,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 650,
                         "create_response": True
                     }
                 }
@@ -1809,7 +1927,7 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "tools": [{
                 "type": "function",
                 "name": "end_interview",
-                "description": "Mülakatı sonlandırmak gerektiğinde (doğal tamamlanma veya adayın net talebi) çağrılır.",
+                "description": "Mülakatı sadece aday net olarak bitirmek isterse veya en az 6 anlamlı aday cevabı alındıktan sonra doğal kapanış için çağır. İlk 5-6 cevap öncesi asla çağırma.",
                 "parameters": {
                     "type": "object",
                     "properties": {"reason": {"type": "string", "enum": ["tamamlandı", "aday_talebi"]}},
@@ -1865,6 +1983,56 @@ def build_l2_short_report(candidate_name: str, position_name: str, reason: str) 
 **MÜLAKAT NOTU:** {reason}
 ---STANDARTCVSON---"""
 
+@app.post("/api/realtime/sync")
+async def sync_realtime_progress(data: RealtimeSyncRequest, request: Request):
+    """Görüşme sürerken periyodik (frontend'de ~25sn'de bir) ve sekme kapanırken
+    (navigator.sendBeacon ile, Authorization header'ı yollayamadığı için data.token ile) çağrılır.
+    Amaç: submitReport() hiçbir sebeple tetiklenmezse bile (sekme kapandı, bağlantı koptu,
+    AI end_interview'i hiç çağırmadı) transkript ve o ana kadarki gerçek token kullanımının
+    TAMAMEN kaybolmasını önlemek. Rapor ÜRETMEZ, OpenAI'a gitmez — sadece ucuz bir DB yazımıdır."""
+    # sendBeacon Authorization header koyamadığı için: önce normal header'ı dene, yoksa body'deki token'a düş.
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    raw_token = None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        raw_token = auth_header.split(" ", 1)[1]
+    elif data.token:
+        raw_token = data.token
+    if not raw_token:
+        raise HTTPException(status_code=401, detail="Token eksik")
+    try:
+        payload = jwt.decode(raw_token, JWT_SECRET, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Geçersiz token")
+    if payload.get("role") != "candidate":
+        raise HTTPException(status_code=403, detail="Yetkisiz")
+
+    effective_candidate_id = int(payload.get("candidate_id") or data.candidate_id)
+
+    db = get_db()
+    candidate = db.execute("SELECT * FROM candidates WHERE id=?", (effective_candidate_id,)).fetchone()
+    if not candidate or (candidate["level"] or 1) != 2:
+        db.close()
+        return {"ok": False}
+    interview = db.execute("SELECT completed_at FROM interviews WHERE candidate_id=? AND level=2", (effective_candidate_id,)).fetchone()
+    if interview and interview["completed_at"]:
+        # Zaten finalize edilmiş bir görüşmeye geç kalan bir heartbeat gelmiş olabilir; sessizce yoksay.
+        db.close()
+        return {"ok": True, "already_completed": True}
+    if not interview:
+        db.execute("INSERT INTO interviews (candidate_id, level, messages) VALUES (?, 2, '[]')", (effective_candidate_id,))
+        db.commit()
+    db.close()
+
+    if data.transcript:
+        db2 = get_db()
+        save_interview_state(db2, effective_candidate_id, [{"role": "user", "content": data.transcript}], 2)
+        db2.commit(); db2.close()
+
+    if data.usage_delta:
+        record_realtime_usage_summary(effective_candidate_id, 2, OPENAI_REALTIME_MODEL, data.usage_delta, action="realtime_heartbeat")
+
+    return {"ok": True}
+
 @app.post("/api/realtime/report")
 async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_token)):
     if payload.get("role") != "candidate":
@@ -1885,6 +2053,30 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
     if not interview:
         db.execute("INSERT INTO interviews (candidate_id, level, messages) VALUES (?, 2, '[]')", (effective_candidate_id,))
         db.commit()
+        interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=2", (effective_candidate_id,)).fetchone()
+
+    # İDEMPOTENCY GUARD: bu mülakat zaten finalize edilmişse (retry, çift tıklama, ağ hatası
+    # sonrası tekrar deneme vb.), OpenAI'a tekrar rapor ürettirmeden var olan sonucu dön.
+    # Bu olmadan her retry hem GPT-4o'yu tekrar çağırıyor hem de usage log'unu çift yazıyordu.
+    if interview and interview["completed_at"]:
+        db.close()
+        log_ai_provider(2, "openai", "report_request_deduped_already_completed")
+        return {
+            "message": "Mülakat tamamlandı, teşekkür ederiz.",
+            "completed": True,
+            "score": interview["score"],
+            "recommendation": interview["recommendation"],
+        }
+
+    db.commit(); db.close()
+    # Realtime kullanım özetini kaydet: OpenAI Usage ekranındaki yüksek maliyetin hangi mülakattan
+    # geldiğini burada görürüz. NOT: frontend artık burada TÜM oturumun toplamını değil, en son
+    # /api/realtime/sync heartbeat'inden bu yana biriken FARKI (delta) gönderiyor — bu yüzden burada
+    # tekrar "daha önce yazıldı mı" kontrolüne gerek yok, her çağrı kendi payını ekliyor. Çift rapor
+    # üretimi zaten yukarıdaki idempotency guard'ıyla (completed_at) engelleniyor.
+    if data.realtime_usage:
+        record_realtime_usage_summary(effective_candidate_id, 2, OPENAI_REALTIME_MODEL, data.realtime_usage, action="realtime_final_frontend")
+    db = get_db()
     # Transkripti (rapor/PDF görüntüleme ve gelecekteki debug için) kaydet.
     save_interview_state(db, effective_candidate_id, [{"role": "user", "content": data.transcript}], 2)
     db.commit()
@@ -1921,9 +2113,9 @@ Kriterler ({total_weight} puan):
 {criteria_text}
 
 TRANSKRIPT:
-{data.transcript[:8000]}
+{data.transcript[:14000]}
 
-KURAL: Rapor {report_lang} dilinde yazılacak. Önce genel performansı kabaca değerlendir — toplam puan {total_weight} üzerinden %20'nin altında kalacaksa KISA FORMAT kullan (sadece toplam puan + 1-2 cümlelik gerekçe + öneri, kriter tablosu YOK). %20'yi geçtiyse TAM FORMAT kullan.
+KURAL: Rapor {report_lang} dilinde yazılacak. Claude raporu kalitesinden aşağı olmayacak şekilde profesyonel, kanıta dayalı ve karar destek raporu üret. Veri azsa bile 0 puanlı/yedek rapor yazma; "veri sınırlı" notunu düşerek mevcut transkripte göre makul değerlendirme yap. Her iddiayı mümkün olduğunca transkriptteki davranış/söylemle gerekçelendir. Daima TAM FORMAT kullan.
 
 TAM FORMAT:
 [MÜLAKATBİTTİ]
@@ -1944,31 +2136,25 @@ TAM FORMAT:
 **Öneri:** İşe Al / Değerlendirmeye Al / Reddet
 ---RAPORSON---
 
-KISA FORMAT (puan %20 altındaysa):
-[MÜLAKATBİTTİ]
----RAPOR---
-**Aday:** {candidate['name']}
-**Pozisyon:** {candidate['position']}
-**Tarih:** {datetime.now().strftime('%d.%m.%Y')}
-
-**TOPLAM PUAN: XX/{total_weight}**
-
-(1-2 cümlelik gerekçe)
-
-**Öneri:** Reddet
----RAPORSON---"""
+EK RAPOR KALİTE KURALLARI:
+- Kriter tablosunu mutlaka doldur.
+- CV ↔ pozisyon uyumunu ayrı paragrafta değerlendir.
+- Riskleri sert ama adil yaz.
+- "Değerlendirilemedi" sadece transkript tamamen boşsa kullanılabilir; aksi halde puan ver.
+- Çıktı mutlaka [MÜLAKATBİTTİ] ve ---RAPOR--- bloklarıyla başlasın."""
 
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                json={"model": OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": report_prompt}], "max_tokens": 1600}
+                json={"model": OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": report_prompt}], "max_tokens": 3500, "temperature": 0.2}
             )
         if resp.status_code != 200:
-            print(f"HATA (OpenAI rapor üretimi): {resp.status_code} {resp.text[:400]}")
+            print(f"HATA (OpenAI rapor üretimi): model={OPENAI_REPORT_MODEL} status={resp.status_code} body={resp.text[:1200]}")
             raise HTTPException(status_code=502, detail="Rapor üretilemedi (OpenAI hatası).")
         result = resp.json()
+        record_openai_chat_usage(effective_candidate_id, 2, OPENAI_REPORT_MODEL, "l2_report_generation", result)
         reply = result["choices"][0]["message"]["content"]
         log_ai_provider(2, "openai", "report_generated")
     except HTTPException as e:
@@ -2232,7 +2418,17 @@ def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depend
         FROM interviews i JOIN candidates c ON i.candidate_id = c.id
         WHERE i.candidate_id = ? AND i.level = ?
     """, (candidate_id, level)).fetchone()
+    usage_rows = db.execute("""
+        SELECT provider, model, action, input_tokens, output_tokens, audio_input_tokens, audio_output_tokens, total_tokens, estimated_cost_usd, created_at
+        FROM ai_usage_logs
+        WHERE candidate_id=? AND level=?
+        ORDER BY id ASC
+    """, (candidate_id, level)).fetchall()
     db.close()
     if not interview:
         raise HTTPException(status_code=404, detail="Mülakat bulunamadı")
-    return dict(interview)
+    result = dict(interview)
+    result["usage_logs"] = [dict(r) for r in usage_rows]
+    result["usage_total_tokens"] = sum(_safe_int(r["total_tokens"]) for r in usage_rows)
+    result["usage_total_cost_usd"] = round(sum((r["estimated_cost_usd"] or 0) for r in usage_rows), 4)
+    return result
