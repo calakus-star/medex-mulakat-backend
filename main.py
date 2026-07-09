@@ -2037,10 +2037,17 @@ async def create_realtime_session(payload=Depends(verify_token)):
                 "input": {
                     "transcription": {"model": "whisper-1"},
                     "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.62,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 650,
+                        # v34 DOĞAL KONUŞMA SIRASI: server_vad sabit bir sessizlik süresine (650ms)
+                        # dayanıyordu — hızlı konuşan adayla yavaş/düşünerek konuşan adayı aynı
+                        # sabit süreyle değerlendiriyordu, doğal duraksamaları kesme riski taşıyordu.
+                        # semantic_vad, OpenAI Realtime API'nin resmi olarak desteklediği bir mod
+                        # (bkz. platform.openai.com/docs/guides/realtime-vad): sabit süre yerine
+                        # adayın söylediklerinin anlamına bakıp cümlesini bitirip bitirmediğine karar
+                        # veriyor ("ummm" ile biten bir cümlede daha uzun bekliyor, net biten bir
+                        # cümlede hızlı yanıt veriyor). eagerness="auto" OpenAI'nin kendi varsayılanı
+                        # (medium'a eşdeğer) — aşırı agresif/aşırı yavaş bir değer tahmin etmiyoruz.
+                        "type": "semantic_vad",
+                        "eagerness": "auto",
                         "create_response": True
                     }
                 }
