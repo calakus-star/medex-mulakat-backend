@@ -34,7 +34,7 @@ app.add_middleware(
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # Sesli mod (Whisper STT + TTS, L2 Realtime) için, Anthropic'ten bağımsız
-OPENAI_REALTIME_MODEL = "gpt-realtime-2"
+OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1-mini")
 OPENAI_REALTIME_VOICE = os.getenv("OPENAI_REALTIME_VOICE", "marin")  # Doğal ses: Railway env ile değiştirilebilir (örn. marin/verse)
 OPENAI_REPORT_MODEL = os.getenv("OPENAI_REPORT_MODEL", "gpt-4o")  # L2 kaliteli OpenAI raporu; env ile değiştirilebilir
 
@@ -558,8 +558,12 @@ def _safe_int(value) -> int:
 # Yaklaşık USD fiyatlandırma (1M token başına). Sadece log/panel için kaba maliyet tahmini içindir,
 # fatura değildir — gerçek fiyatlar değişirse burası güncellenmeli.
 AI_PRICING_PER_1M = {
-    ("openai", "gpt-realtime-2"):   {"input": 32.0, "output": 64.0, "audio_input": 32.0, "audio_output": 64.0},
-    ("openai", "gpt-4o"):           {"input": 2.5,  "output": 10.0, "audio_input": 2.5,  "audio_output": 10.0},
+    # Resmî rate-card: text ve audio ayrı ücretlenir.
+    ("openai", "gpt-realtime-2.1"):      {"input": 4.0, "output": 24.0, "audio_input": 32.0, "audio_output": 64.0},
+    ("openai", "gpt-realtime-2.1-mini"): {"input": 0.6, "output": 2.4,  "audio_input": 10.0, "audio_output": 20.0},
+    # Eski env kullanan kurulumlar için geriye uyumlu yaklaşık kayıt.
+    ("openai", "gpt-realtime-2"):        {"input": 4.0, "output": 24.0, "audio_input": 32.0, "audio_output": 64.0},
+    ("openai", "gpt-4o"):                {"input": 2.5, "output": 10.0, "audio_input": 0.0, "audio_output": 0.0},
     ("anthropic", "claude-sonnet-4-6"): {"input": 3.0, "output": 15.0, "audio_input": 3.0, "audio_output": 15.0},
 }
 
@@ -763,68 +767,44 @@ def send_report_email(candidate_name, position, report, score, recommendation, s
 
 # ============ AI PROMPT ============
 def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_text: Optional[str], ai_note: Optional[str], interview_language: str = "tr", depth_tier: Optional[str] = "standart") -> str:
-    """L2 Realtime için maliyet kontrollü ama kaliteyi düşürmeyen talimat.
-    Realtime maliyeti her cevapta büyüyen context nedeniyle şişebildiği için burada
-    uzun metodoloji metni yerine çekirdek davranış kuralları verilir. Rapor kalitesi
-    ayrıca /api/realtime/report içinde korunur."""
-    pos = get_position(position_name)
-    if not pos:
-        pos = {"category": "Genel", "role_description": "Genel pozisyon", "criteria": [
-            {"name": "Genel Yetkinlik", "weight": 100, "desc": "Genel değerlendirme"}
-        ]}
-    criteria_text = build_criteria_text(pos["criteria"])
-    criteria_names = ", ".join(f'"{c["name"]}"' for c in pos["criteria"])
+    """L2 canlı görüşme için kısa, cache-dostu talimat.
+    Ayrıntılı puanlama/rapor kuralları canlı session'a taşınmaz; rapor endpointinde kalır."""
+    pos = get_position(position_name) or {"criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
+    criteria = pos.get("criteria") or []
+    # Canlı model yalnızca soru stratejisi için gerekli özeti görür. Uzun açıklamalar context
+    # maliyetini her tur büyüttüğü için kriter açıklamaları 90 karakterle sınırlandırılır.
+    criteria_compact = "; ".join(
+        f"{c.get('name','Kriter')} %{c.get('weight',0)}: {(c.get('desc') or '')[:90]}" for c in criteria
+    )
+    criteria_names = ", ".join(f'"{c.get("name", "Kriter")}"' for c in criteria)
     lang_name = LANGUAGE_NAMES.get(interview_language, "Türkçe")
-    cv_section = f"CV kısa özet (sadece soru planı için):\n{cv_text[:900]}" if cv_text and len(cv_text.strip()) > 20 else "CV yok; deneyimi sözlü öğren."
-    note_section = f"\nAI NOTU (soru önceliği): {ai_note.strip()[:500]}" if ai_note and ai_note.strip() else ""
+    cv_compact = (cv_text or "").strip().replace("\n", " ")[:650] or "CV özeti yok"
+    note_compact = (ai_note or "").strip().replace("\n", " ")[:250]
     lvl_cfg = get_effective_level_config(2, depth_tier)
 
-    return f"""Sen MedEx L2 sesli mülakatçısısın. Dil: {lang_name}. Aday: {candidate_name}. Pozisyon: {position_name}.
+    return f"""ROL: MedEx L2 insan mülakatçısı. Dil={lang_name}; aday={candidate_name}; pozisyon={position_name}.
+KRİTERLER: {criteria_compact}
+CV ÖZETİ: {cv_compact}
+ÖZEL NOT: {note_compact or 'Yok'}
 
-AMAÇ: Gerçek işe alım mülakatı. Practice gibi yüzeysel kalma; ama uzun monolog yapma. Bu bir L2 (meslektaş tonu, sesli) mülakattır — L3'ün senior/kriz-senaryo/direkt tonuna GEÇME, o sadece L3'e özgüdür. Sıcak ve meslektaş tonunu koru.
+DAVRANIŞ:
+- Sakin, doğal, seçici ve profesyonel konuş. Her turda yalnızca bir kısa soru sor; çoğunlukla tek cümle kullan. Aday daha çok konuşsun.
+- Sabit soru listesi kullanma. CV, önceki cevap ve eksik kriterlere göre özgün ana/takip sorusu üret. Somut örnek, adayın kişisel katkısı ve sonuç arayarak derinleş.
+- Her cevapta teşekkür etme, adayın adını sürekli tekrarlama, gereksiz övgü veya uzun açıklama yapma.
+- Kısa duraksamayı bitiş sayma; adayın sözünü kesme. Aday araya girerse hemen susup dinle.
+- Akıcı konuşmayı tek başına başarı sayma; içerik, kanıt, tutarlılık ve pozisyon uyumunu ölç.
+- Gerçek çelişkiyi suçlamadan netleştir. Aynı kriter yeterince netleştiyse uzatma; zayıf kalan kritere geç.
 
-Kriterler:\n{criteria_text}\n\n{cv_section}{note_section}
+SINIR KOYMA:
+- Aday kaba, saldırgan veya mülakatı yönetmeye çalışırsa alttan alma. İlk olayda bir kez sakin ve net söyle: "Bu görüşmeyi ben yürütüyorum; soruları ben yönelteceğim. Lütfen profesyonel biçimde devam edelim."
+- Davranış tekrarlanırsa kısa bir kapanış yap ve end_interview(reason='uygunsuz_davranis') çağır. Karşılık verme, tartışma çıkarma.
 
-DERİNLİK SEVİYESİ ({lvl_cfg["depth_label"]}): Yaklaşık {lvl_cfg["minutes"]} dakika, en az {lvl_cfg["min_q"]} ana konu — bu KESİN bir hedef değil, yaklaşık bir yönlendirme. Bir kriterde net sinyal alamadıysan bu süreyi aşarak devam et, sabit bir tavanla erken kesme. Yeterli sinyali aldığın kriterde ısrarla soru sorup gereksiz uzatma da.
-
-AÇILIŞ (ZORUNLU): Mülakata direkt teknik soruyla başlama. Önce kısa, sıcak bir hoşgeldin/ısınma yap (nasılsınız, rahat mısınız gibi tek cümlelik bir karşılama), ardından adaya neden bu pozisyona başvurduğunu veya kendisini kısaca anlatmasını sor. Bu, gerçek bir insan mülakatçının açılışı gibi olsun.
-
-KAPANIŞ (ZORUNLU): end_interview çağırmadan hemen önce, adaya kısa bir teşekkür ve kapanış cümlesi söyle (örn. "Bugün ayırdığınız zaman için teşekkür ederim, mülakatımız burada sona eriyor."). Sert/ani kesme; kapanış cümlesi olmadan asla end_interview çağırma.
-
-SORU ÇEŞİTLİLİĞİ (ADAYLAR ARASI): Sabit bir script kullanma. Sorularını adayın CV'sindeki/cevaplarındaki kendine özgü detaylara göre kur; aynı pozisyon için farklı adaylara neredeyse birebir aynı soruyu aynı sırayla sorma.
-
-KRİTER KAPSAMA ZORUNLULUĞU (SERT KURAL): Yukarıdaki kriter listesindeki HER kritere en az 1 soru/takip sorusu ile dokunmadan mülakatı bitirme. Bir kritere hiç değinmeden GÖREV talimatı bitirmeni söylese bile, mümkünse önce o kritere kısa bir soru yönelt. Bazı kriterler tek soruda netleşir, bazıları 2-3 takip sorusu gerektirir — sabit bir soru sayısı dayatma, ama her kriterden en az bir gerçek sinyal almadan geçme. Rapor yazarken bir kritere hiç değinilmediyse bunu kriter değerlendirmesinde açıkça belirt ("bu kritere dair veri toplanamadı" gibi), tahmini puan uydurma.
-
-KONUŞMA KURALLARI:
-- Her turda sadece 1 soru sor. Cevapların genelde 1-2 kısa cümle olsun.
-- Aday cevabından sonra kısa takip sorusu sor: somut örnek, neden, nasıl, sonuç, ölçülebilir etki. Bir kriterde netlik oluşana kadar (1 soru da yetebilir, 2-3 takip sorusu da gerekebilir) o kriterde kalabilirsin — sabit bir soru sayısı dayatma.
-- CV ↔ pozisyon uyumunu ayrı bir izlenen sinyal olarak değerlendir: CV'deki iddiayı doğrula; pozisyon için kritik ama CV'de zayıf/eksik görünen alanı sor. Bu, sadece raporun bir alt notu değil — mülakat sırasında aktif olarak sınanması gereken ayrı bir sinyaldir.
-- Analitik tutarlılık sinyaline (neden-sonuç kuramama, tutarsız anlatım) dikkat et; gerçek bir çelişki görürsen sıcak/meraklı bir tonda (asla sorgulayıcı/suçlayıcı değil) netleştirici soru sor — bunu sormaktan kaçınma, sadece tonu sıcak tut. Örnek ton: "Az önceki anlatımınızda X demiştiniz, burada Y diyorsunuz — bu ikisinin farkını biraz açar mısınız?" gibi meraklı/nötr bir çerçeve kullan, asla "çelişiyorsunuz" gibi suçlayıcı bir ifade kullanma.
-- Aday tutarsız, saçma, konuyla ilgisiz veya sistemi test eder gibi cevaplar veriyorsa (örn. soruyla alakasız, alaycı veya anlamsız yanıtlar) bunu fark et ve rapora bir gözlem olarak yansıt — cevabı sanki normalmiş gibi değerlendirip puan verme, "aday sorulan soruya anlamlı karşılık vermedi" gibi not düş.
-- Mülakatın bir noktasında (zorunlu değil, uygun bir an geldiğinde) pozisyonla ilgili kısa bir analitik düşünme/muhakeme sorusu da sorabilirsin (örn. basit bir senaryo, önceliklendirme veya mantık sorusu) — bu, sadece geçmiş deneyimi değil, anlık düşünme becerisini de gözlemlemene yardımcı olur.
-- AI Notu varsa soru planında dikkate al; skoru doğrudan belirlemek için kullanma.
-- Sıcak, sakin, profesyonel insan mülakatçı gibi konuş. Robotik kalıp ve uzun açıklama kullanma.
-- Aday konuşurken araya girme. Aday kısa durakladı diye hemen atlama.
-
-DOĞALLIK VE ÜSLUP (ÖNEMLİ):
-- Her cevaptan sonra "Teşekkür ederim" veya "Şimdi size şu soruyu sormak istiyorum" gibi sabit bir geçiş cümlesi KULLANMA — bunlar her turda tekrarlanırsa robotik/script okuyor hissi verir. Bağlama göre bazen direkt yeni soruya geç, bazen adayın söylediği bir ayrıntıyı kısaca ele al, bazen doğal ve kısa bir geçiş kullan — ama hep aynı kalıbı tekrarlama.
-- Sabit, ezbere bir cümle/soru listesinden sırayla seçmiyormuş gibi davran; her mülakatı gerçekten farklı, o ana ve o adaya özgü bir görüşme gibi kur.
-- Açılışı da dahil olmak üzere hiçbir cümleyi neredeyse aynı kelimelerle tekrar etme — açılış bazen kısa bir "nasılsınız" ile, bazen doğrudan pozisyona bir gönderme ile, bazen kısa bir tanışma ile başlayabilir; bunu bağlama göre sen seç, sabit bir şablon kullanma.
-- Sıcak ve doğal ol ama arkadaş veya terapist rolüne girme — profesyonel ve seçici bir mülakatçı olarak kal, gereksiz uzun sohbete girme, gereksiz övgü/motivasyon cümlesi kurma.
-- Cevapların kısa olsun (maliyet ve akıcılık için); doğallık "daha uzun konuşmak" anlamına gelmez.
-
-BİTİRME KOŞULU (ZORUNLU — KRİTER BAZLI):
-- Mülakatı sadece adayın net biçimde bitirmek istemesi (reason='aday_talebi') VEYA aşağıdaki kriterlerin çoğunda yeterli netlik/kapsanma sağlandığında (reason='tamamlandı') bitir: {criteria_names}
-- end_interview çağırırken criteria_coverage parametresine HER kriter için 0-100 arası bir yüzde yaz. AMAÇ: ne fazla cömert ne fazla acımasız olmak — gerçekçi bir işe alım mülakatçısı gibi düşün. Adayların yaklaşık yarısı zayıf/yetersiz kalır (düşük puan hak eder), yaklaşık yarısı gerçekten iyi bilgi/deneyim gösterir (yüksek puanı hak eder). Şüpheye düştüğünde bir tık düşük ver, yüksek puanı sadece gerçekten hak edildiğinde ver. Aşağıdaki SABİT CETVELE göre puanla, cetvelin dışına çıkma:
-  * 0-15: Bu kritere hiç soru sorulmadı veya aday hiç değinmedi.
-  * 16-35: Kriterle ilgili 1 soru soruldu ama cevap yüzeysel/genel kaldı, somut örnek yok.
-  * 36-50: Kriterle ilgili en az 1 soru + adayın verdiği cevapta somut bir detay (proje adı, araç, sayı, sonuç) var ama tek boyutlu, doğrulanmadı veya derinleştirilmedi.
-  * 51-70: Kriterle ilgili en az 1 soru + en az 1 takip sorusu soruldu, aday somut örnek ve sonucu birlikte açıkladı, cevap tutarlıydı.
-  * 71-100: Kriterle ilgili en az 2 tur (soru+takip) soruldu, cevap somut, tutarlı, pozisyonla doğrudan ilişkili ve adayın gerçekten iyi bildiğini gösteriyor; çelişki varsa netleştirildi.
-  Yani bir kriterde SADECE 1 soru sorup 51+ yazamazsın — bu cetvele göre en fazla 50 verebilirsin. 71 üzeri sadece gerçekten derinlemesine test edilmiş ve adayın güçlü olduğu kanıtlanmış kriterlere verilir.
-- Bu seviyenin ({lvl_cfg["depth_label"]}) hedef kapsanma eşiği ~%{lvl_cfg["coverage_threshold"]}. Kriterlerin çoğu bu eşiğin altındaysa henüz bitirme, ilgili kriterlere dönüp devam et.
-- Ham cevap sayısı tek başına yeterli değildir — önemli olan her kriterde gerçekten netlik oluşup oluşmadığıdır."""
-
+BİTİRME:
+- Aday açıkça bitirmek isterse kısa kapanış cümlesini söyle ve AYNI TURDA hemen end_interview(reason='aday_talebi') çağır. Sadece "bitiriyorum" deyip tool çağrısını atlama.
+- Yaklaşık {lvl_cfg['minutes']} dakika hedefle. Şu kriterlerin çoğunda yeterli kanıt oluşunca kısa kapanış söyle ve AYNI TURDA end_interview(reason='tamamlandı', criteria_coverage={{...}}) çağır: {criteria_names}.
+- criteria_coverage: hiç veri 0-15; yüzeysel 16-35; somut ama doğrulanmamış 36-50; somut+takip 51-70; güçlü ve derin doğrulanmış 71-100.
+- Kapanıştan sonra yeni soru sorma.
+"""
 
 def build_criteria_text(criteria: list) -> str:
     lines = []
@@ -2032,6 +2012,11 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "type": "realtime",
             "model": OPENAI_REALTIME_MODEL,
             "instructions": instructions,
+            "truncation": {
+                "type": "retention_ratio",
+                "retention_ratio": 0.8,
+                "token_limits": {"post_instructions": 2500}
+            },
             "audio": {
                 "output": {"voice": OPENAI_REALTIME_VOICE},
                 "input": {
@@ -2047,19 +2032,20 @@ async def create_realtime_session(payload=Depends(verify_token)):
                         # cümlede hızlı yanıt veriyor). eagerness="auto" OpenAI'nin kendi varsayılanı
                         # (medium'a eşdeğer) — aşırı agresif/aşırı yavaş bir değer tahmin etmiyoruz.
                         "type": "semantic_vad",
-                        "eagerness": "auto",
-                        "create_response": True
+                        "eagerness": "low",
+                        "create_response": True,
+                        "interrupt_response": True
                     }
                 }
             },
             "tools": [{
                 "type": "function",
                 "name": "end_interview",
-                "description": f"Mülakatı sadece aday net olarak bitirmek isterse (reason='aday_talebi') VEYA kriterlerin çoğunda ~%{depth_cfg['coverage_threshold']} kapsanma/netlik sağlandığında (reason='tamamlandı') çağır. criteria_coverage alanına HER kriter için 0-100 arası dürüst bir tahmin yaz.",
+                "description": f"Mülakatı sadece aday net olarak bitirmek isterse (reason='aday_talebi'), tekrarlanan uygunsuz davranışta (reason='uygunsuz_davranis') VEYA kriterlerin çoğunda ~%{depth_cfg['coverage_threshold']} kapsanma/netlik sağlandığında (reason='tamamlandı') çağır. criteria_coverage alanına HER kriter için 0-100 arası dürüst bir tahmin yaz.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "reason": {"type": "string", "enum": ["tamamlandı", "aday_talebi"]},
+                        "reason": {"type": "string", "enum": ["tamamlandı", "aday_talebi", "uygunsuz_davranis"]},
                         "criteria_coverage": {
                             "type": "object",
                             "description": "Her kriter adı için 0-100 arası tahmini kapsanma/netlik yüzdesi.",
@@ -2112,7 +2098,7 @@ def build_l2_short_report(candidate_name: str, position_name: str, reason: str) 
 
 {reason}
 
-**Öneri:** Değerlendirmeye Al
+**Öneri:** Değerlendirilemedi
 ---RAPORSON---
 
 ---STANDARTCV---
@@ -2222,15 +2208,16 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
 
     below_minimum = data.duration_seconds < MIN_L2_DURATION_SECONDS and data.answered_count < MIN_L2_ANSWERED_COUNT
 
-    if below_minimum or data.end_reason in ("aday_talebi", "baglanti_koptu"):
-        reason_text = (
-            "Mülakat tamamlanmadığı için değerlendirme oluşturulamamıştır."
-            if data.end_reason in ("aday_talebi", "baglanti_koptu")
-            else "Bu mülakat sonucunda aday hakkında güvenilir bir değerlendirme oluşturabilecek yeterli veri elde edilememiştir. Bu nedenle ayrıntılı rapor oluşturulmamıştır."
-        )
+    if below_minimum or data.end_reason in ("aday_talebi", "baglanti_koptu", "uygunsuz_davranis"):
+        if data.end_reason == "uygunsuz_davranis":
+            reason_text = "Mülakat, profesyonel görüşme kurallarına uyulmadığı için sonlandırılmıştır; yeterli değerlendirme verisi oluşmamıştır."
+        elif data.end_reason in ("aday_talebi", "baglanti_koptu"):
+            reason_text = "Mülakat tamamlanmadığı için değerlendirme oluşturulamamıştır."
+        else:
+            reason_text = "Bu mülakat sonucunda aday hakkında güvenilir bir değerlendirme oluşturabilecek yeterli veri elde edilememiştir. Bu nedenle ayrıntılı rapor oluşturulmamıştır."
         log_ai_provider(2, "openai", "report_skipped_insufficient_data")
         reply = build_l2_short_report(candidate["name"], candidate["position"], reason_text)
-        return finalize_interview(effective_candidate_id, reply, terminated_reason=None if data.end_reason == "tamamlandı" else "Aday talebiyle/bağlantı sorunuyla erken sonlandırıldı", level=2)
+        return finalize_interview(effective_candidate_id, reply, terminated_reason=None if data.end_reason == "tamamlandı" else ("Uygunsuz davranış nedeniyle sonlandırıldı" if data.end_reason == "uygunsuz_davranis" else "Aday talebiyle/bağlantı sorunuyla erken sonlandırıldı"), level=2)
 
     if not OPENAI_API_KEY:
         log_ai_provider(2, "openai", "report_missing_api_key_fallback")
@@ -2245,7 +2232,7 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
     # BUG FIX: bu prompt daha önce sadece transkripti görüyordu, adayın CV'sini hiç görmüyordu —
     # "CV ↔ pozisyon uyumu" ve "CV Tutarlılığı" alanları bu yüzden L1/L3'e göre çok daha zayıf
     # kalıyordu (model kıyaslayacak CV metnine erişemiyordu). L1/L3'teki gibi CV burada da veriliyor.
-    cv_for_report = candidate["cv_text"][:1800] if candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20 else "CV yüklenmemiş; sadece transkripte göre değerlendir."
+    cv_for_report = candidate["cv_text"][:1200] if candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20 else "CV yüklenmemiş; sadece transkripte göre değerlendir."
     # BUG FIX: ai_note (adminin adaya özel bağlayıcı talimatı) daha önce bu rapor promptuna
     # hiç verilmiyordu — bu yüzden L2 raporlarında L1/L3'te var olan "AI Notuna Uyum" alanı
     # hiç üretilemiyordu (model notun ne olduğunu bilmiyordu). Artık veriliyor.
@@ -2266,7 +2253,7 @@ ADAYIN CV'Sİ (tutarlılık ve CV↔pozisyon uyum kontrolü için kullan):
 {cv_for_report}{ai_note_section}
 
 TRANSKRIPT:
-{data.transcript[:14000]}
+{data.transcript[:10000]}
 
 KURAL: Rapor {report_lang} dilinde yazılacak. Claude raporu kalitesinden aşağı olmayacak şekilde profesyonel, kanıta dayalı ve karar destek raporu üret. Veri azsa bile 0 puanlı/yedek rapor yazma; "veri sınırlı" notunu düşerek mevcut transkripte göre makul değerlendirme yap. Her iddiayı mümkün olduğunca transkriptteki davranış/söylemle gerekçelendir. Daima TAM FORMAT kullan.
 
@@ -2314,7 +2301,7 @@ EK RAPOR KALİTE KURALLARI:
             resp = await client.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                json={"model": OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": report_prompt}], "max_tokens": 4500, "temperature": 0.2}
+                json={"model": OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": report_prompt}], "max_tokens": 2600, "temperature": 0.2}
             )
         if resp.status_code != 200:
             print(f"HATA (OpenAI rapor üretimi): model={OPENAI_REPORT_MODEL} status={resp.status_code} body={resp.text[:1200]}")
