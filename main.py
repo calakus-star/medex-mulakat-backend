@@ -791,6 +791,10 @@ DAVRANIŞ:
 - Sakin, doğal, seçici ve profesyonel konuş. Her turda yalnızca bir kısa soru sor; çoğunlukla tek cümle kullan. Aday daha çok konuşsun.
 - Sabit soru listesi kullanma. CV, önceki cevap ve eksik kriterlere göre özgün ana/takip sorusu üret. Somut örnek, adayın kişisel katkısı ve sonuç arayarak derinleş.
 - Her cevapta teşekkür etme, adayın adını sürekli tekrarlama, gereksiz övgü veya uzun açıklama yapma.
+- ROL KİLİDİ: Sen genel sohbet botu, öğretmen, danışman veya konu anlatıcısı değilsin. Yalnızca mülakatçısın.
+- Aday sana bilgi sorusu sorarsa konuyu anlatma. En fazla bir kısa yönlendirme cümlesi kullan ve soruyu adaya geri çevir: “Bu görüşmede sizin yaklaşımınızı değerlendirmem gerekiyor; siz nasıl açıklarsınız/uygularsınız?”
+- Adayın sorusuna verdiğin hiçbir bilgi adayın cevabı veya başarısı sayılmaz. Aday yerine cevap verme, ipucu verme, doğru cevabı öğretme.
+- Her turda tek soru sor. Soruların mümkünse 25 kelimeyi, açıklamaların 12 kelimeyi geçmesin.
 - Kısa duraksamayı bitiş sayma; adayın sözünü kesme. Aday araya girerse hemen susup dinle.
 - Akıcı konuşmayı tek başına başarı sayma; içerik, kanıt, tutarlılık ve pozisyon uyumunu ölç.
 - Gerçek çelişkiyi suçlamadan netleştir. Aynı kriter yeterince netleştiyse uzatma; zayıf kalan kritere geç.
@@ -798,6 +802,11 @@ DAVRANIŞ:
 SINIR KOYMA:
 - Aday kaba, saldırgan veya mülakatı yönetmeye çalışırsa alttan alma. İlk olayda bir kez sakin ve net söyle: "Bu görüşmeyi ben yürütüyorum; soruları ben yönelteceğim. Lütfen profesyonel biçimde devam edelim."
 - Davranış tekrarlanırsa kısa bir kapanış yap ve end_interview(reason='uygunsuz_davranis') çağır. Karşılık verme, tartışma çıkarma.
+
+MÜLAKAT AKIŞI:
+- Sıra: kısa tanışma → mevcut rol/deneyim → pozisyona özel teknik/işlevsel yetkinlik → somut olay ve kişisel katkı → sonuç/ölçüm → davranışsal yetkinlik → motivasyon ve pozisyon uyumu → kısa kapanış.
+- Yüzeysel cevapta somut örnek iste; “biz yaptık” cevabında adayın kişisel katkısını sor; iddiada ölçülebilir sonuç veya doğrulama iste; çelişkide tarafsız netleştirme yap.
+- Aynı bilgiyi yeniden sorma. Yeterince kanıtlanan kriteri kapatıp eksik kritere geç.
 
 BİTİRME:
 - Aday açıkça bitirmek isterse kısa kapanış cümlesini söyle ve AYNI TURDA hemen end_interview(reason='aday_talebi') çağır. Sadece "bitiriyorum" deyip tool çağrısını atlama.
@@ -1714,12 +1723,31 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     score = extract_score(reply)
     recommendation = normalize_recommendation(score, rec_match.group(1) if rec_match else None)
 
+    # İŞ KURALI: Toplam not %20'nin altındaysa kesin aday hükmü verme.
+    # Bu durumda sonuç, düşük puanlı bir "Reddet" değil; güvenilir değerlendirme için
+    # yeterli veriye ulaşılamadığı şeklinde kaydedilir.
+    score_below_evaluation_threshold = score is not None and score < 20
+    if score_below_evaluation_threshold:
+        recommendation = "Değerlendirilemedi"
+
     db = get_db()
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
     messages = get_interview_messages(db, candidate_id, level)
     report = report_match.group(1).strip() if report_match else ""
     if not report or len(strip_markdown(report)) < 60:
         report = build_fallback_report(dict(candidate) if candidate else {}, messages, score, recommendation, "AI rapor bloğu eksik/bozuk geldi")
+    if score_below_evaluation_threshold:
+        report = f"""Aday: {candidate['name'] if candidate else '-'}
+Pozisyon: {candidate['position'] if candidate else '-'}
+Tarih: {datetime.now().strftime('%d.%m.%Y')}
+
+SONUÇ: DEĞERLENDİRİLEMEDİ
+
+Bu mülakat sonucunda aday hakkında güvenilir ve gerçekçi bir değerlendirme oluşturabilecek yeterli veriye ulaşılamamıştır. Toplam not %20 değerlendirme eşiğinin altında kaldığı için sistem kesin bir işe alım veya ret kararı üretmemiştir. Adayın söylemediği hiçbir bilgi varsayılmamış, uydurma değerlendirme yapılmamıştır.
+
+Mevcut transkript ve aday yanıtları yönetici incelemesine sunulmalıdır.
+""".strip()
+
     if not standard_cv:
         standard_cv = f"AD SOYAD: {candidate['name'] if candidate else '-'}\nPOZİSYON: {candidate['position'] if candidate else '-'}\nMÜLAKAT NOTU: Standart CV özeti AI tarafından üretilemedi; adayın yüklediği CV ve yanıtları ayrıca incelenmelidir."
 
@@ -1955,8 +1983,8 @@ class RealtimeSyncRequest(BaseModel):
     usage_delta: Optional[dict] = None  # son sync'ten bu yana biriken usage farkı (kümülatif değil)
     token: Optional[str] = None  # sendBeacon Authorization header gönderemediği için yedek yol
 
-MIN_L2_DURATION_SECONDS = 0  # Rapor üretimini engelleme; kısa testlerde bile kaliteli rapor denensin
-MIN_L2_ANSWERED_COUNT = 0
+MIN_L2_DURATION_SECONDS = 90  # Güvenilir rapor için asgari görüşme süresi
+MIN_L2_ANSWERED_COUNT = 3  # En az üç gerçek aday cevabı olmadan puan/ret üretme
 
 @app.post("/api/realtime/session")
 async def create_realtime_session(payload=Depends(verify_token)):
@@ -2157,6 +2185,33 @@ async def sync_realtime_progress(data: RealtimeSyncRequest, request: Request):
 
     return {"ok": True}
 
+def get_interview_usage_cost(candidate_id: int, level: int = 2) -> float:
+    try:
+        db = get_db()
+        row = db.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) AS total FROM ai_usage_logs WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+        db.close()
+        return float(row["total"] or 0)
+    except Exception:
+        return 0.0
+
+
+def finalize_incomplete_interview(candidate_id: int, report: str, terminated_reason: Optional[str] = None, level: int = 2):
+    """Teknik/erken biten görüşmede sahte 0 puan ve Reddet üretmez."""
+    db = get_db()
+    candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+    standard_cv = f"AD SOYAD: {candidate['name'] if candidate else '-'}\nPOZİSYON: {candidate['position'] if candidate else '-'}\nMÜLAKAT NOTU: Görüşme tamamlanamadığı için puanlama yapılmadı."
+    db.execute("""
+        UPDATE interviews SET report=?, standard_cv=?, score=NULL, recommendation='Değerlendirilemedi', completed_at=CURRENT_TIMESTAMP
+        WHERE candidate_id=? AND level=? AND completed_at IS NULL
+    """, (report, standard_cv, candidate_id, level))
+    if candidate and (candidate["level"] or 1) == level:
+        db.execute("UPDATE candidates SET status='completed', completed_at=CURRENT_TIMESTAMP, terminated_reason=? WHERE id=?", (terminated_reason, candidate_id))
+    db.commit(); db.close()
+    if candidate:
+        send_report_email(candidate["name"], candidate["position"], report, None, "Değerlendirilemedi", standard_cv, terminated_reason)
+    return {"message": "Mülakat tamamlandı. Yeterli veri oluşmadığı için puanlama yapılmadı.", "completed": True, "score": None, "recommendation": "Değerlendirilemedi"}
+
+
 @app.post("/api/realtime/report")
 async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_token)):
     if payload.get("role") != "candidate":
@@ -2216,8 +2271,8 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
         else:
             reason_text = "Bu mülakat sonucunda aday hakkında güvenilir bir değerlendirme oluşturabilecek yeterli veri elde edilememiştir. Bu nedenle ayrıntılı rapor oluşturulmamıştır."
         log_ai_provider(2, "openai", "report_skipped_insufficient_data")
-        reply = build_l2_short_report(candidate["name"], candidate["position"], reason_text)
-        return finalize_interview(effective_candidate_id, reply, terminated_reason=None if data.end_reason == "tamamlandı" else ("Uygunsuz davranış nedeniyle sonlandırıldı" if data.end_reason == "uygunsuz_davranis" else "Aday talebiyle/bağlantı sorunuyla erken sonlandırıldı"), level=2)
+        report = f"Aday: {candidate['name']}\nPozisyon: {candidate['position']}\n\nSONUÇ: DEĞERLENDİRİLEMEDİ\n\n{reason_text} Adayın söylemediği hiçbir bilgi eklenmemiş ve otomatik ret kararı verilmemiştir."
+        return finalize_incomplete_interview(effective_candidate_id, report, terminated_reason=None if data.end_reason == "tamamlandı" else ("Uygunsuz davranış nedeniyle sonlandırıldı" if data.end_reason == "uygunsuz_davranis" else "Aday talebiyle/bağlantı sorunuyla erken sonlandırıldı"), level=2)
 
     if not OPENAI_API_KEY:
         log_ai_provider(2, "openai", "report_missing_api_key_fallback")
@@ -2255,7 +2310,14 @@ ADAYIN CV'Sİ (tutarlılık ve CV↔pozisyon uyum kontrolü için kullan):
 TRANSKRIPT:
 {data.transcript[:10000]}
 
-KURAL: Rapor {report_lang} dilinde yazılacak. Claude raporu kalitesinden aşağı olmayacak şekilde profesyonel, kanıta dayalı ve karar destek raporu üret. Veri azsa bile 0 puanlı/yedek rapor yazma; "veri sınırlı" notunu düşerek mevcut transkripte göre makul değerlendirme yap. Her iddiayı mümkün olduğunca transkriptteki davranış/söylemle gerekçelendir. Daima TAM FORMAT kullan.
+KURAL: Rapor {report_lang} dilinde yazılacak. Profesyonel, kanıta dayalı ve karar destek raporu üret.
+- Yalnızca “Aday:” satırlarında adayın söylediği bilgiler kanıttır. “Mülakatçı:” satırındaki açıklama, ipucu veya konu anlatımı adaya ait bilgi/başarı sayılamaz.
+- Adayın söylemediği hiçbir deneyimi, beceriyi, eğitim bilgisini, motivasyonu veya sonucu uydurma.
+- Her puanın gerekçesi adayın somut cevabına dayanmalı. Kanıt yoksa o kriter için “yeterli kanıt yok” yaz ve puanı düşük/boş tut.
+- Mülakatçının rol dışına çıkıp bilgi anlattığı bölümleri raporda “mülakat kalitesi riski” olarak belirt; adaya olumlu ya da olumsuz puan yazma.
+- Çelişki varsa yalnızca gerçekten iki aday ifadesi çelişiyorsa yaz.
+- Güvenilir değerlendirme için veri yetersizse puan/öneri uydurma; [DEĞERLENDİRİLEMEDİ] yaz.
+Daima TAM FORMAT kullan.
 
 TAM FORMAT:
 [MÜLAKATBİTTİ]
@@ -2293,15 +2355,23 @@ EK RAPOR KALİTE KURALLARI:
 - CV ↔ pozisyon uyumunu "CV Tutarlılığı" alanında ayrıca ve açıkça değerlendir — bu alanı boş/genel geçme.
 - ---STANDARTCV--- bloğunu da MUTLAKA doldur — bu, admin panelinde adayın standart özet CV'si olarak gösterilir, boş/placeholder bırakılamaz.
 - Riskleri sert ama adil yaz.
-- "Değerlendirilemedi" sadece transkript tamamen boşsa kullanılabilir; aksi halde puan ver.
+- Kanıt azsa zorla puan verme. Adayın en az üç anlamlı cevabı yoksa [DEĞERLENDİRİLEMEDİ] üret.
 - Çıktı mutlaka [MÜLAKATBİTTİ] ve ---RAPOR--- bloklarıyla başlasın."""
+
+    # Toplam mülakat bütçesi 0,25 USD. Realtime için 0,20 USD, rapor için yaklaşık 0,05 USD ayrılır.
+    # Kayıtlı kullanım zaten sınırı aşmışsa yeni ücretli rapor çağrısı yapma.
+    current_cost = get_interview_usage_cost(effective_candidate_id, 2)
+    if current_cost >= 0.235:
+        log_ai_provider(2, "openai", "report_skipped_budget_limit")
+        report = f"Aday: {candidate['name']}\nPozisyon: {candidate['position']}\n\nSONUÇ: DEĞERLENDİRİLEMEDİ\n\nMaliyet güvenlik sınırı nedeniyle ek rapor çağrısı yapılmadı. Transkript yönetici incelemesine sunulmuştur."
+        return finalize_incomplete_interview(effective_candidate_id, report, terminated_reason="Maliyet güvenlik sınırı", level=2)
 
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                json={"model": OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": report_prompt}], "max_tokens": 2600, "temperature": 0.2}
+                json={"model": OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": report_prompt}], "max_tokens": 2600, "temperature": 0.1}
             )
         if resp.status_code != 200:
             print(f"HATA (OpenAI rapor üretimi): model={OPENAI_REPORT_MODEL} status={resp.status_code} body={resp.text[:1200]}")
