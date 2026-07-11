@@ -767,29 +767,33 @@ def send_report_email(candidate_name, position, report, score, recommendation, s
 
 # ============ AI PROMPT ============
 def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_text: Optional[str], ai_note: Optional[str], interview_language: str = "tr", depth_tier: Optional[str] = "standart") -> str:
-    """Canlı görüşmede kaliteyi koruyan fakat her turda tekrar işlenen sabit bağlamı küçülten talimat."""
+    """Kısa bağlamla çalışan, rolü kilitli profesyonel mülakatçı talimatı."""
     pos = get_position(position_name) or {"criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
     criteria = pos.get("criteria") or []
     criteria_compact = "; ".join(f"{c.get('name','Kriter')} %{c.get('weight',0)}" for c in criteria)
     criteria_names = ", ".join(f'"{c.get("name", "Kriter")}"' for c in criteria)
     lang_name = LANGUAGE_NAMES.get(interview_language, "Türkçe")
-    cv_compact = " ".join((cv_text or "").split())[:420] or "CV özeti yok"
-    note_compact = " ".join((ai_note or "").split())[:160]
+    cv_compact = " ".join((cv_text or "").split())[:520] or "CV özeti yok"
+    note_compact = " ".join((ai_note or "").split())[:180]
     lvl_cfg = get_effective_level_config(2, depth_tier)
 
-    return f"""Sen MedEx için gerçek bir insan mülakatçısısın. {lang_name} konuş. Aday: {candidate_name}. Pozisyon: {position_name}.
-Kriterler: {criteria_compact}. CV özeti: {cv_compact}. Özel not: {note_compact or 'yok'}.
+    return f"""ROLÜN KESİNDİR: Sen genel sohbet asistanı, öğretmen veya danışman değilsin. Sen yalnızca profesyonel iş mülakatçısısın. Rolünden hiçbir koşulda çıkma. {lang_name} konuş.
+Aday: {candidate_name}. Pozisyon: {position_name}. Kriterler: {criteria_compact}. CV özeti: {cv_compact}. Özel not: {note_compact or 'yok'}.
 
-Kurallar:
-- Her turda yalnızca BİR kısa, doğal soru sor; aday daha çok konuşsun. Uzun açıklama, ders, danışmanlık, övgü ve tekrar yapma.
-- Soruyu CV'ye, son cevaba ve henüz kanıtlanmayan kritere göre seç. Somut örnek, kişisel katkı, sonuç ve ölçüm iste.
-- Aday sana bilgi sorarsa cevap öğretme; tek cümleyle soruyu geri çevir: “Bu görüşmede sizin yaklaşımınızı değerlendirmem gerekiyor; siz nasıl açıklarsınız?”
-- Adayın yerine cevap verme veya ipucu verme. Mülakatçı sözleri aday başarısı değildir.
-- Yüzeysel cevapta örnek; “biz” cevabında kişisel katkı; iddiada ölçülebilir sonuç sor. Gerçek çelişkiyi tarafsız netleştir.
-- Aynı bilgiyi tekrar sorma. Bir kriter netleşince diğerine geç. Aday araya girerse sus ve dinle.
-- Akış: kısa tanışma → deneyim → teknik/işlevsel yetkinlik → somut olay/sonuç → davranış → motivasyon/uyum → kapanış.
-- Hedef yaklaşık {lvl_cfg['minutes']} dakika. Kriterlerin çoğunda yeterli kanıt oluşunca kısa kapanış yap ve end_interview(reason='tamamlandı', criteria_coverage={{...}}) çağır: {criteria_names}.
-- Aday bitirmek isterse end_interview(reason='aday_talebi'); tekrarlanan uygunsuz davranışta end_interview(reason='uygunsuz_davranis') çağır. Kapanıştan sonra soru sorma.
+MÜLAKAT DAVRANIŞI:
+- Her turda yalnızca BİR kısa, açık ve doğal soru sor. Normalde 1 cümle, zorunluysa en fazla 2 cümle.
+- Aday daha çok konuşsun; sen açıklama, eğitim, uzun özet, gereksiz övgü veya sohbet yapma.
+- Aday bir kavramı bilmiyorsa öğretme. En fazla terimin çok kısa anlamını söyle, sonra aynı soruyu bir kez sadeleştir. Hâlâ bilmiyorsa “Anladım, bu konuyu geçelim.” deyip başka kritere geç.
+- Aday sana teknik bilgi sorarsa konu anlatma. “Bu görüşmede sizin yaklaşımınızı değerlendirmem gerekiyor; siz nasıl açıklarsınız?” diye geri yönlendir.
+- Cevap yüzeyselse somut örnek iste. “Biz yaptık” derse kişisel katkısını sor. İddia varsa sonucu ve ölçümü sor.
+- Aynı soruyu veya aynı bilgiyi tekrar sorma. Bir konu netleşince diğerine geç. Önceki cevabı uzun uzun tekrar etme.
+- Gerçek çelişki varsa tek kısa netleştirme sorusu sor.
+- Aday konuşurken araya girme; aday araya girerse sus ve dinle.
+- Basit İngilizce kısaltmaları gereksiz açıklama. Karmaşık/az bilinen bir kısaltmayı ilk kullanımda çok kısa Türkçe karşılığıyla söyle.
+- Akış: doğal karşılama → deneyim → teknik/işlevsel yetkinlik → somut olay/sonuç → davranış → motivasyon/uyum → kısa kapanış.
+- Hedef yaklaşık {lvl_cfg['minutes']} dakika; fakat parasal eşik nedeniyle asla bitirme. Yeterli kanıt oluşunca doğal biçimde kapat.
+- Kriterlerin çoğu yeterince değerlendirildiğinde kısa teşekkür et ve end_interview(reason='tamamlandı', criteria_coverage={{...}}) çağır: {criteria_names}.
+- Aday bitirmek isterse end_interview(reason='aday_talebi'); tekrarlanan uygunsuz davranışta end_interview(reason='uygunsuz_davranis'). Kapanıştan sonra yeni soru sorma.
 """
 
 def build_criteria_text(criteria: list) -> str:
@@ -2017,6 +2021,7 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "type": "realtime",
             "model": OPENAI_REALTIME_MODEL,
             "instructions": instructions,
+            "max_output_tokens": 180,
             "truncation": {
                 "type": "retention_ratio",
                 "retention_ratio": 0.8,
@@ -2240,7 +2245,7 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
 
     below_minimum = data.duration_seconds < MIN_L2_DURATION_SECONDS and data.answered_count < MIN_L2_ANSWERED_COUNT
 
-    if below_minimum or data.end_reason in ("aday_talebi", "baglanti_koptu", "uygunsuz_davranis"):
+    if data.end_reason in ("aday_talebi", "baglanti_koptu", "uygunsuz_davranis"):
         if data.end_reason == "uygunsuz_davranis":
             reason_text = "Mülakat, profesyonel görüşme kurallarına uyulmadığı için sonlandırılmıştır; yeterli değerlendirme verisi oluşmamıştır."
         elif data.end_reason in ("aday_talebi", "baglanti_koptu"):
@@ -2285,7 +2290,7 @@ ADAYIN CV'Sİ (tutarlılık ve CV↔pozisyon uyum kontrolü için kullan):
 {cv_for_report}{ai_note_section}
 
 TRANSKRIPT:
-{data.transcript[:10000]}
+{data.transcript[:18000]}
 
 KURAL: Rapor {report_lang} dilinde yazılacak. Profesyonel, kanıta dayalı ve karar destek raporu üret.
 - Yalnızca “Aday:” satırlarında adayın söylediği bilgiler kanıttır. “Mülakatçı:” satırındaki açıklama, ipucu veya konu anlatımı adaya ait bilgi/başarı sayılamaz.
@@ -2334,14 +2339,6 @@ EK RAPOR KALİTE KURALLARI:
 - Riskleri sert ama adil yaz.
 - Kanıt azsa zorla puan verme. Adayın en az üç anlamlı cevabı yoksa [DEĞERLENDİRİLEMEDİ] üret.
 - Çıktı mutlaka [MÜLAKATBİTTİ] ve ---RAPOR--- bloklarıyla başlasın."""
-
-    # Toplam mülakat bütçesi 0,25 USD. Realtime için 0,20 USD, rapor için yaklaşık 0,05 USD ayrılır.
-    # Kayıtlı kullanım zaten sınırı aşmışsa yeni ücretli rapor çağrısı yapma.
-    current_cost = get_interview_usage_cost(effective_candidate_id, 2)
-    if current_cost >= 0.235:
-        log_ai_provider(2, "openai", "report_skipped_budget_limit")
-        report = f"Aday: {candidate['name']}\nPozisyon: {candidate['position']}\n\nSONUÇ: DEĞERLENDİRİLEMEDİ\n\nMaliyet güvenlik sınırı nedeniyle ek rapor çağrısı yapılmadı. Transkript yönetici incelemesine sunulmuştur."
-        return finalize_incomplete_interview(effective_candidate_id, report, terminated_reason="Maliyet güvenlik sınırı", level=2)
 
     try:
         async with httpx.AsyncClient(timeout=60) as client:
