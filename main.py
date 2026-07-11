@@ -2021,12 +2021,6 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "type": "realtime",
             "model": OPENAI_REALTIME_MODEL,
             "instructions": instructions,
-            "max_output_tokens": 180,
-            "truncation": {
-                "type": "retention_ratio",
-                "retention_ratio": 0.8,
-                "token_limits": {"post_instructions": 1800}
-            },
             "audio": {
                 "output": {"voice": OPENAI_REALTIME_VOICE},
                 "input": {
@@ -2044,7 +2038,7 @@ async def create_realtime_session(payload=Depends(verify_token)):
                         "type": "semantic_vad",
                         "eagerness": "low",
                         "create_response": True,
-                        "interrupt_response": True
+                        "interrupt_response": False
                     }
                 }
             },
