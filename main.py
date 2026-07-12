@@ -853,33 +853,43 @@ def send_report_email(candidate_name, position, report, score, recommendation, s
 
 # ============ AI PROMPT ============
 def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_text: Optional[str], ai_note: Optional[str], interview_language: str = "tr", depth_tier: Optional[str] = "standart") -> str:
-    """Kısa bağlamla çalışan, rolü kilitli profesyonel mülakatçı talimatı."""
+    """Rolü, dili, hitabı ve kapanışı kilitli profesyonel L2 mülakatçı talimatı."""
     pos = get_position(position_name) or {"criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
     criteria = pos.get("criteria") or []
     criteria_compact = "; ".join(f"{c.get('name','Kriter')} %{c.get('weight',0)}" for c in criteria)
     criteria_names = ", ".join(f'"{c.get("name", "Kriter")}"' for c in criteria)
     lang_name = LANGUAGE_NAMES.get(interview_language, "Türkçe")
-    cv_compact = " ".join((cv_text or "").split())[:520] or "CV özeti yok"
-    note_compact = " ".join((ai_note or "").split())[:180]
+    cv_compact = " ".join((cv_text or "").split())[:900] or "CV özeti yok"
+    note_compact = " ".join((ai_note or "").split())[:500]
     lvl_cfg = get_effective_level_config(2, depth_tier)
+    depth_label = lvl_cfg.get("depth_label", "Standart")
 
-    return f"""ROLÜN KESİNDİR: Sen genel sohbet asistanı, öğretmen veya danışman değilsin. Sen yalnızca profesyonel iş mülakatçısısın. Rolünden hiçbir koşulda çıkma. {lang_name} konuş.
-Aday: {candidate_name}. Pozisyon: {position_name}. Kriterler: {criteria_compact}. CV özeti: {cv_compact}. Özel not: {note_compact or 'yok'}.
+    return f"""ROLÜN KESİNDİR: Sen genel sohbet asistanı, öğretmen veya danışman değilsin. Sen yalnızca profesyonel iş mülakatçısısın. Rolünden hiçbir koşulda çıkma.
+ANA MÜLAKAT DİLİ: {lang_name}. Bu dili kendiliğinden ASLA değiştirme. Yalnızca Özel Not açıkça başka dilde belirli sayıda soru istiyorsa o kadar soruyu o dilde sor ve hemen {lang_name} diline dön.
+HİTAP: Adaya görüşme boyunca resmî ve tutarlı biçimde “siz” diye hitap et. Türkçede açılış “Hoş geldiniz {candidate_name.split()[0] if candidate_name else ''} Bey/Hanım” mantığında olsun; “sen/siz” karıştırma.
+Aday: {candidate_name}. Pozisyon: {position_name}. Derinlik: {depth_label}. Kriterler: {criteria_compact}. CV özeti: {cv_compact}. Özel not: {note_compact or 'yok'}.
 
 MÜLAKAT DAVRANIŞI:
-- Her turda yalnızca BİR kısa, açık ve doğal soru sor. Normalde 1 cümle, zorunluysa en fazla 2 cümle.
-- Aday daha çok konuşsun; sen açıklama, eğitim, uzun özet, gereksiz övgü veya sohbet yapma.
-- Aday bir kavramı bilmiyorsa öğretme. En fazla terimin çok kısa anlamını söyle, sonra aynı soruyu bir kez sadeleştir. Hâlâ bilmiyorsa “Anladım, bu konuyu geçelim.” deyip başka kritere geç.
-- Aday sana teknik bilgi sorarsa konu anlatma. “Bu görüşmede sizin yaklaşımınızı değerlendirmem gerekiyor; siz nasıl açıklarsınız?” diye geri yönlendir.
-- Cevap yüzeyselse somut örnek iste. “Biz yaptık” derse kişisel katkısını sor. İddia varsa sonucu ve ölçümü sor.
-- Aynı soruyu veya aynı bilgiyi tekrar sorma. Bir konu netleşince diğerine geç. Önceki cevabı uzun uzun tekrar etme.
+- Her turda yalnızca BİR açık, doğal ve amaca hizmet eden soru sor. Gerektiği kadar konuş; cümleyi yarıda kesme, fakat gereksiz sohbet ve eğitim yapma.
+- Aday daha çok konuşsun. Sen uzun özet, gereksiz övgü, konu anlatımı veya danışmanlık yapma.
+- Aday bir kavramı bilmiyorsa öğretme. En fazla terimin tek cümlelik anlamını söyleyip soruyu bir kez sadeleştir; hâlâ bilmiyorsa “Anladım, bu konuyu geçelim.” diyerek başka değerlendirme alanına geç.
+- Aday sana teknik bilgi sorarsa uzun açıklama yapma; mülakatçı rolünde kal ve adayın yaklaşımını sor.
+- Cevap yüzeyselse somut örnek iste. “Biz yaptık” derse kişisel katkısını sor. İddia varsa sonucu, ölçümü, karar gerekçesini veya alternatifleri sor.
+- Adayın yalnızca ne bildiğini değil; soruyu kavrama biçimini, analitik düşünmesini, neden-sonuç kurmasını, problem çözme yaklaşımını, düşünce esnekliğini ve belirsizlikte karar vermesini gözlemle.
+- Aynı soruyu veya aynı konuyu gereksiz tekrar etme. Hangi konuların sorulduğunu ve adayın ne söylediğini unutma; önceki cevaba uygun takip sorusu üret.
 - Gerçek çelişki varsa tek kısa netleştirme sorusu sor.
-- Aday konuşurken araya girme; aday araya girerse sus ve dinle.
-- Basit İngilizce kısaltmaları gereksiz açıklama. Karmaşık/az bilinen bir kısaltmayı ilk kullanımda çok kısa Türkçe karşılığıyla söyle.
-- Akış: doğal karşılama → deneyim → teknik/işlevsel yetkinlik → somut olay/sonuç → davranış → motivasyon/uyum → kısa kapanış.
-- Hedef yaklaşık {lvl_cfg['minutes']} dakika; fakat parasal eşik nedeniyle asla bitirme. Yeterli kanıt oluşunca doğal biçimde kapat.
-- Kriterlerin çoğu yeterince değerlendirildiğinde kısa teşekkür et ve end_interview(reason='tamamlandı', criteria_coverage={{...}}) çağır: {criteria_names}.
-- Aday bitirmek isterse end_interview(reason='aday_talebi'); tekrarlanan uygunsuz davranışta end_interview(reason='uygunsuz_davranis'). Kapanıştan sonra yeni soru sorma.
+- Aday konuşurken araya girme; aday sen konuşurken gerçekten söze girerse sus ve dinle. TV, masa, nefes, öksürük gibi anlamsız kısa sesleri aday cevabı kabul etme.
+- Basit İngilizce kısaltmaları gereksiz açıklama. Karmaşık/az bilinen kısaltmayı ilk kullanımda çok kısa açıkla.
+- STANDART modda geniş kapsam + yeterli derinlik; DERİN modda daha fazla takip, kanıt, çapraz kontrol ve daha uzun görüşme uygula. Derin mod daha çok konuşman değil, adayı daha derin sorgulaman demektir.
+- Akış: doğal karşılama → deneyim → teknik/işlevsel yetkinlik → somut olay/sonuç → analitik/muhakeme → davranış → motivasyon/uyum → profesyonel kapanış.
+- Hedef yaklaşık {lvl_cfg['minutes']} dakika; parasal eşik nedeniyle asla bitirme. Yeterli değerlendirme kanıtı oluşana kadar doğal biçimde sürdür.
+
+KAPANIŞ PROTOKOLÜ ZORUNLUDUR:
+1) Kriterlerin çoğu yeterince değerlendirildiğinde önce mutlaka “Mülakatımızı tamamlamadan önce son olarak eklemek veya özellikle belirtmek istediğiniz bir konu var mı?” diye sor.
+2) Adayın son cevabını dinle.
+3) Ardından kısa ve profesyonel biçimde teşekkür et: “Teşekkür ederim. Görüşmemiz burada tamamlandı. Katılımınız ve ayırdığınız zaman için teşekkür ederim.”
+4) Yalnızca bu kapanış cümlesi tamamen bittikten sonra end_interview(reason='tamamlandı', criteria_coverage={{...}}) çağır: {criteria_names}.
+- Aday açıkça bitirmek isterse end_interview(reason='aday_talebi'); tekrarlanan uygunsuz davranışta end_interview(reason='uygunsuz_davranis').
 """
 
 def build_criteria_text(criteria: list) -> str:
@@ -2132,7 +2142,7 @@ async def create_realtime_session(payload=Depends(verify_token)):
                         # cümlede hızlı yanıt veriyor). eagerness="auto" OpenAI'nin kendi varsayılanı
                         # (medium'a eşdeğer) — aşırı agresif/aşırı yavaş bir değer tahmin etmiyoruz.
                         "type": "semantic_vad",
-                        "eagerness": "low",
+                        "eagerness": "high",
                         "create_response": True,
                         "interrupt_response": False
                     }
@@ -2359,7 +2369,7 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
     # BUG FIX: bu prompt daha önce sadece transkripti görüyordu, adayın CV'sini hiç görmüyordu —
     # "CV ↔ pozisyon uyumu" ve "CV Tutarlılığı" alanları bu yüzden L1/L3'e göre çok daha zayıf
     # kalıyordu (model kıyaslayacak CV metnine erişemiyordu). L1/L3'teki gibi CV burada da veriliyor.
-    cv_for_report = candidate["cv_text"][:1200] if candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20 else "CV yüklenmemiş; sadece transkripte göre değerlendir."
+    cv_for_report = candidate["cv_text"][:7000] if candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20 else "CV yüklenmemiş; sadece transkripte göre değerlendir."
     # BUG FIX: ai_note (adminin adaya özel bağlayıcı talimatı) daha önce bu rapor promptuna
     # hiç verilmiyordu — bu yüzden L2 raporlarında L1/L3'te var olan "AI Notuna Uyum" alanı
     # hiç üretilemiyordu (model notun ne olduğunu bilmiyordu). Artık veriliyor.
@@ -2369,27 +2379,34 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
         ai_note_section = f"\n\nADAY ÖZEL AI NOTU (bu mülakatta bu konuya öncelik verilmiş olmalı, transkriptte nasıl ele alındığını değerlendir):\n{candidate['ai_note'].strip()[:1200]}"
         ai_note_report_field = "\n**AI Notuna Uyum:** (bu adaya özel notun transkriptte nasıl ele alındığını somut olarak yaz: hangi soru/turlarda test edildi, sonucu ne oldu)"
 
-    report_prompt = f"""Aşağıda bir sesli iş mülakatının transkripti var. Bu transkripti değerlendirip rapor üret.
+    report_prompt = f"""Aşağıda bir sesli iş mülakatının transkripti, aday CV'si, pozisyon kriterleri ve derinlik bilgisi vardır. İnsan kaynakları yöneticisinin karar vermesine yardım edecek, adaya özgü ve ayrıntılı bir değerlendirme raporu üret.
 
 Aday: {candidate['name']}
 Pozisyon: {candidate['position']}
+Mülakat seviyesi: Level 2
+Derinlik: {(candidate['depth_tier'] if 'depth_tier' in candidate.keys() else 'standart') or 'standart'}
 Kriterler ({total_weight} puan):
 {criteria_text}
 
-ADAYIN CV'Sİ (tutarlılık ve CV↔pozisyon uyum kontrolü için kullan):
+ADAYIN CV'Sİ:
 {cv_for_report}{ai_note_section}
 
-TRANSKRIPT:
-{data.transcript[:18000]}
+TRANSKRİPT:
+{data.transcript[:30000]}
 
-KURAL: Rapor {report_lang} dilinde yazılacak. Profesyonel, kanıta dayalı ve karar destek raporu üret.
-- Yalnızca “Aday:” satırlarında adayın söylediği bilgiler kanıttır. “Mülakatçı:” satırındaki açıklama, ipucu veya konu anlatımı adaya ait bilgi/başarı sayılamaz.
-- Adayın söylemediği hiçbir deneyimi, beceriyi, eğitim bilgisini, motivasyonu veya sonucu uydurma.
-- Her puanın gerekçesi adayın somut cevabına dayanmalı. Kanıt yoksa o kriter için “yeterli kanıt yok” yaz ve puanı düşük/boş tut.
-- Mülakatçının rol dışına çıkıp bilgi anlattığı bölümleri raporda “mülakat kalitesi riski” olarak belirt; adaya olumlu ya da olumsuz puan yazma.
-- Çelişki varsa yalnızca gerçekten iki aday ifadesi çelişiyorsa yaz.
-- Güvenilir değerlendirme için veri yetersizse puan/öneri uydurma; [DEĞERLENDİRİLEMEDİ] yaz.
-Daima TAM FORMAT kullan.
+TEMEL KURALLAR:
+- Rapor {report_lang} dilinde yazılacak.
+- Yalnızca adayın gerçekten söylediği sözler mülakat kanıtıdır. Mülakatçının açıklamalarını adaya mal etme.
+- CV bilgisi ile mülakat kanıtını ayır: “CV'de belirtilmiştir” ve “mülakatta doğrulanmıştır/doğrulanamamıştır” ifadelerini açık kullan.
+- Adayın söylemediği deneyim, beceri, sonuç, motivasyon veya kişilik özelliği uydurma.
+- Aynı kalıp cümleleri her bölümde tekrar etme. Rapor bu adaya özgü olmalı; somut proje, karar, örnek ve ifadeleri kullan.
+- Sorulmayan veya yeterli veri oluşmayan kriterlere otomatik 0 verme. “Değerlendirilmedi / yeterli kanıt oluşmadı” yaz. Toplam puanı yalnızca gerçekten değerlendirilen kriterlerin ağırlıklarını 100'e normalize ederek hesapla ve raporda hangi kriterlerin değerlendirilmediğini belirt.
+- Aday bir konuda sorulup açıkça bilmediğini/uygulamadığını söylediyse bu “değerlendirildi fakat yetersiz” sayılabilir; hiç sorulmadıysa “değerlendirilmedi” sayılır.
+- Her puan için Kanıt → Analiz → Sonuç zinciri kur.
+- Analitik düşünme, kavrama, muhakeme, neden-sonuç kurma, problem çözme, düşünce esnekliği, öğrenme çevikliği ve belirsizlikte karar verme hakkında yalnızca transkriptte gözlenebilen sinyalleri yaz. IQ, zekâ puanı, psikiyatrik tanı, yalan tespiti veya kesin kişilik teşhisi yapma.
+- Görüşme kalitesi veya teknik kesinti değerlendirmeyi etkilediyse bunu ayrıca belirt; adayı bunun için cezalandırma.
+- En az üç anlamlı aday cevabı yoksa [DEĞERLENDİRİLEMEDİ] üret.
+- Derinlik “derin” ise rapor daha kapsamlı, daha fazla çapraz kanıtlı ve daha ayrıntılı olmalı; standart rapor da kesinlikle yüzeysel olmamalı.
 
 TAM FORMAT:
 [MÜLAKATBİTTİ]
@@ -2398,37 +2415,44 @@ TAM FORMAT:
 **Pozisyon:** {candidate['position']}
 **Tarih:** {datetime.now().strftime('%d.%m.%Y')}
 
+**Yönetici Özeti:** (adayın genel profili, pozisyona uyumu, en güçlü 2-3 sinyal, en önemli 2-3 risk ve karar önerisi; genel kalıp değil, bu adaya özgü)
+
 **TOPLAM PUAN: XX/{total_weight}**
+**Puanlama Kapsamı:** (hangi kriterler değerlendirildi, hangileri değerlendirilmedi; normalize yöntemini kısa açıkla)
 
-{table_template}
+| Kriter | Puan | Kanıt ve Analiz |
+|--------|------|-----------------|
+(her kriteri doldur; veri yoksa puan yerine “Değerlendirilmedi” yaz)
 
-**Tutarlılık / Çelişki Analizi:** ...
-**Güçlü Yönler:** ...
-**Gelişim Alanları:** ...
-**Proje/Deneyim Özeti:** (transkriptte geçen somut proje/deneyimlerin kısa özeti)
-**CV Tutarlılığı:** (yukarıdaki CV ile transkriptte anlatılanlar arasındaki uyum/uyumsuzluk; CV↔pozisyon uyumunu da burada değerlendir)
-**Serbest Gözlemler:** ... (kriter dışı sinyaller; yoksa "Belirtilecek bir gözlem yok" yaz)
-**Genel Kanı:** ...{ai_note_report_field}
+**Analitik Düşünme ve Muhakeme:** (soruyu kavrama, problemi parçalama, neden-sonuç, alternatif kıyaslama, ölçüm/veri kullanımı; somut kanıtlarla)
+**Problem Çözme ve Karar Verme Yaklaşımı:** (izlediği yöntem, seçenekler, riskler, sonuç takibi)
+**Kavrama ve İletişim:** (soruyu doğru anlama, cevabı yapılandırma, açıklık, gereksiz dağılma veya güçlü sentez yeteneği)
+**Tutarlılık / Çelişki Analizi:** (yalnızca gerçek çelişkiler; yoksa açıkça yok de)
+**Güçlü Yönler:** (her maddeyi kanıtla)
+**Gelişim Alanları ve Riskler:** (adayın pozisyon performansına etkisini açıkla; klişe yazma)
+**Öne Çıkan Proje ve Deneyimler:** (transkriptte anlatılan somut örnekler, adayın kişisel katkısı ve sonuçları)
+**CV ↔ Mülakat ↔ Pozisyon Uyumu:** (CV'deki kıdem/deneyim, mülakatta doğrulananlar, doğrulanamayanlar ve pozisyonla bağlantı)
+**Değerlendirilemeyen Alanlar:** (sorulmamış veya yeterli veri oluşmamış alanlar)
+**Takip Mülakatında Sorulması Önerilen Sorular:** (3-6 adet, bu adaya özgü)
+**Serbest Gözlemler:** (kriter dışı ama işle ilgili anlamlı sinyaller; yoksa neden veri oluşmadığını yaz)
+**Genel Kanı:** (kanıtların dengeli sentezi){ai_note_report_field}
 **Öneri:** İşe Al / Değerlendirmeye Al / Reddet
+**Öneri Gerekçesi:** (tek paragraf, somut ve karar destekleyici)
 ---RAPORSON---
 
 ---STANDARTCV---
 **AD SOYAD:** {candidate['name']}
 **POZİSYON:** {candidate['position']}
-**EĞİTİM:** ... (CV'den veya transkriptten)
-**DENEYİM:** ... (kronolojik kısa özet)
+**EĞİTİM:** ...
+**DENEYİM:** ...
 **TEKNİK YETKİNLİKLER:** ...
-**DİL BECERİLERİ:** ... (bilinmiyorsa "Belirtilmedi" yaz)
-**MÜLAKAT NOTU:** ... (puan ve önerinin 1-2 cümlelik özeti)
+**İŞ / SEKTÖR YETKİNLİKLERİ:** ...
+**DİL BECERİLERİ:** ...
+**SERTİFİKALAR:** ...
+**MÜLAKAT NOTU:** ...
 ---STANDARTCVSON---
 
-EK RAPOR KALİTE KURALLARI:
-- Kriter tablosunu mutlaka doldur; her satırda transkriptten somut bir gerekçe ver.
-- CV ↔ pozisyon uyumunu "CV Tutarlılığı" alanında ayrıca ve açıkça değerlendir — bu alanı boş/genel geçme.
-- ---STANDARTCV--- bloğunu da MUTLAKA doldur — bu, admin panelinde adayın standart özet CV'si olarak gösterilir, boş/placeholder bırakılamaz.
-- Riskleri sert ama adil yaz.
-- Kanıt azsa zorla puan verme. Adayın en az üç anlamlı cevabı yoksa [DEĞERLENDİRİLEMEDİ] üret.
-- Çıktı mutlaka [MÜLAKATBİTTİ] ve ---RAPOR--- bloklarıyla başlasın."""
+Çıktı mutlaka [MÜLAKATBİTTİ] ve ---RAPOR--- bloklarıyla başlasın."""
 
     try:
         async with httpx.AsyncClient(timeout=60) as client:
