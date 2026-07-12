@@ -311,12 +311,28 @@ def init_db():
     conn.commit()
 
     def infer_position_category(name: str) -> str:
+        # V14.5'teki özgün kategori mantığı aynen korunur.
         n = name.lower()
-        if any(k in n for k in ["developer", "devops", "qa", "data scientist", "software", "engineer"]): return "Teknoloji"
-        if any(k in n for k in ["finance", "mali", "muhasebe", "kasa"]): return "Finans"
-        if any(k in n for k in ["sales", "satış", "marketing", "pazarlama"]): return "Satış & Pazarlama"
-        if any(k in n for k in ["hr", "insan kaynak"]): return "İnsan Kaynakları"
-        if any(k in n for k in ["project", "product", "business analyst"]): return "Yönetim & Analiz"
+        if any(k in n for k in ["study", "coordinator", "cra", "cta", "ctm", "clinical", "site", "trial", "operations"]):
+            return "Klinik Araştırma"
+        if any(k in n for k in ["medical", "msl", "pharmacovigilance", "regulatory"]):
+            return "Medikal / Regülasyon"
+        if any(k in n for k in ["data", "biostat", "statistic"]):
+            return "Veri Yönetimi"
+        if any(k in n for k in ["quality", "gcp", "qa", "qc"]):
+            return "Kalite"
+        if any(k in n for k in ["laboratory", "lab", "scientist"]):
+            return "Laboratuvar"
+        if any(k in n for k in ["software", "developer", "backend", "frontend", "full stack", "devops", "cto", "product manager", "business analyst", "engineer"]):
+            return "Bilgi Teknolojileri"
+        if any(k in n for k in ["hr", "recruiter", "human"]):
+            return "İnsan Kaynakları"
+        if any(k in n for k in ["finance", "accountant", "accounting"]):
+            return "Finans"
+        if any(k in n for k in ["sales", "marketing", "customer", "product specialist", "representative"]):
+            return "Satış & Pazarlama"
+        if any(k in n for k in ["kasa", "kasiyer", "retail", "mağaza", "magaza"]):
+            return "Perakende & Operasyon"
         return "Genel"
     defaults = [
         ("Study Coordinator (SC)",
@@ -411,7 +427,10 @@ def init_db():
             "INSERT OR IGNORE INTO positions (name, category, role_description, criteria_json) VALUES (?, ?, ?, ?)",
             (name, category, desc, json.dumps(criteria, ensure_ascii=False))
         )
-        conn.execute("UPDATE positions SET category=? WHERE name=? AND (category IS NULL OR category='' OR category='Genel')", (category, name))
+        # PostgreSQL'e ilk geçişte yanlış kategoriler kaydedilmiş olabileceği için,
+        # kodla gelen varsayılan pozisyonların kategorisini V14.5 kurallarına göre düzelt.
+        # Yalnızca defaults listesindeki pozisyonlara uygulanır; kullanıcı eklediği özel pozisyonlara dokunmaz.
+        conn.execute("UPDATE positions SET category=? WHERE name=?", (category, name))
     # TEK SEFERLİK İÇERİK DÜZELTMESİ: defaults listesindeki TÜM pozisyonların kriterleri
     # detaylandırılıp somut araç/standart/yöntem örnekleriyle zenginleştirildi (ör. Business
     # Analyst'te sadece 2/6 kriterin somut kancası vardı — Dokümantasyon->BRD, Test Desteği->UAT
