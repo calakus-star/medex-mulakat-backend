@@ -5,6 +5,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Any
 import sqlite3
+import psycopg
+from psycopg.rows import dict_row
 import hashlib
 import secrets
 import string
@@ -86,171 +88,236 @@ resend.api_key = RESEND_API_KEY
 security = HTTPBearer()
 
 # ============ DB ============
-DB_PATH = os.getenv("DB_PATH", "medex_mulakat.db")  # Railway'de kalıcı Volume'a işaret etsin (örn. /data/medex_mulakat.db)
+# DATABASE_URL varsa Railway PostgreSQL kullanılır. Yoksa yerel geliştirme/geri dönüş için SQLite devam eder.
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DB_PATH = os.getenv("DB_PATH", "medex_mulakat.db")
+USE_POSTGRES = bool(DATABASE_URL)
+
+
+def _pg_sql(sql: str) -> str:
+    """Uygulamadaki SQLite tarzı sorguları PostgreSQL sözdizimine güvenli biçimde uyarlar."""
+    sql = sql.replace("?", "%s")
+    sql = sql.replace("ORDER BY datetime(created_at)", "ORDER BY created_at")
+    if "INSERT OR IGNORE INTO positions" in sql:
+        sql = sql.replace("INSERT OR IGNORE INTO positions", "INSERT INTO positions")
+        sql = sql.rstrip().rstrip(";") + " ON CONFLICT (name) DO NOTHING"
+    return sql
+
+
+class PostgresConnection:
+    """sqlite3.Connection ile aynı temel arayüzü sağlayan küçük PostgreSQL adaptörü."""
+    is_postgres = True
+
+    def __init__(self, url: str):
+        self.conn = psycopg.connect(url, row_factory=dict_row)
+
+    def execute(self, sql: str, params=()):
+        cur = self.conn.cursor()
+        cur.execute(_pg_sql(sql), params or ())
+        return cur
+
+    def executescript(self, script: str):
+        cur = self.conn.cursor()
+        cur.execute(script)
+        return cur
+
+    def commit(self):
+        self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
+
+    def close(self):
+        self.conn.close()
+
 
 def get_db():
+    if USE_POSTGRES:
+        return PostgresConnection(DATABASE_URL)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
+
 def init_db():
     conn = get_db()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS positions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            category TEXT DEFAULT 'Genel',
-            role_description TEXT,
-            criteria_json TEXT NOT NULL,
-            active INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
+    if USE_POSTGRES:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS positions (
+                id BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                category TEXT DEFAULT 'Genel',
+                role_description TEXT,
+                criteria_json TEXT NOT NULL,
+                active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
 
-        CREATE TABLE IF NOT EXISTS candidates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT,
-            phone TEXT,
-            education TEXT,
-            university TEXT,
-            department TEXT,
-            experience_years INTEGER DEFAULT 0,
-            ai_note TEXT,
-            position TEXT NOT NULL,
-            level INTEGER DEFAULT 1,
-            depth_tier TEXT DEFAULT 'standart',
-            interview_language TEXT DEFAULT 'tr',
-            report_language TEXT DEFAULT 'tr',
-            username TEXT UNIQUE,
-            password_hash TEXT,
-            plain_password TEXT,
-            invite_type TEXT DEFAULT 'invite',
-            cv_text TEXT,
-            cv_filename TEXT,
-            reapply_allowed INTEGER DEFAULT 0,
-            previous_candidate_id INTEGER,
-            is_archived INTEGER DEFAULT 0,
-            status TEXT DEFAULT 'pending',
-            violation_count INTEGER DEFAULT 0,
-            terminated_reason TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            completed_at TEXT
-        );
+            CREATE TABLE IF NOT EXISTS candidates (
+                id BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT,
+                phone TEXT,
+                education TEXT,
+                university TEXT,
+                department TEXT,
+                experience_years INTEGER DEFAULT 0,
+                ai_note TEXT,
+                position TEXT NOT NULL,
+                level INTEGER DEFAULT 1,
+                depth_tier TEXT DEFAULT 'standart',
+                interview_language TEXT DEFAULT 'tr',
+                report_language TEXT DEFAULT 'tr',
+                username TEXT UNIQUE,
+                password_hash TEXT,
+                plain_password TEXT,
+                invite_type TEXT DEFAULT 'invite',
+                cv_text TEXT,
+                cv_filename TEXT,
+                reapply_allowed INTEGER DEFAULT 0,
+                previous_candidate_id BIGINT,
+                is_archived INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'pending',
+                violation_count INTEGER DEFAULT 0,
+                terminated_reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP
+            );
 
-        CREATE TABLE IF NOT EXISTS interviews (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            candidate_id INTEGER,
-            level INTEGER DEFAULT 1,
-            closing_asked INTEGER DEFAULT 0,
-            total_input_tokens INTEGER DEFAULT 0,
-            total_output_tokens INTEGER DEFAULT 0,
-            messages TEXT DEFAULT '[]',
-            report TEXT,
-            standard_cv TEXT,
-            score INTEGER,
-            recommendation TEXT,
-            compact_memory TEXT DEFAULT '',
-            question_count INTEGER DEFAULT 0,
-            depth_tier TEXT DEFAULT 'standart',
-            started_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            completed_at TEXT,
-            FOREIGN KEY (candidate_id) REFERENCES candidates(id)
-        );
+            CREATE TABLE IF NOT EXISTS interviews (
+                id BIGSERIAL PRIMARY KEY,
+                candidate_id BIGINT,
+                level INTEGER DEFAULT 1,
+                closing_asked INTEGER DEFAULT 0,
+                total_input_tokens INTEGER DEFAULT 0,
+                total_output_tokens INTEGER DEFAULT 0,
+                messages TEXT DEFAULT '[]',
+                report TEXT,
+                standard_cv TEXT,
+                score INTEGER,
+                recommendation TEXT,
+                compact_memory TEXT DEFAULT '',
+                question_count INTEGER DEFAULT 0,
+                depth_tier TEXT DEFAULT 'standart',
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP,
+                FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
+            );
 
-        CREATE TABLE IF NOT EXISTS snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            candidate_id INTEGER,
-            image_base64 TEXT,
-            captured_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (candidate_id) REFERENCES candidates(id)
-        );
+            CREATE TABLE IF NOT EXISTS snapshots (
+                id BIGSERIAL PRIMARY KEY,
+                candidate_id BIGINT,
+                image_base64 TEXT,
+                captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
+            );
 
-        CREATE TABLE IF NOT EXISTS ai_usage_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            candidate_id INTEGER,
-            level INTEGER DEFAULT 1,
-            provider TEXT,
-            model TEXT,
-            action TEXT,
-            input_tokens INTEGER DEFAULT 0,
-            output_tokens INTEGER DEFAULT 0,
-            audio_input_tokens INTEGER DEFAULT 0,
-            audio_output_tokens INTEGER DEFAULT 0,
-            total_tokens INTEGER DEFAULT 0,
-            estimated_cost_usd REAL DEFAULT 0,
-            raw_json TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (candidate_id) REFERENCES candidates(id)
-        );
-    """)
+            CREATE TABLE IF NOT EXISTS ai_usage_logs (
+                id BIGSERIAL PRIMARY KEY,
+                candidate_id BIGINT,
+                level INTEGER DEFAULT 1,
+                provider TEXT,
+                model TEXT,
+                action TEXT,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                audio_input_tokens INTEGER DEFAULT 0,
+                audio_output_tokens INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
+                estimated_cost_usd DOUBLE PRECISION DEFAULT 0,
+                raw_json TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_candidates_email ON candidates (lower(email));
+            CREATE INDEX IF NOT EXISTS idx_interviews_candidate_level ON interviews (candidate_id, level);
+            CREATE INDEX IF NOT EXISTS idx_snapshots_candidate ON snapshots (candidate_id);
+            CREATE INDEX IF NOT EXISTS idx_usage_candidate_level ON ai_usage_logs (candidate_id, level);
+        """)
+    else:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                category TEXT DEFAULT 'Genel',
+                role_description TEXT,
+                criteria_json TEXT NOT NULL,
+                active INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL, email TEXT, phone TEXT, education TEXT, university TEXT, department TEXT,
+                experience_years INTEGER DEFAULT 0, ai_note TEXT, position TEXT NOT NULL, level INTEGER DEFAULT 1,
+                depth_tier TEXT DEFAULT 'standart', interview_language TEXT DEFAULT 'tr', report_language TEXT DEFAULT 'tr',
+                username TEXT UNIQUE, password_hash TEXT, plain_password TEXT, invite_type TEXT DEFAULT 'invite',
+                cv_text TEXT, cv_filename TEXT, reapply_allowed INTEGER DEFAULT 0, previous_candidate_id INTEGER,
+                is_archived INTEGER DEFAULT 0, status TEXT DEFAULT 'pending', violation_count INTEGER DEFAULT 0,
+                terminated_reason TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, completed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS interviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, candidate_id INTEGER, level INTEGER DEFAULT 1,
+                closing_asked INTEGER DEFAULT 0, total_input_tokens INTEGER DEFAULT 0, total_output_tokens INTEGER DEFAULT 0,
+                messages TEXT DEFAULT '[]', report TEXT, standard_cv TEXT, score INTEGER, recommendation TEXT,
+                compact_memory TEXT DEFAULT '', question_count INTEGER DEFAULT 0, depth_tier TEXT DEFAULT 'standart',
+                started_at TEXT DEFAULT CURRENT_TIMESTAMP, completed_at TEXT,
+                FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, candidate_id INTEGER, image_base64 TEXT,
+                captured_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS ai_usage_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, candidate_id INTEGER, level INTEGER DEFAULT 1,
+                provider TEXT, model TEXT, action TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+                audio_input_tokens INTEGER DEFAULT 0, audio_output_tokens INTEGER DEFAULT 0, total_tokens INTEGER DEFAULT 0,
+                estimated_cost_usd REAL DEFAULT 0, raw_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
+            );
+        """)
     conn.commit()
 
-    # Güvenli migration: eski SQLite dosyası kullanılıyorsa eksik kolonları ekle.
-    # SQLite ADD COLUMN mevcut kolonda hata verir; bu hata bilinçli olarak yutulur.
     migrations = [
-        ("candidates", "email", "TEXT"),
-        ("candidates", "phone", "TEXT"),
-        ("candidates", "education", "TEXT"),
-        ("candidates", "university", "TEXT"),
-        ("candidates", "department", "TEXT"),
-        ("candidates", "experience_years", "INTEGER DEFAULT 0"),
-        ("candidates", "ai_note", "TEXT"),
-        ("candidates", "plain_password", "TEXT"),
-        ("candidates", "cv_text", "TEXT"),
-        ("candidates", "cv_filename", "TEXT"),
-        ("candidates", "violation_count", "INTEGER DEFAULT 0"),
-        ("candidates", "terminated_reason", "TEXT"),
-        ("candidates", "reapply_allowed", "INTEGER DEFAULT 0"),
-        ("candidates", "previous_candidate_id", "INTEGER"),
-        ("candidates", "is_archived", "INTEGER DEFAULT 0"),
-        ("candidates", "level", "INTEGER DEFAULT 1"),
+        ("candidates", "email", "TEXT"), ("candidates", "phone", "TEXT"),
+        ("candidates", "education", "TEXT"), ("candidates", "university", "TEXT"),
+        ("candidates", "department", "TEXT"), ("candidates", "experience_years", "INTEGER DEFAULT 0"),
+        ("candidates", "ai_note", "TEXT"), ("candidates", "plain_password", "TEXT"),
+        ("candidates", "cv_text", "TEXT"), ("candidates", "cv_filename", "TEXT"),
+        ("candidates", "violation_count", "INTEGER DEFAULT 0"), ("candidates", "terminated_reason", "TEXT"),
+        ("candidates", "reapply_allowed", "INTEGER DEFAULT 0"), ("candidates", "previous_candidate_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
+        ("candidates", "is_archived", "INTEGER DEFAULT 0"), ("candidates", "level", "INTEGER DEFAULT 1"),
         ("candidates", "depth_tier", "TEXT DEFAULT 'standart'"),
         ("candidates", "interview_language", "TEXT DEFAULT 'tr'"),
         ("candidates", "report_language", "TEXT DEFAULT 'tr'"),
-        ("interviews", "level", "INTEGER DEFAULT 1"),
-        ("interviews", "closing_asked", "INTEGER DEFAULT 0"),
+        ("interviews", "level", "INTEGER DEFAULT 1"), ("interviews", "closing_asked", "INTEGER DEFAULT 0"),
         ("interviews", "total_input_tokens", "INTEGER DEFAULT 0"),
         ("interviews", "total_output_tokens", "INTEGER DEFAULT 0"),
-        ("positions", "category", "TEXT DEFAULT 'Genel'"),
-        ("interviews", "standard_cv", "TEXT"),
+        ("positions", "category", "TEXT DEFAULT 'Genel'"), ("interviews", "standard_cv", "TEXT"),
         ("interviews", "compact_memory", "TEXT DEFAULT ''"),
         ("interviews", "question_count", "INTEGER DEFAULT 0"),
         ("interviews", "depth_tier", "TEXT DEFAULT 'standart'"),
-        ("ai_usage_logs", "estimated_cost_usd", "REAL DEFAULT 0"),
+        ("ai_usage_logs", "estimated_cost_usd", "DOUBLE PRECISION DEFAULT 0" if USE_POSTGRES else "REAL DEFAULT 0"),
     ]
     for table, column, definition in migrations:
         try:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-        except sqlite3.OperationalError:
-            pass
+            if USE_POSTGRES:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
+            else:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            conn.commit()
+        except Exception:
+            conn.rollback()
     conn.commit()
 
     def infer_position_category(name: str) -> str:
         n = name.lower()
-        if any(k in n for k in ["study", "coordinator", "cra", "cta", "ctm", "clinical", "site", "trial", "operations"]):
-            return "Klinik Araştırma"
-        if any(k in n for k in ["medical", "msl", "pharmacovigilance", "regulatory"]):
-            return "Medikal / Regülasyon"
-        if any(k in n for k in ["data", "biostat", "statistic"]):
-            return "Veri Yönetimi"
-        if any(k in n for k in ["quality", "gcp", "qa", "qc"]):
-            return "Kalite"
-        if any(k in n for k in ["laboratory", "lab", "scientist"]):
-            return "Laboratuvar"
-        if any(k in n for k in ["software", "developer", "backend", "frontend", "full stack", "devops", "cto", "product manager", "business analyst", "engineer"]):
-            return "Bilgi Teknolojileri"
-        if any(k in n for k in ["hr", "recruiter", "human"]):
-            return "İnsan Kaynakları"
-        if any(k in n for k in ["finance", "accountant", "accounting"]):
-            return "Finans"
-        if any(k in n for k in ["sales", "marketing", "customer", "product specialist", "representative"]):
-            return "Satış & Pazarlama"
-        if any(k in n for k in ["kasa", "kasiyer", "retail", "mağaza", "magaza"]):
-            return "Perakende & Operasyon"
+        if any(k in n for k in ["developer", "devops", "qa", "data scientist", "software", "engineer"]): return "Teknoloji"
+        if any(k in n for k in ["finance", "mali", "muhasebe", "kasa"]): return "Finans"
+        if any(k in n for k in ["sales", "satış", "marketing", "pazarlama"]): return "Satış & Pazarlama"
+        if any(k in n for k in ["hr", "insan kaynak"]): return "İnsan Kaynakları"
+        if any(k in n for k in ["project", "product", "business analyst"]): return "Yönetim & Analiz"
         return "Genel"
-
-    # Varsayılan pozisyonları her açılışta eksikse ekle.
-    # Not: Mevcut pozisyonları bozmaz; sadece isim bazlı eksik olanları tamamlar.
     defaults = [
         ("Study Coordinator (SC)",
          "Klinik araştırma merkezinde hasta ziyareti, visit takvimi, CRF/EDC ve saha koordinasyonunu yürüten rol.",
@@ -1104,7 +1171,7 @@ def create_position(data: PositionCreate, payload=Depends(verify_admin)):
             (data.name, data.category, data.role_description, json.dumps([c.dict() for c in data.criteria], ensure_ascii=False))
         )
         db.commit()
-    except sqlite3.IntegrityError:
+    except (sqlite3.IntegrityError, psycopg.IntegrityError):
         db.close()
         raise HTTPException(status_code=400, detail="Bu pozisyon adı zaten var")
     db.close()
@@ -1154,12 +1221,17 @@ def create_candidate(data: CandidateCreate, payload=Depends(verify_admin)):
     password = generate_password()
     password_hash = hash_password(password)
 
-    db.execute("""
+    insert_sql = """
         INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, depth_tier, interview_language, report_language, username, password_hash, plain_password, invite_type, previous_candidate_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'invite', ?)
-    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.depth_tier or "standart", data.interview_language or "tr", data.report_language or "tr", username, password_hash, password, previous_id))
+    """
+    params = (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.depth_tier or "standart", data.interview_language or "tr", data.report_language or "tr", username, password_hash, password, previous_id)
+    if USE_POSTGRES:
+        candidate_id = db.execute(insert_sql + " RETURNING id", params).fetchone()["id"]
+    else:
+        db.execute(insert_sql, params)
+        candidate_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.commit()
-    candidate_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
 
     mail_sent = False
@@ -1181,12 +1253,17 @@ def create_walkin(data: CandidateCreate, payload=Depends(verify_admin)):
     password = generate_password()
     password_hash = hash_password(password)
 
-    db.execute("""
+    insert_sql = """
         INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, depth_tier, interview_language, report_language, username, password_hash, plain_password, invite_type)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'walkin')
-    """, (data.name, email, data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.depth_tier or "standart", data.interview_language or "tr", data.report_language or "tr", username, password_hash, password))
+    """
+    params = (data.name, email, data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.depth_tier or "standart", data.interview_language or "tr", data.report_language or "tr", username, password_hash, password)
+    if USE_POSTGRES:
+        candidate_id = db.execute(insert_sql + " RETURNING id", params).fetchone()["id"]
+    else:
+        db.execute(insert_sql, params)
+        candidate_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.commit()
-    candidate_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
 
     return {
