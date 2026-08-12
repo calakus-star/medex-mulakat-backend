@@ -1467,7 +1467,13 @@ def update_admin_profile(data: AdminProfileUpdate, payload=Depends(verify_admin)
 @app.get("/api/superadmin/organizations")
 def list_organizations(payload=Depends(verify_superadmin)):
     db = get_db()
-    rows = db.execute("SELECT * FROM organizations ORDER BY created_at DESC").fetchall()
+    rows = db.execute("""
+        SELECT o.*,
+            (SELECT COUNT(*) FROM admin_users a WHERE a.org_id = o.id) AS admin_count,
+            (SELECT COUNT(*) FROM candidates c WHERE c.org_id = o.id) AS candidate_count
+        FROM organizations o
+        ORDER BY o.created_at DESC
+    """).fetchall()
     db.close()
     return [dict(r) for r in rows]
 
@@ -1516,6 +1522,16 @@ def create_org_admin(org_id: int, data: OrgAdminCreate, payload=Depends(verify_s
         raise HTTPException(status_code=400, detail="Bu e-posta zaten kayıtlı")
     db.close()
     return {"email": data.email, "password": password, "message": "Kurum admini oluşturuldu"}
+
+@app.get("/api/superadmin/organizations/{org_id}/admins")
+def list_org_admins(org_id: int, payload=Depends(verify_superadmin)):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, org_id, name, email, role, is_active, created_at FROM admin_users WHERE org_id=? ORDER BY created_at DESC",
+        (org_id,)
+    ).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
 
 # ---- Position Management ----
 @app.get("/api/admin/positions")
