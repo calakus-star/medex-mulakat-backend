@@ -100,7 +100,7 @@ def _pg_sql(sql: str) -> str:
     sql = sql.replace("ORDER BY datetime(created_at)", "ORDER BY created_at")
     if "INSERT OR IGNORE INTO positions" in sql:
         sql = sql.replace("INSERT OR IGNORE INTO positions", "INSERT INTO positions")
-        sql = sql.rstrip().rstrip(";") + " ON CONFLICT (name) DO NOTHING"
+        sql = sql.rstrip().rstrip(";") + " ON CONFLICT (org_id, name) DO NOTHING"
     return sql
 
 
@@ -230,10 +230,54 @@ def init_db():
                 FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS organizations (
+                id BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                slug TEXT NOT NULL UNIQUE,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS admin_users (
+                id BIGSERIAL PRIMARY KEY,
+                org_id BIGINT,
+                name TEXT,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT DEFAULT 'org_admin',
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS persons (
+                id BIGSERIAL PRIMARY KEY,
+                org_id BIGINT,
+                full_name TEXT,
+                email TEXT,
+                phone TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS person_notes (
+                id BIGSERIAL PRIMARY KEY,
+                person_id BIGINT,
+                org_id BIGINT,
+                admin_user_id BIGINT,
+                note_type TEXT DEFAULT 'manual',
+                body TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (person_id) REFERENCES persons(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_candidates_email ON candidates (lower(email));
             CREATE INDEX IF NOT EXISTS idx_interviews_candidate_level ON interviews (candidate_id, level);
             CREATE INDEX IF NOT EXISTS idx_snapshots_candidate ON snapshots (candidate_id);
             CREATE INDEX IF NOT EXISTS idx_usage_candidate_level ON ai_usage_logs (candidate_id, level);
+            CREATE INDEX IF NOT EXISTS idx_admin_users_org ON admin_users (org_id);
+            CREATE INDEX IF NOT EXISTS idx_persons_org_email ON persons (org_id, lower(email));
+            CREATE INDEX IF NOT EXISTS idx_persons_org_phone ON persons (org_id, phone);
         """)
     else:
         conn.executescript("""
@@ -275,6 +319,31 @@ def init_db():
                 estimated_cost_usd REAL DEFAULT 0, raw_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS organizations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, is_active INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS admin_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_id INTEGER, name TEXT, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
+                role TEXT DEFAULT 'org_admin', is_active INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE SET NULL
+            );
+            CREATE TABLE IF NOT EXISTS persons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_id INTEGER, full_name TEXT, email TEXT, phone TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE SET NULL
+            );
+            CREATE TABLE IF NOT EXISTS person_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                person_id INTEGER, org_id INTEGER, admin_user_id INTEGER,
+                note_type TEXT DEFAULT 'manual', body TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (person_id) REFERENCES persons(id) ON DELETE CASCADE
+            );
         """)
     conn.commit()
 
@@ -298,6 +367,9 @@ def init_db():
         ("interviews", "question_count", "INTEGER DEFAULT 0"),
         ("interviews", "depth_tier", "TEXT DEFAULT 'standart'"),
         ("ai_usage_logs", "estimated_cost_usd", "DOUBLE PRECISION DEFAULT 0" if USE_POSTGRES else "REAL DEFAULT 0"),
+        ("candidates", "person_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
+        ("candidates", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
+        ("positions", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
     ]
     for table, column, definition in migrations:
         try:
@@ -308,6 +380,65 @@ def init_db():
             conn.commit()
         except Exception:
             conn.rollback()
+    conn.commit()
+
+    # ---- Multi-tenant temel seed + pozisyon benzersizlik göçü ----
+    # hash_password() bu noktada henüz tanımlı değil (init_db() modül yüklenirken
+    # çağrılıyor), bu yüzden hashlib doğrudan kullanılıyor.
+    conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)")
+    conn.commit()
+
+    org_row = conn.execute("SELECT id FROM organizations WHERE slug=?", ("medex",)).fetchone()
+    if not org_row:
+        conn.execute("INSERT INTO organizations (name, slug) VALUES (?, ?)", ("MedeX", "medex"))
+        conn.commit()
+    admin_count = conn.execute("SELECT COUNT(*) AS c FROM admin_users").fetchone()["c"]
+    if not admin_count:
+        conn.execute(
+            "INSERT INTO admin_users (org_id, name, email, password_hash, role) VALUES (?, ?, ?, ?, ?)",
+            (None, "MedeX Süperadmin", ADMIN_EMAIL, hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest(), "superadmin")
+        )
+        conn.commit()
+    medex_org_id = conn.execute("SELECT id FROM organizations WHERE slug=?", ("medex",)).fetchone()["id"]
+
+    # Her kurumun kendi bağımsız pozisyon kopyasını alabilmesi için positions.name'in eski
+    # global UNIQUE kısıtı (org_id, name) bileşik benzersizliğine taşınır. Tek seferlik ve
+    # idempotent — schema_migrations işaretiyle korunur (SQLite ALTER TABLE ile constraint
+    # değiştiremediği için tablo yeniden kurulur; Postgres'te doğrudan constraint değişir).
+    already_migrated = conn.execute("SELECT 1 FROM schema_migrations WHERE name=?", ("positions_org_unique",)).fetchone()
+    if not already_migrated:
+        if USE_POSTGRES:
+            try:
+                conn.execute("ALTER TABLE positions DROP CONSTRAINT IF EXISTS positions_name_key")
+            except Exception:
+                conn.rollback()
+            try:
+                conn.execute("ALTER TABLE positions ADD CONSTRAINT positions_org_name_key UNIQUE (org_id, name)")
+            except Exception:
+                conn.rollback()
+        else:
+            conn.executescript("""
+                CREATE TABLE positions_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    category TEXT DEFAULT 'Genel',
+                    role_description TEXT,
+                    criteria_json TEXT NOT NULL,
+                    active INTEGER DEFAULT 1,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    org_id INTEGER,
+                    UNIQUE(org_id, name)
+                );
+                INSERT INTO positions_new (id, name, category, role_description, criteria_json, active, created_at, org_id)
+                    SELECT id, name, category, role_description, criteria_json, active, created_at, org_id FROM positions;
+                DROP TABLE positions;
+                ALTER TABLE positions_new RENAME TO positions;
+            """)
+        conn.execute("INSERT INTO schema_migrations (name) VALUES (?)", ("positions_org_unique",))
+        conn.commit()
+
+    # Mevcut hazır kataloğu (henüz org_id'siz kalmış olabilecek eski satırlar) MedeX'e bağlar.
+    conn.execute("UPDATE positions SET org_id=? WHERE org_id IS NULL", (medex_org_id,))
     conn.commit()
 
     def infer_position_category(name: str) -> str:
@@ -424,13 +555,14 @@ def init_db():
         criteria = [{"name": n, "weight": w, "desc": d} for n, w, d in criteria_pairs]
         category = infer_position_category(name)
         conn.execute(
-            "INSERT OR IGNORE INTO positions (name, category, role_description, criteria_json) VALUES (?, ?, ?, ?)",
-            (name, category, desc, json.dumps(criteria, ensure_ascii=False))
+            "INSERT OR IGNORE INTO positions (name, category, role_description, criteria_json, org_id) VALUES (?, ?, ?, ?, ?)",
+            (name, category, desc, json.dumps(criteria, ensure_ascii=False), medex_org_id)
         )
         # PostgreSQL'e ilk geçişte yanlış kategoriler kaydedilmiş olabileceği için,
         # kodla gelen varsayılan pozisyonların kategorisini V14.5 kurallarına göre düzelt.
-        # Yalnızca defaults listesindeki pozisyonlara uygulanır; kullanıcı eklediği özel pozisyonlara dokunmaz.
-        conn.execute("UPDATE positions SET category=? WHERE name=?", (category, name))
+        # Yalnızca MedeX'in defaults listesindeki pozisyonlarına uygulanır; kullanıcı eklediği
+        # özel pozisyonlara ve diğer kurumların kendi kopyalarına dokunmaz.
+        conn.execute("UPDATE positions SET category=? WHERE name=? AND org_id=?", (category, name, medex_org_id))
     # TEK SEFERLİK İÇERİK DÜZELTMESİ: defaults listesindeki TÜM pozisyonların kriterleri
     # detaylandırılıp somut araç/standart/yöntem örnekleriyle zenginleştirildi (ör. Business
     # Analyst'te sadece 2/6 kriterin somut kancası vardı — Dokümantasyon->BRD, Test Desteği->UAT
@@ -442,8 +574,45 @@ def init_db():
     # bu bloğu kaldırmamız gerekebilir, haber verin.
     for name, desc, criteria_pairs in defaults:
         forced_json = json.dumps([{"name": n, "weight": w, "desc": d} for n, w, d in criteria_pairs], ensure_ascii=False)
-        conn.execute("UPDATE positions SET criteria_json=? WHERE name=?", (forced_json, name))
+        conn.execute("UPDATE positions SET criteria_json=? WHERE name=? AND org_id=?", (forced_json, name, medex_org_id))
     conn.commit()
+
+    # TEK SEFERLİK BACKFILL: mevcut candidates satırlarına org_id/person_id atar. Sadece
+    # person_id boş olan satır kaldığı sürece çalışır (idempotent) — find_or_create_person()
+    # bu noktada henüz Python fonksiyonu olarak tanımlı değil (init_db() modül yüklenirken
+    # çağrılıyor), bu yüzden aynı e-posta/telefon eşleştirme mantığı burada satır içi tekrarlanır.
+    pending = conn.execute("SELECT id FROM candidates WHERE person_id IS NULL LIMIT 1").fetchone()
+    if pending:
+        rows = conn.execute("SELECT * FROM candidates ORDER BY created_at ASC, id ASC").fetchall()
+        for r in rows:
+            row = dict(r)
+            org_id = None if row.get("invite_type") == "general" else medex_org_id
+            email = (row.get("email") or "").strip().lower()
+            phone = re.sub(r'\D', '', row.get("phone") or "")
+            person_row = None
+            if email:
+                if org_id is None:
+                    person_row = conn.execute("SELECT id FROM persons WHERE org_id IS NULL AND lower(email)=? ORDER BY created_at ASC LIMIT 1", (email,)).fetchone()
+                else:
+                    person_row = conn.execute("SELECT id FROM persons WHERE org_id=? AND lower(email)=? ORDER BY created_at ASC LIMIT 1", (org_id, email)).fetchone()
+            if not person_row and phone:
+                if org_id is None:
+                    person_row = conn.execute("SELECT id FROM persons WHERE org_id IS NULL AND phone=? ORDER BY created_at ASC LIMIT 1", (phone,)).fetchone()
+                else:
+                    person_row = conn.execute("SELECT id FROM persons WHERE org_id=? AND phone=? ORDER BY created_at ASC LIMIT 1", (org_id, phone)).fetchone()
+            if person_row:
+                person_id = person_row["id"]
+            else:
+                insert_sql = "INSERT INTO persons (org_id, full_name, email, phone) VALUES (?, ?, ?, ?)"
+                params = (org_id, row.get("name"), email or None, phone or None)
+                if USE_POSTGRES:
+                    person_id = conn.execute(insert_sql + " RETURNING id", params).fetchone()["id"]
+                else:
+                    conn.execute(insert_sql, params)
+                    person_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute("UPDATE candidates SET org_id=?, person_id=? WHERE id=?", (org_id, person_id, row["id"]))
+        conn.commit()
+
     conn.close()
 
 init_db()
@@ -452,6 +621,19 @@ init_db()
 class AdminLogin(BaseModel):
     email: str
     password: str
+
+class OrganizationCreate(BaseModel):
+    name: str
+    slug: str
+
+class OrgAdminCreate(BaseModel):
+    name: str
+    email: str
+    password: Optional[str] = None
+
+class AdminProfileUpdate(BaseModel):
+    current_password: str
+    new_password: str
 
 class CriterionItem(BaseModel):
     name: str
@@ -463,6 +645,9 @@ class PositionCreate(BaseModel):
     category: str = "Genel"
     role_description: str = ""
     criteria: List[CriterionItem]
+
+class PersonNoteCreate(BaseModel):
+    body: str
 
 class CandidateCreate(BaseModel):
     name: str
@@ -542,11 +727,21 @@ def verify_admin(payload=Depends(verify_token)):
         raise HTTPException(status_code=403, detail="Yetkisiz")
     return payload
 
-def get_position(name: str, db=None):
+def verify_superadmin(payload=Depends(verify_admin)):
+    if payload.get("admin_role") != "superadmin":
+        raise HTTPException(status_code=403, detail="Bu işlem sadece süperadmin tarafından yapılabilir")
+    return payload
+
+def get_position(name: str, db=None, org_id: Optional[int] = None):
     close = False
     if db is None:
         db = get_db(); close = True
-    row = db.execute("SELECT * FROM positions WHERE name=?", (name,)).fetchone()
+    if org_id is not None:
+        row = db.execute("SELECT * FROM positions WHERE name=? AND org_id=?", (name, org_id)).fetchone()
+    else:
+        # org_id verilmezse eski davranış: isme göre ilk eşleşen satır (L1/L2/L3 mülakat
+        # akışı bu şekilde çağırır — davranışı değiştirmemek için buraya dokunulmadı).
+        row = db.execute("SELECT * FROM positions WHERE name=?", (name,)).fetchone()
     if close:
         db.close()
     if not row:
@@ -570,6 +765,51 @@ def find_latest_candidate_by_email(db, email: str):
         "SELECT * FROM candidates WHERE lower(email)=? ORDER BY datetime(created_at) DESC, id DESC LIMIT 1",
         (e,)
     ).fetchone()
+
+def normalize_phone(phone: Optional[str]) -> str:
+    return re.sub(r'\D', '', phone or "")
+
+def find_or_create_person(db, org_id: Optional[int], name: str, email: Optional[str], phone: Optional[str]) -> int:
+    """Aynı kurum (org_id) içinde önce e-posta, sonra telefonla kişi eşleştirir; yoksa yeni `persons` satırı açar."""
+    e = normalize_email(email)
+    p = normalize_phone(phone)
+    row = None
+    if e:
+        if org_id is None:
+            row = db.execute("SELECT * FROM persons WHERE org_id IS NULL AND lower(email)=? ORDER BY created_at DESC LIMIT 1", (e,)).fetchone()
+        else:
+            row = db.execute("SELECT * FROM persons WHERE org_id=? AND lower(email)=? ORDER BY created_at DESC LIMIT 1", (org_id, e)).fetchone()
+    if not row and p:
+        if org_id is None:
+            row = db.execute("SELECT * FROM persons WHERE org_id IS NULL AND phone=? ORDER BY created_at DESC LIMIT 1", (p,)).fetchone()
+        else:
+            row = db.execute("SELECT * FROM persons WHERE org_id=? AND phone=? ORDER BY created_at DESC LIMIT 1", (org_id, p)).fetchone()
+    if row:
+        return row["id"]
+    insert_sql = "INSERT INTO persons (org_id, full_name, email, phone) VALUES (?, ?, ?, ?)"
+    params = (org_id, name, e or None, p or None)
+    if USE_POSTGRES:
+        person_id = db.execute(insert_sql + " RETURNING id", params).fetchone()["id"]
+    else:
+        db.execute(insert_sql, params)
+        person_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.commit()
+    return person_id
+
+def get_medex_org_id(db) -> Optional[int]:
+    row = db.execute("SELECT id FROM organizations WHERE slug=?", ("medex",)).fetchone()
+    return row["id"] if row else None
+
+def get_org_id_for_admin(db, admin_payload: dict, org_id_override: Optional[int] = None) -> Optional[int]:
+    """Org-scoped erişim: org_admin her zaman kendi token'ındaki kuruma kilitlenir.
+    Süperadmin, org_id_override (ör. ?org_id= parametresi) ile başka bir kurumu görüntüleyebilir;
+    belirtmezse (veya eski/claim'siz token ise) MedeX varsayılanına düşer."""
+    if admin_payload.get("admin_role") == "superadmin":
+        return org_id_override or get_medex_org_id(db)
+    org_id = admin_payload.get("org_id")
+    if org_id:
+        return org_id
+    return get_medex_org_id(db)
 
 def build_compact_memory(messages: list, max_chars: int = 2400) -> str:
     """Ekonomik ama tutarlı mülakat hafızası: tüm geçmişi değil, soru-cevap çekirdeğini taşır."""
@@ -1174,16 +1414,107 @@ def root():
 # ---- Admin Auth ----
 @app.post("/api/admin/login")
 def admin_login(data: AdminLogin):
+    db = get_db()
+    row = db.execute("SELECT * FROM admin_users WHERE email=? AND is_active=1", (data.email,)).fetchone()
+    db.close()
+    if row and hash_password(data.password) == row["password_hash"]:
+        token = create_token({
+            "role": "admin", "email": row["email"], "admin_id": row["id"],
+            "org_id": row["org_id"], "admin_role": row["role"],
+        })
+        return {"token": token}
+    # Geçiş güvenliği: admin_users'ta eşleşme yoksa mevcut env-var admin'i kabul et
+    # (medex-admin normalde init_db() ile admin_users'a seed edilir, bu sadece yedek).
     if data.email == ADMIN_EMAIL and data.password == ADMIN_PASSWORD:
-        token = create_token({"role": "admin", "email": data.email})
+        token = create_token({
+            "role": "admin", "email": data.email, "admin_id": None,
+            "org_id": None, "admin_role": "superadmin",
+        })
         return {"token": token}
     raise HTTPException(status_code=401, detail="Hatalı giriş bilgileri")
 
+@app.get("/api/admin/profile")
+def get_admin_profile(payload=Depends(verify_admin)):
+    return {
+        "admin_id": payload.get("admin_id"), "email": payload.get("email"),
+        "org_id": payload.get("org_id"), "admin_role": payload.get("admin_role"),
+    }
+
+@app.put("/api/admin/profile")
+def update_admin_profile(data: AdminProfileUpdate, payload=Depends(verify_admin)):
+    admin_id = payload.get("admin_id")
+    if not admin_id:
+        raise HTTPException(status_code=400, detail="Bu hesap için şifre değişikliği desteklenmiyor (env-var admin). Lütfen bir admin_users kaydı üzerinden giriş yapın.")
+    db = get_db()
+    row = db.execute("SELECT * FROM admin_users WHERE id=?", (admin_id,)).fetchone()
+    if not row or hash_password(data.current_password) != row["password_hash"]:
+        db.close()
+        raise HTTPException(status_code=401, detail="Mevcut şifre hatalı")
+    db.execute("UPDATE admin_users SET password_hash=? WHERE id=?", (hash_password(data.new_password), admin_id))
+    db.commit()
+    db.close()
+    return {"message": "Şifre güncellendi"}
+
+# ---- Süperadmin: Kurum (Organization) Yönetimi ----
+@app.get("/api/superadmin/organizations")
+def list_organizations(payload=Depends(verify_superadmin)):
+    db = get_db()
+    rows = db.execute("SELECT * FROM organizations ORDER BY created_at DESC").fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+@app.post("/api/superadmin/organizations")
+def create_organization(data: OrganizationCreate, payload=Depends(verify_superadmin)):
+    db = get_db()
+    try:
+        db.execute("INSERT INTO organizations (name, slug) VALUES (?, ?)", (data.name, data.slug))
+        db.commit()
+    except (sqlite3.IntegrityError, psycopg.IntegrityError):
+        db.close()
+        raise HTTPException(status_code=400, detail="Bu slug zaten kullanılıyor")
+    org_row = db.execute("SELECT id FROM organizations WHERE slug=?", (data.slug,)).fetchone()
+    new_org_id = org_row["id"]
+
+    # Her kurum, hazır pozisyon kataloğunun kendi bağımsız kopyasıyla başlar (MedeX'in
+    # şablonundan türetilir); bu kopya üzerindeki değişiklikler diğer kurumları etkilemez.
+    medex_org_id = get_medex_org_id(db)
+    if medex_org_id:
+        template = db.execute("SELECT name, category, role_description, criteria_json, active FROM positions WHERE org_id=?", (medex_org_id,)).fetchall()
+        for p in template:
+            db.execute(
+                "INSERT INTO positions (name, category, role_description, criteria_json, active, org_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (p["name"], p["category"], p["role_description"], p["criteria_json"], p["active"], new_org_id)
+            )
+        db.commit()
+    db.close()
+    return {"id": new_org_id, "name": data.name, "slug": data.slug, "message": "Kurum oluşturuldu, pozisyon kataloğu MedeX şablonundan kopyalandı"}
+
+@app.post("/api/superadmin/organizations/{org_id}/admins")
+def create_org_admin(org_id: int, data: OrgAdminCreate, payload=Depends(verify_superadmin)):
+    db = get_db()
+    org = db.execute("SELECT id FROM organizations WHERE id=?", (org_id,)).fetchone()
+    if not org:
+        db.close()
+        raise HTTPException(status_code=404, detail="Kurum bulunamadı")
+    password = data.password or generate_password()
+    try:
+        db.execute(
+            "INSERT INTO admin_users (org_id, name, email, password_hash, role) VALUES (?, ?, ?, ?, ?)",
+            (org_id, data.name, data.email, hash_password(password), "org_admin")
+        )
+        db.commit()
+    except (sqlite3.IntegrityError, psycopg.IntegrityError):
+        db.close()
+        raise HTTPException(status_code=400, detail="Bu e-posta zaten kayıtlı")
+    db.close()
+    return {"email": data.email, "password": password, "message": "Kurum admini oluşturuldu"}
+
 # ---- Position Management ----
 @app.get("/api/admin/positions")
-def list_positions(payload=Depends(verify_admin)):
+def list_positions(payload=Depends(verify_admin), org_id: Optional[int] = None):
     db = get_db()
-    rows = db.execute("SELECT * FROM positions ORDER BY created_at DESC").fetchall()
+    scoped_org_id = get_org_id_for_admin(db, payload, org_id)
+    rows = db.execute("SELECT * FROM positions WHERE org_id=? ORDER BY created_at DESC", (scoped_org_id,)).fetchall()
     db.close()
     return [{
         "id": r["id"], "name": r["name"], "category": r["category"] if "category" in r.keys() else "Genel", "role_description": r["role_description"],
@@ -1194,10 +1525,11 @@ def list_positions(payload=Depends(verify_admin)):
 def create_position(data: PositionCreate, payload=Depends(verify_admin)):
     total = sum(c.weight for c in data.criteria)
     db = get_db()
+    org_id = get_org_id_for_admin(db, payload)
     try:
         db.execute(
-            "INSERT INTO positions (name, category, role_description, criteria_json) VALUES (?, ?, ?, ?)",
-            (data.name, data.category, data.role_description, json.dumps([c.dict() for c in data.criteria], ensure_ascii=False))
+            "INSERT INTO positions (name, category, role_description, criteria_json, org_id) VALUES (?, ?, ?, ?, ?)",
+            (data.name, data.category, data.role_description, json.dumps([c.dict() for c in data.criteria], ensure_ascii=False), org_id)
         )
         db.commit()
     except (sqlite3.IntegrityError, psycopg.IntegrityError):
@@ -1210,6 +1542,11 @@ def create_position(data: PositionCreate, payload=Depends(verify_admin)):
 @app.put("/api/admin/positions/{position_id}")
 def update_position(position_id: int, data: PositionCreate, payload=Depends(verify_admin)):
     db = get_db()
+    org_id = get_org_id_for_admin(db, payload)
+    owned = db.execute("SELECT id FROM positions WHERE id=? AND org_id=?", (position_id, org_id)).fetchone()
+    if not owned:
+        db.close()
+        raise HTTPException(status_code=404, detail="Pozisyon bulunamadı")
     db.execute(
         "UPDATE positions SET name=?, category=?, role_description=?, criteria_json=? WHERE id=?",
         (data.name, data.category, data.role_description, json.dumps([c.dict() for c in data.criteria], ensure_ascii=False), position_id)
@@ -1221,6 +1558,11 @@ def update_position(position_id: int, data: PositionCreate, payload=Depends(veri
 @app.delete("/api/admin/positions/{position_id}")
 def delete_position(position_id: int, payload=Depends(verify_admin)):
     db = get_db()
+    org_id = get_org_id_for_admin(db, payload)
+    owned = db.execute("SELECT id FROM positions WHERE id=? AND org_id=?", (position_id, org_id)).fetchone()
+    if not owned:
+        db.close()
+        raise HTTPException(status_code=404, detail="Pozisyon bulunamadı")
     db.execute("UPDATE positions SET active=0 WHERE id=?", (position_id,))
     db.commit()
     db.close()
@@ -1228,16 +1570,128 @@ def delete_position(position_id: int, payload=Depends(verify_admin)):
 
 # ---- Candidate Management ----
 @app.get("/api/admin/candidates")
-def get_candidates(payload=Depends(verify_admin)):
+def get_candidates(payload=Depends(verify_admin), org_id: Optional[int] = None):
     db = get_db()
+    scoped_org_id = get_org_id_for_admin(db, payload, org_id)
     rows = db.execute("""
         SELECT c.*, i.score, i.recommendation, i.completed_at as interview_completed, i.total_input_tokens, i.total_output_tokens
         FROM candidates c
         LEFT JOIN interviews i ON c.id = i.candidate_id AND i.level = c.level
+        WHERE c.org_id=?
         ORDER BY c.created_at DESC
-    """).fetchall()
+    """, (scoped_org_id,)).fetchall()
     db.close()
     return [dict(r) for r in rows]
+
+@app.get("/api/admin/persons/{person_id}")
+def get_person(person_id: int, payload=Depends(verify_admin)):
+    """Bir kişinin (person) tüm başvuru denemelerini (arşivli dahil) tek yerde döner — Faz 3'teki toplu görünümün temeli."""
+    db = get_db()
+    scoped_org_id = get_org_id_for_admin(db, payload)
+    person = db.execute("SELECT * FROM persons WHERE id=? AND org_id=?", (person_id, scoped_org_id)).fetchone()
+    if not person:
+        db.close()
+        raise HTTPException(status_code=404, detail="Kişi bulunamadı")
+    attempts = db.execute("""
+        SELECT c.id as candidate_id, c.position, c.level, c.depth_tier, c.status, c.invite_type,
+               c.is_archived, c.created_at, c.completed_at,
+               i.score, i.recommendation, i.completed_at as interview_completed_at
+        FROM candidates c
+        LEFT JOIN interviews i ON i.candidate_id = c.id AND i.level = c.level
+        WHERE c.person_id = ?
+        ORDER BY c.created_at DESC
+    """, (person_id,)).fetchall()
+    db.close()
+    return {
+        "person": dict(person),
+        "attempts": [dict(r) for r in attempts],
+    }
+
+@app.get("/api/admin/persons/{person_id}/notes")
+def list_person_notes(person_id: int, payload=Depends(verify_admin)):
+    db = get_db()
+    scoped_org_id = get_org_id_for_admin(db, payload)
+    person = db.execute("SELECT id FROM persons WHERE id=? AND org_id=?", (person_id, scoped_org_id)).fetchone()
+    if not person:
+        db.close()
+        raise HTTPException(status_code=404, detail="Kişi bulunamadı")
+    rows = db.execute("SELECT * FROM person_notes WHERE person_id=? ORDER BY created_at DESC, id DESC", (person_id,)).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+@app.post("/api/admin/persons/{person_id}/notes")
+def create_person_note(person_id: int, data: PersonNoteCreate, payload=Depends(verify_admin)):
+    db = get_db()
+    scoped_org_id = get_org_id_for_admin(db, payload)
+    person = db.execute("SELECT id FROM persons WHERE id=? AND org_id=?", (person_id, scoped_org_id)).fetchone()
+    if not person:
+        db.close()
+        raise HTTPException(status_code=404, detail="Kişi bulunamadı")
+    db.execute(
+        "INSERT INTO person_notes (person_id, org_id, admin_user_id, note_type, body) VALUES (?, ?, ?, 'manual', ?)",
+        (person_id, scoped_org_id, payload.get("admin_id"), data.body)
+    )
+    db.commit()
+    note = db.execute("SELECT * FROM person_notes WHERE person_id=? ORDER BY id DESC LIMIT 1", (person_id,)).fetchone()
+    db.close()
+    return dict(note)
+
+@app.post("/api/admin/persons/{person_id}/evaluate")
+def evaluate_person(person_id: int, payload=Depends(verify_admin)):
+    """Kişinin tüm tamamlanmış mülakat raporlarını Claude'a okutup çapraz bir özet çıkarır.
+    Level 2 canlı akışına dokunmaz — sadece geçmişte üretilmiş rapor metnini (L1/L2/L3 fark etmez) girdi olarak okur."""
+    db = get_db()
+    scoped_org_id = get_org_id_for_admin(db, payload)
+    person = db.execute("SELECT * FROM persons WHERE id=? AND org_id=?", (person_id, scoped_org_id)).fetchone()
+    if not person:
+        db.close()
+        raise HTTPException(status_code=404, detail="Kişi bulunamadı")
+    attempts = db.execute("""
+        SELECT c.position, c.level, c.created_at, i.report, i.score, i.recommendation
+        FROM candidates c
+        JOIN interviews i ON i.candidate_id = c.id AND i.level = c.level
+        WHERE c.person_id = ? AND i.report IS NOT NULL AND i.report != ''
+        ORDER BY c.created_at ASC
+    """, (person_id,)).fetchall()
+    db.close()
+    if not attempts:
+        raise HTTPException(status_code=400, detail="Bu kişi için tamamlanmış/raporlu mülakat bulunamadı")
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=500, detail="Sistem yapılandırma hatası (API anahtarı eksik). Lütfen yöneticinize bildirin.")
+
+    reports_text = "\n\n---\n\n".join(
+        f"[Pozisyon: {a['position']} | Level {a['level']} | Tarih: {a['created_at']} | Puan: {a['score']} | Öneri: {a['recommendation']}]\n{a['report']}"
+        for a in attempts
+    )
+    prompt = (
+        f"Aşağıda \"{person['full_name']}\" adlı kişinin farklı pozisyon ve/veya level'larda yaptığı "
+        f"{len(attempts)} ayrı mülakatın raporları yer alıyor. Bu raporları birlikte değerlendirip "
+        "kısa (en fazla 250 kelime), Türkçe bir özet çıkar: genel güçlü/zayıf yönler, denemeler "
+        "arasındaki tutarlılık veya çelişkiler, ve genel bir işe alım önerisi.\n\n" + reports_text
+    )
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-sonnet-4-6", max_tokens=800,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        summary = response.content[0].text
+        print(f"[AI_PROVIDER] level=cross-person provider=claude action=person_evaluate person_id={person_id}")
+    except anthropic.APIError as e:
+        raise HTTPException(status_code=502, detail=f"Yapay zeka servisinde bir hata oluştu: {str(e)[:200]}")
+    except Exception as e:
+        print(f"HATA (evaluate_person, beklenmeyen): {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Değerlendirme oluşturulurken beklenmeyen bir hata oluştu.")
+
+    db = get_db()
+    db.execute(
+        "INSERT INTO person_notes (person_id, org_id, admin_user_id, note_type, body) VALUES (?, ?, ?, 'ai_summary', ?)",
+        (person_id, scoped_org_id, payload.get("admin_id"), summary)
+    )
+    db.commit()
+    note = db.execute("SELECT * FROM person_notes WHERE person_id=? ORDER BY id DESC LIMIT 1", (person_id,)).fetchone()
+    db.close()
+    return dict(note)
 
 @app.post("/api/admin/candidates")
 def create_candidate(data: CandidateCreate, payload=Depends(verify_admin)):
@@ -1249,12 +1703,14 @@ def create_candidate(data: CandidateCreate, payload=Depends(verify_admin)):
     username = generate_username(data.name, db)
     password = generate_password()
     password_hash = hash_password(password)
+    org_id = get_org_id_for_admin(db, payload)
+    person_id = find_or_create_person(db, org_id, data.name, data.email, data.phone)
 
     insert_sql = """
-        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, depth_tier, interview_language, report_language, username, password_hash, plain_password, invite_type, previous_candidate_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'invite', ?)
+        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, depth_tier, interview_language, report_language, username, password_hash, plain_password, invite_type, previous_candidate_id, org_id, person_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'invite', ?, ?, ?)
     """
-    params = (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.depth_tier or "standart", data.interview_language or "tr", data.report_language or "tr", username, password_hash, password, previous_id)
+    params = (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.depth_tier or "standart", data.interview_language or "tr", data.report_language or "tr", username, password_hash, password, previous_id, org_id, person_id)
     if USE_POSTGRES:
         candidate_id = db.execute(insert_sql + " RETURNING id", params).fetchone()["id"]
     else:
@@ -1281,12 +1737,15 @@ def create_walkin(data: CandidateCreate, payload=Depends(verify_admin)):
     username = generate_username(data.name, db)
     password = generate_password()
     password_hash = hash_password(password)
+    org_id = get_org_id_for_admin(db, payload)
+    # Walk-in'de sahte e-posta üretildiği için kişi eşleştirmesi çoğunlukla telefon üzerinden olur.
+    person_id = find_or_create_person(db, org_id, data.name, data.email, data.phone)
 
     insert_sql = """
-        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, depth_tier, interview_language, report_language, username, password_hash, plain_password, invite_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'walkin')
+        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, depth_tier, interview_language, report_language, username, password_hash, plain_password, invite_type, org_id, person_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'walkin', ?, ?)
     """
-    params = (data.name, email, data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.depth_tier or "standart", data.interview_language or "tr", data.report_language or "tr", username, password_hash, password)
+    params = (data.name, email, data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, data.level or 1, data.depth_tier or "standart", data.interview_language or "tr", data.report_language or "tr", username, password_hash, password, org_id, person_id)
     if USE_POSTGRES:
         candidate_id = db.execute(insert_sql + " RETURNING id", params).fetchone()["id"]
     else:
@@ -1445,7 +1904,8 @@ async def upload_cv(file: UploadFile = File(...), payload=Depends(verify_token))
 @app.get("/api/positions")
 def get_positions_public():
     db = get_db()
-    rows = db.execute("SELECT name, category FROM positions WHERE active=1 ORDER BY category, name").fetchall()
+    medex_org_id = get_medex_org_id(db)
+    rows = db.execute("SELECT name, category FROM positions WHERE active=1 AND org_id=? ORDER BY category, name", (medex_org_id,)).fetchall()
     db.close()
     groups = {}
     for r in rows:
@@ -1513,10 +1973,12 @@ async def general_apply(request: Request):
     username = generate_username(name, db)
     password = generate_password()
     password_hash = hash_password(password)
+    # Genel/bireysel başvuru her zaman org_id=NULL (kurum dışı CV havuzu) olarak etiketlenir.
+    person_id = find_or_create_person(db, None, name, email, phone)
     db.execute("""
-        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, username, password_hash, plain_password, invite_type, previous_candidate_id, cv_text, cv_filename)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'general', ?, ?, ?)
-    """, (name, normalize_email(email), phone, education, university, department, experience_years, ai_note, position, username, password_hash, password, previous_id, cv_text, cv_filename))
+        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, username, password_hash, plain_password, invite_type, previous_candidate_id, cv_text, cv_filename, org_id, person_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'general', ?, ?, ?, NULL, ?)
+    """, (name, normalize_email(email), phone, education, university, department, experience_years, ai_note, position, username, password_hash, password, previous_id, cv_text, cv_filename, person_id))
     db.commit()
     db.close()
 
@@ -1563,6 +2025,10 @@ def start_interview(payload=Depends(verify_token)):
     if not candidate:
         db.close()
         raise HTTPException(status_code=404, detail="Aday kaydı bulunamadı")
+
+    if candidate["invite_type"] == "general":
+        db.close()
+        raise HTTPException(status_code=403, detail="Bu hesap CV havuzu için oluşturulmuştur. Mülakata katılmak için bir kurum daveti gereklidir.")
 
     level = candidate["level"] or 1
 
@@ -2692,7 +3158,8 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
 @app.get("/api/admin/interviews/{candidate_id}/pdf")
 def download_interview_pdf(candidate_id: int, level: Optional[int] = None, payload=Depends(verify_admin)):
     db = get_db()
-    candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+    scoped_org_id = get_org_id_for_admin(db, payload)
+    candidate = db.execute("SELECT * FROM candidates WHERE id=? AND org_id=?", (candidate_id, scoped_org_id)).fetchone()
     target_level = level if level is not None else ((candidate["level"] or 1) if candidate else 1)
     interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, target_level)).fetchone()
     snapshots = db.execute("SELECT id, image_base64, captured_at FROM snapshots WHERE candidate_id=? ORDER BY captured_at ASC", (candidate_id,)).fetchall()
@@ -2702,7 +3169,7 @@ def download_interview_pdf(candidate_id: int, level: Optional[int] = None, paylo
 
     # YETERSİZ VERİ / YARIM MÜLAKAT: skor yoksa ya da %20 barajının altındaysa PDF/detaylı
     # rapor üretilmez — sadece bilgilendirme mesajı döner (revizyon notu kuralı).
-    pos = get_position(candidate["position"])
+    pos = get_position(candidate["position"], org_id=candidate["org_id"] if "org_id" in candidate.keys() else None)
     total_weight = sum(c["weight"] for c in pos["criteria"]) if pos else 100
     score = interview["score"]
     if score is None or (total_weight > 0 and (score / total_weight) < 0.20):
@@ -2721,9 +3188,13 @@ def download_interview_pdf(candidate_id: int, level: Optional[int] = None, paylo
 @app.get("/api/admin/interviews/{candidate_id}")
 def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depends(verify_admin)):
     db = get_db()
+    scoped_org_id = get_org_id_for_admin(db, payload)
+    c = db.execute("SELECT level FROM candidates WHERE id=? AND org_id=?", (candidate_id, scoped_org_id)).fetchone()
+    if not c:
+        db.close()
+        raise HTTPException(status_code=404, detail="Mülakat bulunamadı")
     if level is None:
-        c = db.execute("SELECT level FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-        level = (c["level"] or 1) if c else 1
+        level = c["level"] or 1
     interview = db.execute("""
         SELECT i.*, c.name, c.email, c.phone, c.position, c.education, c.university, c.department, c.experience_years, c.ai_note, c.violation_count, c.terminated_reason, c.cv_filename, c.cv_text
         FROM interviews i JOIN candidates c ON i.candidate_id = c.id
