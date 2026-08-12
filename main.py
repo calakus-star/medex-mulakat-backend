@@ -665,6 +665,14 @@ class CandidateCreate(BaseModel):
     ai_note: Optional[str] = None
     send_email: bool = True
 
+class CvPoolInvite(BaseModel):
+    position: str
+    level: int = 1
+    depth_tier: str = "standart"
+    interview_language: str = "tr"
+    report_language: str = "tr"
+    send_email: bool = True
+
 class CandidateLogin(BaseModel):
     username: str
     password: str
@@ -1692,6 +1700,67 @@ def evaluate_person(person_id: int, payload=Depends(verify_admin)):
     note = db.execute("SELECT * FROM person_notes WHERE person_id=? ORDER BY id DESC LIMIT 1", (person_id,)).fetchone()
     db.close()
     return dict(note)
+
+# ---- CV Havuzu (bireysel/genel başvuranlar — org_id=NULL, kuruma özel değil) ----
+@app.get("/api/admin/cv-pool")
+def get_cv_pool(payload=Depends(verify_admin)):
+    """Genel başvuru ile üye olmuş, henüz hiçbir kuruma davet edilmemiş kişiler.
+    Bu havuz kuruma özel değildir — hangi kurumun admini olursa olsun görebilir."""
+    db = get_db()
+    rows = db.execute("""
+        SELECT id, name, email, phone, position, education, university, department,
+               experience_years, ai_note, cv_filename, cv_text, status, created_at, person_id
+        FROM candidates
+        WHERE invite_type='general'
+        ORDER BY created_at DESC
+    """).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+@app.post("/api/admin/cv-pool/{candidate_id}/invite")
+def invite_from_cv_pool(candidate_id: int, data: CvPoolInvite, payload=Depends(verify_admin)):
+    """Havuzdaki bir kişiyi, çağıran adminin kurumuna gerçek bir mülakat davetine çevirir
+    (yeni kullanıcı adı/şifre üretilir, kuruma özel person kaydı açılır)."""
+    db = get_db()
+    pool_candidate = db.execute("SELECT * FROM candidates WHERE id=? AND invite_type='general'", (candidate_id,)).fetchone()
+    if not pool_candidate:
+        db.close()
+        raise HTTPException(status_code=404, detail="Havuzda böyle bir kayıt bulunamadı")
+
+    org_id = get_org_id_for_admin(db, payload)
+    person_id = find_or_create_person(db, org_id, pool_candidate["name"], pool_candidate["email"], pool_candidate["phone"])
+    username = generate_username(pool_candidate["name"], db)
+    password = generate_password()
+    password_hash = hash_password(password)
+
+    insert_sql = """
+        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, depth_tier, interview_language, report_language, username, password_hash, plain_password, invite_type, cv_text, cv_filename, org_id, person_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'invite', ?, ?, ?, ?)
+    """
+    params = (
+        pool_candidate["name"], pool_candidate["email"], pool_candidate["phone"],
+        pool_candidate["education"], pool_candidate["university"], pool_candidate["department"],
+        pool_candidate["experience_years"] or 0, pool_candidate["ai_note"],
+        data.position, data.level, data.depth_tier, data.interview_language, data.report_language,
+        username, password_hash, password,
+        pool_candidate["cv_text"], pool_candidate["cv_filename"], org_id, person_id,
+    )
+    if USE_POSTGRES:
+        new_id = db.execute(insert_sql + " RETURNING id", params).fetchone()["id"]
+    else:
+        db.execute(insert_sql, params)
+        new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.commit()
+    db.close()
+
+    mail_sent = False
+    if data.send_email and pool_candidate["email"]:
+        mail_sent = send_invite_email(pool_candidate["name"], pool_candidate["email"], username, password, data.position)
+
+    return {
+        "id": new_id, "username": username, "password": password, "mail_sent": mail_sent,
+        "message": "Havuzdaki kişi davet edildi" + (", mail gönderildi" if mail_sent else "")
+    }
 
 @app.post("/api/admin/candidates")
 def create_candidate(data: CandidateCreate, payload=Depends(verify_admin)):
