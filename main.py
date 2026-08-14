@@ -577,10 +577,22 @@ def init_db():
         conn.execute("UPDATE positions SET criteria_json=? WHERE name=? AND org_id=?", (forced_json, name, medex_org_id))
     conn.commit()
 
+    # TEK SEFERLİK ONARIM: ilk sürümde telefon eşleştirmesi e-posta farklı olsa bile devreye
+    # girip aynı telefonu paylaşan FARKLI kişileri yanlışlıkla tek person'a birleştiriyordu.
+    # Bu, o hatayla atanmış tüm person_id'leri sıfırlayıp aşağıdaki (artık düzeltilmiş) backfill
+    # mantığının herkesi doğru şekilde yeniden eşleştirmesini sağlar. Tek seferlik ve idempotent.
+    already_repaired = conn.execute("SELECT 1 FROM schema_migrations WHERE name=?", ("person_email_overrides_phone_fix",)).fetchone()
+    if not already_repaired:
+        conn.execute("UPDATE candidates SET person_id=NULL")
+        conn.execute("INSERT INTO schema_migrations (name) VALUES (?)", ("person_email_overrides_phone_fix",))
+        conn.commit()
+
     # TEK SEFERLİK BACKFILL: mevcut candidates satırlarına org_id/person_id atar. Sadece
     # person_id boş olan satır kaldığı sürece çalışır (idempotent) — find_or_create_person()
     # bu noktada henüz Python fonksiyonu olarak tanımlı değil (init_db() modül yüklenirken
     # çağrılıyor), bu yüzden aynı e-posta/telefon eşleştirme mantığı burada satır içi tekrarlanır.
+    # Telefon SADECE e-posta hiç yoksa (ör. walk-in) kullanılır — farklı e-postalı kişiler asla
+    # sadece ortak telefon yüzünden birleştirilmez.
     pending = conn.execute("SELECT id FROM candidates WHERE person_id IS NULL LIMIT 1").fetchone()
     if pending:
         rows = conn.execute("SELECT * FROM candidates ORDER BY created_at ASC, id ASC").fetchall()
@@ -595,7 +607,7 @@ def init_db():
                     person_row = conn.execute("SELECT id FROM persons WHERE org_id IS NULL AND lower(email)=? ORDER BY created_at ASC LIMIT 1", (email,)).fetchone()
                 else:
                     person_row = conn.execute("SELECT id FROM persons WHERE org_id=? AND lower(email)=? ORDER BY created_at ASC LIMIT 1", (org_id, email)).fetchone()
-            if not person_row and phone:
+            if not person_row and phone and not email:
                 if org_id is None:
                     person_row = conn.execute("SELECT id FROM persons WHERE org_id IS NULL AND phone=? ORDER BY created_at ASC LIMIT 1", (phone,)).fetchone()
                 else:
@@ -778,7 +790,11 @@ def normalize_phone(phone: Optional[str]) -> str:
     return re.sub(r'\D', '', phone or "")
 
 def find_or_create_person(db, org_id: Optional[int], name: str, email: Optional[str], phone: Optional[str]) -> int:
-    """Aynı kurum (org_id) içinde önce e-posta, sonra telefonla kişi eşleştirir; yoksa yeni `persons` satırı açar."""
+    """Aynı kurum (org_id) içinde önce e-posta, sonra (SADECE e-posta hiç yoksa) telefonla kişi
+    eşleştirir; yoksa yeni `persons` satırı açar. Telefon eşleştirmesi bilerek sadece e-postasız
+    kayıtlara (ör. walk-in) uygulanır — aksi halde aynı telefonu paylaşan ama gerçekte farklı
+    kişiler olan adaylar (ör. aynı test telefonuyla oluşturulmuş kayıtlar) yanlışlıkla tek kişi
+    sanılıp birleştirilir."""
     e = normalize_email(email)
     p = normalize_phone(phone)
     row = None
@@ -787,7 +803,7 @@ def find_or_create_person(db, org_id: Optional[int], name: str, email: Optional[
             row = db.execute("SELECT * FROM persons WHERE org_id IS NULL AND lower(email)=? ORDER BY created_at DESC LIMIT 1", (e,)).fetchone()
         else:
             row = db.execute("SELECT * FROM persons WHERE org_id=? AND lower(email)=? ORDER BY created_at DESC LIMIT 1", (org_id, e)).fetchone()
-    if not row and p:
+    if not row and p and not e:
         if org_id is None:
             row = db.execute("SELECT * FROM persons WHERE org_id IS NULL AND phone=? ORDER BY created_at DESC LIMIT 1", (p,)).fetchone()
         else:
