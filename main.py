@@ -3053,6 +3053,12 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
     # üstündeki tanım main.py'de) — L1/L3 ile aynı kaynak. Level SABİT 2: Faz B'nin kararı gereği bu
     # rapor yolu Level 3 adaylar için de OLDUĞU GİBİ (L2 gövdesiyle) kullanılıyor, dallanma yok —
     # candidate_level burada kullanılırsa Level 3'ün rapor gövdesi sessizce L1/L3 stiline döner.
+    #
+    # FAZ D NOTU: L3'e özel rapor bölümü eklemek İKİ adım gerektirir, sadece REPORT_BODY_SECTIONS'a
+    # levels={3} satırı eklemek YETMEZ — bu satır burada okunmadığı sürece L3 sesli yolu o bölümü
+    # asla almaz. Faz D'nin İLK adımı: yukarıdaki sabit 2'yi candidate_level'a çevirmek (ve o anda
+    # L3'ün gerçekten kendi bölümlerini alacağını tekrar uçtan uca doğrulamak) — sonra yeni levels={3}
+    # satırları eklenebilir. Bu iki adım aynı commit'te, sırayla yapılmalı.
     report_body_l2 = build_report_body(2, {
         "candidate_name": candidate["name"], "position_name": candidate["position"],
         "date_str": datetime.now().strftime('%d.%m.%Y'), "total_weight": total_weight,
