@@ -3113,14 +3113,40 @@ def get_snapshots(candidate_id: int, payload=Depends(verify_admin)):
 def _clean_pdf_text(value):
     return (value or "").replace("**", "").replace("---", "").strip()
 
+def format_pdf_datetime(value):
+    """Tüm PDF tarih alanları için tek biçim: 15.08.2026 01:17. Postgres'te interviews.started_at/
+    completed_at native datetime nesnesi olarak dönüyor (str() ile mikro saniyeli çıplak Python
+    biçimine düşüyordu); SQLite'ta metin. İkisini de aynı biçime çevirir."""
+    if not value:
+        return "-"
+    if hasattr(value, "strftime"):
+        return value.strftime("%d.%m.%Y %H:%M")
+    s = str(value).strip().split(".")[0].replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%d.%m.%Y %H:%M")
+        except ValueError:
+            continue
+    return str(value)
+
+def _insert_heading_breaks(text):
+    """AI çıktısı bazen '**Başlık:**' kalıbını önceki cümleden satır sonu koymadan
+    üretiyor (ör. '...somut değildi.**Güçlü Yönler:**'), bu da PDF'te başlığın önceki
+    paragrafa yapışmasına yol açıyor. Yalnızca kalın VE ':' ile biten başlık kalıbını
+    hedefler (ör. **Güçlü Yönler:**) — cümle içi kalın vurguyu (':' ile bitmeyen) etkilemez."""
+    if not text:
+        return text
+    return re.sub(r'(?<!\n)(\*\*[^*\n]+:\*\*)', r'\n\1', text)
+
 def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     try:
+        import glob
         from reportlab.lib import colors as rl_colors
         from reportlab.lib.enums import TA_CENTER
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.units import cm
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak, KeepTogether
         from reportlab.lib.utils import ImageReader
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
@@ -3142,12 +3168,23 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
             "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
         ]
+        # KÖK NEDEN (doğrulandı yerel testle): nixpacks.toml "dejavu_fonts" Nix paketini
+        # /nix/store/<hash>-.../share/fonts/ altına kuruyor; yukarıdaki sabit Debian yolu
+        # (/usr/share/fonts/...) Railway'de hiç var olmuyor. Arama sessizce başarısız olup
+        # aşağıdaki Vera yedeğine düşülüyordu — Vera Türkçe karakterleri karşılıyor (ş/İ/ğ
+        # doğrulandı, bu yüzden başka belirti görülmedi) ama ok karakterini (↔, →) İÇERMİYOR
+        # (fontTools ile doğrulandı). Nix store'daki gerçek konumu glob ile ayrıca ara.
+        try:
+            candidates += sorted(glob.glob("/nix/store/*dejavu*/share/fonts/**/DejaVuSans.ttf", recursive=True))
+            bold_candidates += sorted(glob.glob("/nix/store/*dejavu*/share/fonts/**/DejaVuSans-Bold.ttf", recursive=True))
+        except Exception:
+            pass
         regular = next((f for f in candidates if os.path.exists(f)), None)
         bold = next((f for f in bold_candidates if os.path.exists(f)), None)
         if regular:
             pdfmetrics.registerFont(TTFont("MedeXFont", regular))
             pdfmetrics.registerFont(TTFont("MedeXFont-Bold", bold or regular))
-            return "MedeXFont", "MedeXFont-Bold"
+            return "MedeXFont", "MedeXFont-Bold", True  # DejaVu/Noto/Liberation: ok karakteri destekli
 
         # Son çare: reportlab Vera denenir; Türkçe eksikse loga düşer. Ticari ortamda DejaVu/Noto kurulmalıdır.
         try:
@@ -3159,17 +3196,20 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
                 pdfmetrics.registerFont(TTFont("MedeXFont", vera_regular))
                 pdfmetrics.registerFont(TTFont("MedeXFont-Bold", vera_bold if os.path.exists(vera_bold) else vera_regular))
                 print("UYARI: DejaVu/Noto bulunamadı; Vera kullanılıyor. Türkçe karakter desteği sınırlı olabilir.")
-                return "MedeXFont", "MedeXFont-Bold"
+                return "MedeXFont", "MedeXFont-Bold", False  # Vera: ok karakteri YOK, ASCII karşılığı kullanılmalı
         except Exception as e:
             print(f"UYARI: PDF fontu yüklenemedi: {e}")
 
         print("UYARI: Unicode PDF fontu bulunamadı; Türkçe karakterler bozulabilir.")
-        return "Helvetica", "Helvetica-Bold"
+        return "Helvetica", "Helvetica-Bold", False
 
-    font_regular, font_bold = register_unicode_font()
+    font_regular, font_bold, font_supports_arrow = register_unicode_font()
 
     def ptxt(value):
-        return xml_escape(str(value if value is not None else "-"))
+        text = str(value if value is not None else "-")
+        if not font_supports_arrow:
+            text = text.replace("↔", "-").replace("→", "-")
+        return xml_escape(text)
 
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=1.4*cm, leftMargin=1.4*cm, topMargin=1.2*cm, bottomMargin=1.1*cm)
@@ -3180,6 +3220,7 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     styles.add(ParagraphStyle(name="Small", parent=styles["BodyText"], fontName=font_regular, fontSize=8, leading=10, textColor=rl_colors.HexColor("#64748b")))
     styles.add(ParagraphStyle(name="BodyWrap", parent=styles["BodyText"], fontName=font_regular, fontSize=9.2, leading=12.5, textColor=rl_colors.HexColor("#0f172a"), wordWrap="CJK"))
     styles.add(ParagraphStyle(name="Metric", parent=styles["BodyText"], fontName=font_bold, fontSize=18, leading=22, alignment=TA_CENTER, textColor=rl_colors.HexColor("#1e3a5f")))
+    styles.add(ParagraphStyle(name="MiniHeading", parent=styles["BodyText"], fontName=font_bold, fontSize=9.5, leading=12, textColor=rl_colors.HexColor("#92400e"), spaceBefore=2, spaceAfter=4))
 
     story = []
     story.append(Paragraph("MedeX AI Interview Report", styles["BrandTitle"]))
@@ -3206,12 +3247,12 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     story.append(metric_table)
     story.append(Spacer(1, 10))
 
+    # Kimlik/oturum bilgileri: nötr, tek kaynaklı (candidates tablosu + interview zaman damgaları),
+    # çelişki üretmeyen alanlar.
     info = [
         ["Aday", candidate.get("name") or "-", "Pozisyon", candidate.get("position") or "-"],
         ["E-posta", candidate.get("email") or "-", "Telefon", candidate.get("phone") or "-"],
-        ["Eğitim", candidate.get("education") or "-", "Deneyim", str(candidate.get("experience_years") or 0) + " yıl"],
-        ["Üniversite", candidate.get("university") or "-", "Bölüm", candidate.get("department") or "-"],
-        ["Başlangıç", interview.get("started_at") or "-", "Tamamlanma", interview.get("completed_at") or "-"],
+        ["Başlangıç", format_pdf_datetime(interview.get("started_at")), "Tamamlanma", format_pdf_datetime(interview.get("completed_at"))],
     ]
     t = Table([[Paragraph(ptxt(c), styles["BodyWrap"]) for c in row] for row in info], colWidths=[2.7*cm, 5.8*cm, 2.9*cm, 5.4*cm])
     t.setStyle(TableStyle([
@@ -3225,24 +3266,77 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     ]))
     story.append(t)
 
+    # Başvuru Formu Beyanı: candidates.education/experience_years/university/department —
+    # adayın/adminin form üzerinden girdiği beyan. AI'ın CV metninden çıkardığı bilgi (rapor
+    # gövdesi ve Standart CV) ayrı, bilinçli olarak burada uzlaştırılmıyor — iki farklı kaynak
+    # olduğu görsel olarak (ayrı blok, ayrı renk, ayrı başlık) belli edilir. Boş alan hiç basılmaz.
+    declared_fields = [
+        ("Eğitim", candidate.get("education")),
+        ("Deneyim", (f"{candidate.get('experience_years')} yıl" if candidate.get("experience_years") else None)),
+        ("Üniversite", candidate.get("university")),
+        ("Bölüm", candidate.get("department")),
+    ]
+    declared_rows = [(label, value) for label, value in declared_fields if value]
+    if declared_rows:
+        story.append(Spacer(1, 8))
+        story.append(Paragraph("BAŞVURU FORMU BEYANI", styles["MiniHeading"]))
+        dt = Table(
+            [[Paragraph(ptxt(label), styles["BodyWrap"]), Paragraph(ptxt(value), styles["BodyWrap"])] for label, value in declared_rows],
+            colWidths=[3.0*cm, 13.8*cm],
+        )
+        dt.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,-1), rl_colors.HexColor("#fffbeb")),
+            ("GRID", (0,0), (-1,-1), 0.35, rl_colors.HexColor("#fde68a")),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("FONTNAME", (0,0), (0,-1), font_bold),
+            ("TOPPADDING", (0,0), (-1,-1), 6),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ]))
+        story.append(dt)
+
     if candidate.get("terminated_reason"):
         story.append(Spacer(1, 8))
         story.append(Paragraph(f"<b>İhlal/Sonlandırma:</b> {ptxt(candidate.get('terminated_reason'))}", styles["BodyWrap"]))
 
-    report_text = strip_markdown(interview.get("report")) or "Rapor bulunamadı."
+    def is_heading_line(line):
+        return line.endswith(":") or line.startswith("TOPLAM PUAN") or line.startswith("Öneri:")
+
+    def flow_report_lines(lines, consumed=None):
+        # Başlığın (ör. "Güçlü Yönler:") sayfa sonunda yalnız kalıp gövde metninin bir
+        # sonraki sayfaya taşmasını önlemek için başlığı, kendinden sonraki ilk paragrafla
+        # birlikte KeepTogether içine alır — ikisi birden sayfaya sığmıyorsa ikisi birden
+        # bir sonraki sayfaya geçer, başlık yalnız kalmaz.
+        consumed = consumed or set()
+        flowables = []
+        i, n = 0, len(lines)
+        while i < n:
+            if i in consumed or lines[i].startswith("|"):
+                i += 1
+                continue
+            line = lines[i]
+            is_heading = is_heading_line(line)
+            para = Paragraph(("<b>" + ptxt(line) + "</b>") if is_heading else ptxt(line), styles["BodyWrap"])
+            if is_heading:
+                j = i + 1
+                while j < n and (j in consumed or lines[j].startswith("|")):
+                    j += 1
+                if j < n and not is_heading_line(lines[j]):
+                    next_para = Paragraph(ptxt(lines[j]), styles["BodyWrap"])
+                    flowables.append(KeepTogether([para, Spacer(1, 3), next_para, Spacer(1, 3)]))
+                    i = j + 1
+                    continue
+            flowables.append(para)
+            flowables.append(Spacer(1, 3))
+            i += 1
+        return flowables
+
+    report_text = strip_markdown(_insert_heading_breaks(interview.get("report"))) or "Rapor bulunamadı."
     story.append(Paragraph("AI Değerlendirme Raporu", styles["Section"]))
     lines = [ln.rstrip() for ln in report_text.split("\n") if ln.strip()]
     table_rows, table_consumed = parse_markdown_table(lines)
     if table_rows:
         # Önce tablo dışı üst satırları yaz, sonra kriter tablosunu gerçek tablo yap.
-        for idx, line in enumerate(lines):
-            if idx in table_consumed:
-                continue
-            if line.startswith("|"):
-                continue
-            is_heading = line.endswith(":") or line.startswith("TOPLAM PUAN") or line.startswith("Öneri:")
-            story.append(Paragraph(("<b>" + ptxt(line) + "</b>") if is_heading else ptxt(line), styles["BodyWrap"]))
-            story.append(Spacer(1, 3))
+        story.extend(flow_report_lines(lines, consumed=table_consumed))
         # Yalnızca kriter tablosuna benzeyen satırları tabloya al.
         clean_rows = []
         for row in table_rows:
@@ -3261,17 +3355,13 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
             ]))
             story.append(rt)
     else:
-        for para in lines:
-            is_heading = para.endswith(":") or para.startswith("TOPLAM PUAN") or para.startswith("Öneri:")
-            story.append(Paragraph(("<b>" + ptxt(para) + "</b>") if is_heading else ptxt(para), styles["BodyWrap"]))
-            story.append(Spacer(1, 3))
+        story.extend(flow_report_lines(lines))
 
     if interview.get("standard_cv"):
-        story.append(Paragraph("Standart CV Özeti", styles["Section"]))
-        for para in strip_markdown(interview.get("standard_cv")).split("\n"):
-            if para.strip():
-                story.append(Paragraph(ptxt(para.strip()), styles["BodyWrap"]))
-                story.append(Spacer(1, 3))
+        story.append(Paragraph("Standart CV Özeti (CV'den Çıkarım)", styles["Section"]))
+        cv_text = strip_markdown(_insert_heading_breaks(interview.get("standard_cv")))
+        cv_lines = [ln.rstrip() for ln in cv_text.split("\n") if ln.strip()]
+        story.extend(flow_report_lines(cv_lines))
 
     story.append(PageBreak())
     story.append(Paragraph(f"Kamera Doğrulama Kareleri ({len(snapshots[:4])}/4)", styles["Section"]))
@@ -3286,7 +3376,7 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
                 raw = data_url.split(",", 1)[1] if "," in data_url else data_url
                 img_bytes = base64.b64decode(raw)
                 img = Image(io.BytesIO(img_bytes), width=7.4*cm, height=5.4*cm)
-                cell = [Paragraph(f"<b>Kare {idx}</b><br/><font size=7>{ptxt(snap.get('captured_at',''))}</font>", styles["Small"]), img]
+                cell = [Paragraph(f"<b>Kare {idx}</b><br/><font size=7>{ptxt(format_pdf_datetime(snap.get('captured_at')))}</font>", styles["Small"]), img]
                 row.append(cell)
                 if len(row) == 2:
                     rows.append(row); row = []
