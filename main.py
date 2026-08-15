@@ -1211,6 +1211,76 @@ def build_criteria_table_template(criteria: list) -> str:
         lines.append(f"| {c['name']} | XX/{c['weight']} | ... |")
     return "\n".join(lines)
 
+# ============ RAPOR GÖVDESİ — TEK KAYNAK (Faz C) ============
+# get_system_prompt() (L1/L3) ve /api/realtime/report'un report_prompt'u (L2) aynı "TAM FORMAT"
+# rapor gövdesini iki ayrı f-string olarak bakımı yapıyordu. Bu liste tek kaynaktır: her satır
+# (bölüm anahtarı, hangi level'larda göründüğü, o level(lar)daki BİREBİR AYNI literal metin)
+# üçlüsüdür. ÖNEMLİ: ortak görünen başlıklarda bile (ör. "Tutarlılık / Çelişki Analizi",
+# "Serbest Gözlemler") L1/L3 ve L2'nin talimat metni bugün zaten FARKLIYDI — Faz C bu farkı
+# birleştirmez/iyileştirmez, ikisini de ayrı satır olarak aynen korur. build_report_body(level, ctx)
+# bu listeyi level'a göre süzüp TANIM SIRASIYLA birleştirir; bu sıra bugünkü çıktıyla birebir
+# aynı olacak şekilde kuruldu (L2 = L1/L3 + araya eklenen ek bölümler, LEVELS-TASARIM.md'deki
+# kümülatif ilkeyle örtüşüyor). Faz D'de L3'e yeni bir bölüm eklemek için: aşağıya {3} (veya
+# {1,3}/{2,3}) levels'lı yeni bir satır eklemek yeterli — iki prompt üretim yolu da otomatik alır.
+REPORT_BODY_SECTIONS = [
+    ("aday",           {1, 2, 3}, "**Aday:** {candidate_name}"),
+    ("pozisyon",       {1, 2, 3}, "**Pozisyon:** {position_name}"),
+    ("kategori",       {1, 3},    "**Kategori:** {category}"),
+    ("tarih",          {1, 2, 3}, "**Tarih:** {date_str}"),
+    ("_blank1",        {1, 2, 3}, ""),
+    ("yonetici_ozeti", {2},       "**Yönetici Özeti:** (adayın genel profili, pozisyona uyumu, en güçlü 2-3 sinyal, en önemli 2-3 risk ve karar önerisi; genel kalıp değil, bu adaya özgü)"),
+    ("_blank2",        {2},       ""),
+    ("toplam_puan",    {1, 2, 3}, "**TOPLAM PUAN: XX/{total_weight}**"),
+    ("puanlama_kapsami", {2},     "**Puanlama Kapsamı:** (hangi kriterler değerlendirildi, hangileri değerlendirilmedi; normalize yöntemini kısa açıkla)"),
+    ("_blank3",        {1, 2, 3}, ""),
+    ("kriter_tablosu_l13", {1, 3}, "{table_template}"),
+    ("kriter_tablosu_l2", {2},    "| Kriter | Puan | Kanıt ve Analiz |\n|--------|------|-----------------|\n(her kriteri doldur; veri yoksa puan yerine “Değerlendirilmedi” yaz)"),
+    ("_blank4",        {1, 2, 3}, ""),
+    ("analitik_dusunme", {2},     "**Analitik Düşünme ve Muhakeme:** (soruyu kavrama, problemi parçalama, neden-sonuç, alternatif kıyaslama, ölçüm/veri kullanımı; somut kanıtlarla)"),
+    ("problem_cozme",  {2},       "**Problem Çözme ve Karar Verme Yaklaşımı:** (izlediği yöntem, seçenekler, riskler, sonuç takibi)"),
+    ("kavrama_iletisim", {2},     "**Kavrama ve İletişim:** (soruyu doğru anlama, cevabı yapılandırma, açıklık, gereksiz dağılma veya güçlü sentez yeteneği)"),
+    ("tutarlilik_l13", {1, 3},    "**Tutarlılık / Çelişki Analizi:** ..."),
+    ("tutarlilik_l2",  {2},       "**Tutarlılık / Çelişki Analizi:** (yalnızca gerçek çelişkiler; yoksa açıkça yok de)"),
+    ("guclu_yonler_l13", {1, 3},  "**Güçlü Yönler:** ..."),
+    ("guclu_yonler_l2", {2},      "**Güçlü Yönler:** (her maddeyi kanıtla)"),
+    ("gelisim_l13",    {1, 3},    "**Gelişim Alanları:** ..."),
+    ("gelisim_l2",     {2},       "**Gelişim Alanları ve Riskler:** (adayın pozisyon performansına etkisini açıkla; klişe yazma)"),
+    ("proje_l13",      {1, 3},    "**Proje/Deneyim Özeti:** ..."),
+    ("proje_l2",       {2},       "**Öne Çıkan Proje ve Deneyimler:** (transkriptte anlatılan somut örnekler, adayın kişisel katkısı ve sonuçları)"),
+    ("cv_uyum_l13",    {1, 3},    "**CV Tutarlılığı:** ..."),
+    ("cv_uyum_l2",     {2},       "**CV ↔ Mülakat ↔ Pozisyon Uyumu:** (CV'deki kıdem/deneyim, mülakatta doğrulananlar, doğrulanamayanlar ve pozisyonla bağlantı)"),
+    ("degerlendirilemeyen", {2},  "**Değerlendirilemeyen Alanlar:** (sorulmamış veya yeterli veri oluşmamış alanlar)"),
+    ("takip_sorulari", {2},       "**Takip Mülakatında Sorulması Önerilen Sorular:** (3-6 adet, bu adaya özgü)"),
+    ("serbest_l13",    {1, 3},    "**Serbest Gözlemler:** ... (kriter dışı sinyaller; yoksa \"Belirtilecek bir gözlem yok\" yaz)"),
+    ("serbest_l2",     {2},       "**Serbest Gözlemler:** (kriter dışı ama işle ilgili anlamlı sinyaller; yoksa neden veri oluşmadığını yaz)"),
+    ("genel_kani_l13", {1, 3},    "**Genel Kanı:** ...{note_report_field}"),
+    ("genel_kani_l2",  {2},       "**Genel Kanı:** (kanıtların dengeli sentezi){ai_note_report_field}"),
+    ("oneri",          {1, 2, 3}, "**Öneri:** İşe Al / Değerlendirmeye Al / Reddet"),
+    ("oneri_gerekcesi", {2},      "**Öneri Gerekçesi:** (tek paragraf, somut ve karar destekleyici)"),
+    ("raporson",       {1, 2, 3}, "---RAPORSON---"),
+    ("_blank5",        {1, 2, 3}, ""),
+    ("standartcv_baslangic", {1, 2, 3}, "---STANDARTCV---"),
+    ("ad_soyad",       {1, 2, 3}, "**AD SOYAD:** {candidate_name}"),
+    ("cv_pozisyon",    {1, 2, 3}, "**POZİSYON:** {position_name}"),
+    ("egitim",         {1, 2, 3}, "**EĞİTİM:** ..."),
+    ("deneyim",        {1, 2, 3}, "**DENEYİM:** ..."),
+    ("teknik_yetkinlikler", {1, 2, 3}, "**TEKNİK YETKİNLİKLER:** ..."),
+    ("is_sektor_yetkinlikleri", {2}, "**İŞ / SEKTÖR YETKİNLİKLERİ:** ..."),
+    ("dil_becerileri", {1, 2, 3}, "**DİL BECERİLERİ:** ..."),
+    ("sertifikalar",   {2},       "**SERTİFİKALAR:** ..."),
+    ("mulakat_notu",   {1, 2, 3}, "**MÜLAKAT NOTU:** ..."),
+    ("standartcv_son", {1, 2, 3}, "---STANDARTCVSON---"),
+]
+
+def build_report_body(level: int, ctx: dict) -> str:
+    """REPORT_BODY_SECTIONS'ı verilen level'a göre süzüp tanım sırasıyla birleştirir."""
+    lines = []
+    for _key, levels, text in REPORT_BODY_SECTIONS:
+        if level not in levels:
+            continue
+        lines.append(text.format(**ctx) if "{" in text else text)
+    return "\n".join(lines)
+
 # Level bazlı konfigürasyon: süre (dk), soru sayısı güvenlik ağı, CV zorunluluğu, ton talimatı.
 LEVEL_CONFIG = {
     1: {
@@ -1307,6 +1377,15 @@ Bu notu mülakat boyunca aktif bir koşul olarak uygula: notta bir konu/iddia ge
     if report_language != interview_language:
         lang_instruction += f" AMA mülakat sonundaki RAPOR bloğunu (---RAPOR---'dan itibaren her şey: kriter değerlendirmeleri, analiz, standart CV) mutlaka {report_lang_name} dilinde yaz — rapor dili adayla konuştuğun dilden farklıdır, bu kesin bir kuraldır, karıştırma."
 
+    # Faz C: TAM FORMAT gövdesi (Aday: ... ---STANDARTCVSON---) artık REPORT_BODY_SECTIONS'tan
+    # deriveniyor — bkz. build_criteria_table_template üstündeki tanım. KISA FORMAT (aşağıda)
+    # L1/L3'e özgü kaldığı için listeye dahil edilmedi.
+    report_body_l13 = build_report_body(level or 1, {
+        "candidate_name": candidate_name, "position_name": position_name, "category": category,
+        "date_str": datetime.now().strftime('%d.%m.%Y'), "total_weight": total_weight,
+        "table_template": table_template, "note_report_field": note_report_field,
+    })
+
     return f"""Sen MedeX AI mülakat uzmanısın. {lang_instruction} Aday: {candidate_name}. Pozisyon: {position_name}. Kategori: {category}.
 
 TEMEL FELSEFE (her kararında bunu esas al):
@@ -1395,34 +1474,7 @@ Aday %20 barajının altında kaldığı için detaylı rapor gerekli görülmem
 TAM FORMAT (puan %20'yi geçtiyse):
 [MÜLAKATBİTTİ]
 ---RAPOR---
-**Aday:** {candidate_name}
-**Pozisyon:** {position_name}
-**Kategori:** {category}
-**Tarih:** {datetime.now().strftime('%d.%m.%Y')}
-
-**TOPLAM PUAN: XX/{total_weight}**
-
-{table_template}
-
-**Tutarlılık / Çelişki Analizi:** ...
-**Güçlü Yönler:** ...
-**Gelişim Alanları:** ...
-**Proje/Deneyim Özeti:** ...
-**CV Tutarlılığı:** ...
-**Serbest Gözlemler:** ... (kriter dışı sinyaller; yoksa "Belirtilecek bir gözlem yok" yaz)
-**Genel Kanı:** ...{note_report_field}
-**Öneri:** İşe Al / Değerlendirmeye Al / Reddet
----RAPORSON---
-
----STANDARTCV---
-**AD SOYAD:** {candidate_name}
-**POZİSYON:** {position_name}
-**EĞİTİM:** ...
-**DENEYİM:** ...
-**TEKNİK YETKİNLİKLER:** ...
-**DİL BECERİLERİ:** ...
-**MÜLAKAT NOTU:** ...
----STANDARTCVSON---"""
+{report_body_l13}"""
 
 def parse_duration(text: str):
     m = re.search(r'\[SÜRE:(\d+)\]', text)
@@ -2997,6 +3049,16 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
         ai_note_section = f"\n\nADAY ÖZEL AI NOTU (bu mülakatta bu konuya öncelik verilmiş olmalı, transkriptte nasıl ele alındığını değerlendir):\n{candidate['ai_note'].strip()[:1200]}"
         ai_note_report_field = "\n**AI Notuna Uyum:** (bu adaya özel notun transkriptte nasıl ele alındığını somut olarak yaz: hangi soru/turlarda test edildi, sonucu ne oldu)"
 
+    # Faz C: TAM FORMAT gövdesi REPORT_BODY_SECTIONS'tan deriveniyor (bkz. build_criteria_table_template
+    # üstündeki tanım main.py'de) — L1/L3 ile aynı kaynak. Level SABİT 2: Faz B'nin kararı gereği bu
+    # rapor yolu Level 3 adaylar için de OLDUĞU GİBİ (L2 gövdesiyle) kullanılıyor, dallanma yok —
+    # candidate_level burada kullanılırsa Level 3'ün rapor gövdesi sessizce L1/L3 stiline döner.
+    report_body_l2 = build_report_body(2, {
+        "candidate_name": candidate["name"], "position_name": candidate["position"],
+        "date_str": datetime.now().strftime('%d.%m.%Y'), "total_weight": total_weight,
+        "ai_note_report_field": ai_note_report_field,
+    })
+
     report_prompt = f"""Aşağıda bir sesli iş mülakatının transkripti, aday CV'si, pozisyon kriterleri ve derinlik bilgisi vardır. İnsan kaynakları yöneticisinin karar vermesine yardım edecek, adaya özgü ve ayrıntılı bir değerlendirme raporu üret.
 
 Aday: {candidate['name']}
@@ -3029,46 +3091,7 @@ TEMEL KURALLAR:
 TAM FORMAT:
 [MÜLAKATBİTTİ]
 ---RAPOR---
-**Aday:** {candidate['name']}
-**Pozisyon:** {candidate['position']}
-**Tarih:** {datetime.now().strftime('%d.%m.%Y')}
-
-**Yönetici Özeti:** (adayın genel profili, pozisyona uyumu, en güçlü 2-3 sinyal, en önemli 2-3 risk ve karar önerisi; genel kalıp değil, bu adaya özgü)
-
-**TOPLAM PUAN: XX/{total_weight}**
-**Puanlama Kapsamı:** (hangi kriterler değerlendirildi, hangileri değerlendirilmedi; normalize yöntemini kısa açıkla)
-
-| Kriter | Puan | Kanıt ve Analiz |
-|--------|------|-----------------|
-(her kriteri doldur; veri yoksa puan yerine “Değerlendirilmedi” yaz)
-
-**Analitik Düşünme ve Muhakeme:** (soruyu kavrama, problemi parçalama, neden-sonuç, alternatif kıyaslama, ölçüm/veri kullanımı; somut kanıtlarla)
-**Problem Çözme ve Karar Verme Yaklaşımı:** (izlediği yöntem, seçenekler, riskler, sonuç takibi)
-**Kavrama ve İletişim:** (soruyu doğru anlama, cevabı yapılandırma, açıklık, gereksiz dağılma veya güçlü sentez yeteneği)
-**Tutarlılık / Çelişki Analizi:** (yalnızca gerçek çelişkiler; yoksa açıkça yok de)
-**Güçlü Yönler:** (her maddeyi kanıtla)
-**Gelişim Alanları ve Riskler:** (adayın pozisyon performansına etkisini açıkla; klişe yazma)
-**Öne Çıkan Proje ve Deneyimler:** (transkriptte anlatılan somut örnekler, adayın kişisel katkısı ve sonuçları)
-**CV ↔ Mülakat ↔ Pozisyon Uyumu:** (CV'deki kıdem/deneyim, mülakatta doğrulananlar, doğrulanamayanlar ve pozisyonla bağlantı)
-**Değerlendirilemeyen Alanlar:** (sorulmamış veya yeterli veri oluşmamış alanlar)
-**Takip Mülakatında Sorulması Önerilen Sorular:** (3-6 adet, bu adaya özgü)
-**Serbest Gözlemler:** (kriter dışı ama işle ilgili anlamlı sinyaller; yoksa neden veri oluşmadığını yaz)
-**Genel Kanı:** (kanıtların dengeli sentezi){ai_note_report_field}
-**Öneri:** İşe Al / Değerlendirmeye Al / Reddet
-**Öneri Gerekçesi:** (tek paragraf, somut ve karar destekleyici)
----RAPORSON---
-
----STANDARTCV---
-**AD SOYAD:** {candidate['name']}
-**POZİSYON:** {candidate['position']}
-**EĞİTİM:** ...
-**DENEYİM:** ...
-**TEKNİK YETKİNLİKLER:** ...
-**İŞ / SEKTÖR YETKİNLİKLERİ:** ...
-**DİL BECERİLERİ:** ...
-**SERTİFİKALAR:** ...
-**MÜLAKAT NOTU:** ...
----STANDARTCVSON---
+{report_body_l2}
 
 Çıktı mutlaka [MÜLAKATBİTTİ] ve ---RAPOR--- bloklarıyla başlasın."""
 
