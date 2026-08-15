@@ -1126,8 +1126,10 @@ def send_report_email(candidate_name, position, report, score, recommendation, s
         return False
 
 # ============ AI PROMPT ============
-def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_text: Optional[str], ai_note: Optional[str], interview_language: str = "tr", depth_tier: Optional[str] = "standart") -> str:
-    """Rolü, dili, hitabı ve kapanışı kilitli profesyonel L2 mülakatçı talimatı."""
+def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_text: Optional[str], ai_note: Optional[str], interview_language: str = "tr", depth_tier: Optional[str] = "standart", level: int = 2) -> str:
+    """Rolü, dili, hitabı ve kapanışı kilitli profesyonel realtime mülakatçı talimatı.
+    level=2 (varsayılan) çıktısı bilerek birebir eskisiyle aynı bırakıldı — sadece level=3
+    çağrıldığında ek bir SEVİYE TONU satırı ve L3'ün kendi süre/derinlik hedefi devreye girer."""
     pos = get_position(position_name) or {"criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
     criteria = pos.get("criteria") or []
     criteria_compact = "; ".join(f"{c.get('name','Kriter')} %{c.get('weight',0)}" for c in criteria)
@@ -1135,14 +1137,17 @@ def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_t
     lang_name = LANGUAGE_NAMES.get(interview_language, "Türkçe")
     cv_compact = " ".join((cv_text or "").split())[:900] or "CV özeti yok"
     note_compact = " ".join((ai_note or "").split())[:500]
-    lvl_cfg = get_effective_level_config(2, depth_tier)
+    lvl_cfg = get_effective_level_config(level, depth_tier)
     depth_label = lvl_cfg.get("depth_label", "Standart")
+    # level=2 için bu satır boş kalır (çıktı eskisiyle birebir aynı); yalnızca level=3'te
+    # LEVEL_CONFIG[3]'ün tonu ek bir talimat satırı olarak eklenir.
+    level_tone_line = f"\nSEVİYE TONU: {LEVEL_CONFIG.get(level, LEVEL_CONFIG[2])['tone']}\n" if level == 3 else ""
 
     return f"""ROLÜN KESİNDİR: Sen genel sohbet asistanı, öğretmen veya danışman değilsin. Sen yalnızca profesyonel iş mülakatçısısın. Rolünden hiçbir koşulda çıkma.
 ANA MÜLAKAT DİLİ: {lang_name}. Bu dili kendiliğinden ASLA değiştirme. Yalnızca Özel Not açıkça başka dilde belirli sayıda soru istiyorsa o kadar soruyu o dilde sor ve hemen {lang_name} diline dön.
 HİTAP: Adaya görüşme boyunca resmî ve tutarlı biçimde “siz” diye hitap et. Türkçede açılış “Hoş geldiniz {candidate_name.split()[0] if candidate_name else ''} Bey/Hanım” mantığında olsun; “sen/siz” karıştırma.
 Aday: {candidate_name}. Pozisyon: {position_name}. Derinlik: {depth_label}. Kriterler: {criteria_compact}. CV özeti: {cv_compact}. Özel not: {note_compact or 'yok'}.
-
+{level_tone_line}
 MÜLAKAT DAVRANIŞI:
 - Her turda yalnızca BİR açık, doğal ve amaca hizmet eden soru sor. Gerektiği kadar konuş; cümleyi yarıda kesme, fakat gereksiz sohbet ve eğitim yapma.
 - Aday daha çok konuşsun. Sen uzun özet, gereksiz övgü, konu anlatımı veya danışmanlık yapma.
@@ -2697,7 +2702,7 @@ async def create_realtime_session(payload=Depends(verify_token)):
     criteria_names_list = [c["name"] for c in pos_for_criteria["criteria"]]
 
     instructions = build_l2_realtime_instructions(
-        candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["interview_language"] or "tr", depth_tier
+        candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["interview_language"] or "tr", depth_tier, level=candidate_level
     )
 
     realtime_model = get_realtime_model(candidate_level)
@@ -2824,26 +2829,27 @@ async def sync_realtime_progress(data: RealtimeSyncRequest, request: Request):
 
     db = get_db()
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (effective_candidate_id,)).fetchone()
-    if not candidate or (candidate["level"] or 1) != 2:
+    candidate_level = (candidate["level"] or 1) if candidate else None
+    if not candidate or candidate_level not in (2, 3):
         db.close()
         return {"ok": False}
-    interview = db.execute("SELECT completed_at FROM interviews WHERE candidate_id=? AND level=2", (effective_candidate_id,)).fetchone()
+    interview = db.execute("SELECT completed_at FROM interviews WHERE candidate_id=? AND level=?", (effective_candidate_id, candidate_level)).fetchone()
     if interview and interview["completed_at"]:
         # Zaten finalize edilmiş bir görüşmeye geç kalan bir heartbeat gelmiş olabilir; sessizce yoksay.
         db.close()
         return {"ok": True, "already_completed": True}
     if not interview:
-        db.execute("INSERT INTO interviews (candidate_id, level, messages) VALUES (?, 2, '[]')", (effective_candidate_id,))
+        db.execute("INSERT INTO interviews (candidate_id, level, messages) VALUES (?, ?, '[]')", (effective_candidate_id, candidate_level))
         db.commit()
     db.close()
 
     if data.transcript:
         db2 = get_db()
-        save_interview_state(db2, effective_candidate_id, [{"role": "user", "content": data.transcript}], 2)
+        save_interview_state(db2, effective_candidate_id, [{"role": "user", "content": data.transcript}], candidate_level)
         db2.commit(); db2.close()
 
     if data.usage_delta:
-        record_realtime_usage_summary(effective_candidate_id, 2, OPENAI_REALTIME_MODEL, data.usage_delta, action="realtime_heartbeat")
+        record_realtime_usage_summary(effective_candidate_id, candidate_level, get_realtime_model(candidate_level), data.usage_delta, action="realtime_heartbeat")
 
     return {"ok": True}
 
@@ -2886,22 +2892,23 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
     if not candidate:
         db.close()
         raise HTTPException(status_code=404, detail="Aday bulunamadı")
-    if (candidate["level"] or 1) != 2:
+    candidate_level = candidate["level"] or 1
+    if candidate_level not in (2, 3):
         db.close()
-        raise HTTPException(status_code=400, detail="Bu uç nokta sadece Level 2 adaylar için geçerlidir.")
+        raise HTTPException(status_code=400, detail="Bu uç nokta Level 2 ve Level 3 adaylar için geçerlidir.")
 
-    interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=2", (effective_candidate_id,)).fetchone()
+    interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (effective_candidate_id, candidate_level)).fetchone()
     if not interview:
-        db.execute("INSERT INTO interviews (candidate_id, level, messages) VALUES (?, 2, '[]')", (effective_candidate_id,))
+        db.execute("INSERT INTO interviews (candidate_id, level, messages) VALUES (?, ?, '[]')", (effective_candidate_id, candidate_level))
         db.commit()
-        interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=2", (effective_candidate_id,)).fetchone()
+        interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (effective_candidate_id, candidate_level)).fetchone()
 
     # İDEMPOTENCY GUARD: bu mülakat zaten finalize edilmişse (retry, çift tıklama, ağ hatası
     # sonrası tekrar deneme vb.), OpenAI'a tekrar rapor ürettirmeden var olan sonucu dön.
     # Bu olmadan her retry hem GPT-4o'yu tekrar çağırıyor hem de usage log'unu çift yazıyordu.
     if interview and interview["completed_at"]:
         db.close()
-        log_ai_provider(2, "openai", "report_request_deduped_already_completed")
+        log_ai_provider(candidate_level, "openai", "report_request_deduped_already_completed")
         return {
             "message": "Mülakat tamamlandı, teşekkür ederiz.",
             "completed": True,
@@ -2916,10 +2923,10 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
     # tekrar "daha önce yazıldı mı" kontrolüne gerek yok, her çağrı kendi payını ekliyor. Çift rapor
     # üretimi zaten yukarıdaki idempotency guard'ıyla (completed_at) engelleniyor.
     if data.realtime_usage:
-        record_realtime_usage_summary(effective_candidate_id, 2, OPENAI_REALTIME_MODEL, data.realtime_usage, action="realtime_final_frontend")
+        record_realtime_usage_summary(effective_candidate_id, candidate_level, get_realtime_model(candidate_level), data.realtime_usage, action="realtime_final_frontend")
     db = get_db()
     # Transkripti (rapor/PDF görüntüleme ve gelecekteki debug için) kaydet.
-    save_interview_state(db, effective_candidate_id, [{"role": "user", "content": data.transcript}], 2)
+    save_interview_state(db, effective_candidate_id, [{"role": "user", "content": data.transcript}], candidate_level)
     db.commit()
     db.close()
 
@@ -2932,14 +2939,14 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
             reason_text = "Mülakat tamamlanmadığı için değerlendirme oluşturulamamıştır."
         else:
             reason_text = "Bu mülakat sonucunda aday hakkında güvenilir bir değerlendirme oluşturabilecek yeterli veri elde edilememiştir. Bu nedenle ayrıntılı rapor oluşturulmamıştır."
-        log_ai_provider(2, "openai", "report_skipped_insufficient_data")
+        log_ai_provider(candidate_level, "openai", "report_skipped_insufficient_data")
         report = f"Aday: {candidate['name']}\nPozisyon: {candidate['position']}\n\nSONUÇ: DEĞERLENDİRİLEMEDİ\n\n{reason_text} Adayın söylemediği hiçbir bilgi eklenmemiş ve otomatik ret kararı verilmemiştir."
-        return finalize_incomplete_interview(effective_candidate_id, report, terminated_reason=None if data.end_reason == "tamamlandı" else ("Uygunsuz davranış nedeniyle sonlandırıldı" if data.end_reason == "uygunsuz_davranis" else "Aday talebiyle/bağlantı sorunuyla erken sonlandırıldı"), level=2)
+        return finalize_incomplete_interview(effective_candidate_id, report, terminated_reason=None if data.end_reason == "tamamlandı" else ("Uygunsuz davranış nedeniyle sonlandırıldı" if data.end_reason == "uygunsuz_davranis" else "Aday talebiyle/bağlantı sorunuyla erken sonlandırıldı"), level=candidate_level)
 
     if not OPENAI_API_KEY:
-        log_ai_provider(2, "openai", "report_missing_api_key_fallback")
+        log_ai_provider(candidate_level, "openai", "report_missing_api_key_fallback")
         reply = build_l2_short_report(candidate["name"], candidate["position"], "OPENAI_API_KEY tanımlı olmadığı için yedek rapor oluşturuldu. Transkript kaydedildi; yönetici transkripti ayrıca incelemelidir.")
-        return finalize_interview(effective_candidate_id, reply, terminated_reason=None, level=2)
+        return finalize_interview(effective_candidate_id, reply, terminated_reason=None, level=candidate_level)
 
     pos = get_position(candidate["position"]) or {"category": "Genel", "criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
     criteria_text = build_criteria_text(pos["criteria"])
@@ -2963,7 +2970,7 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
 
 Aday: {candidate['name']}
 Pozisyon: {candidate['position']}
-Mülakat seviyesi: Level 2
+Mülakat seviyesi: Level {candidate_level}
 Derinlik: {(candidate['depth_tier'] if 'depth_tier' in candidate.keys() else 'standart') or 'standart'}
 Kriterler ({total_weight} puan):
 {criteria_text}
@@ -3045,20 +3052,20 @@ TAM FORMAT:
             print(f"HATA (OpenAI rapor üretimi): model={OPENAI_REPORT_MODEL} status={resp.status_code} body={resp.text[:1200]}")
             raise HTTPException(status_code=502, detail="Rapor üretilemedi (OpenAI hatası).")
         result = resp.json()
-        record_openai_chat_usage(effective_candidate_id, 2, OPENAI_REPORT_MODEL, "l2_report_generation", result)
+        record_openai_chat_usage(effective_candidate_id, candidate_level, OPENAI_REPORT_MODEL, "l2_report_generation", result)
         reply = result["choices"][0]["message"]["content"]
-        log_ai_provider(2, "openai", "report_generated")
+        log_ai_provider(candidate_level, "openai", "report_generated")
     except HTTPException as e:
         print(f"HATA (create_l2_report, OpenAI): {getattr(e, 'detail', e)}")
         # Rapor üretimi patlasa bile mülakat zinciri kırılmasın: aday tamamlandı, admin tamamlandı, mail yedek raporla gitsin.
         reply = build_l2_short_report(candidate["name"], candidate["position"], "OpenAI rapor üretimi sırasında hata oluştu; transkript kaydedildi ve yedek rapor oluşturuldu. Yönetici transkripti ayrıca incelemelidir.")
-        return finalize_interview(effective_candidate_id, reply, terminated_reason=None, level=2)
+        return finalize_interview(effective_candidate_id, reply, terminated_reason=None, level=candidate_level)
     except Exception as e:
         print(f"HATA (create_l2_report, beklenmeyen): {type(e).__name__}: {e}")
         reply = build_l2_short_report(candidate["name"], candidate["position"], "Rapor üretimi sırasında beklenmeyen hata oluştu; transkript kaydedildi ve yedek rapor oluşturuldu. Yönetici transkripti ayrıca incelemelidir.")
-        return finalize_interview(effective_candidate_id, reply, terminated_reason=None, level=2)
+        return finalize_interview(effective_candidate_id, reply, terminated_reason=None, level=candidate_level)
 
-    return finalize_interview(effective_candidate_id, reply, level=2)
+    return finalize_interview(effective_candidate_id, reply, level=candidate_level)
 
 @app.get("/api/admin/snapshots/{candidate_id}")
 def get_snapshots(candidate_id: int, payload=Depends(verify_admin)):
