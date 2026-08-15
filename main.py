@@ -36,7 +36,17 @@ app.add_middleware(
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # Sesli mod (Whisper STT + TTS, L2 Realtime) için, Anthropic'ten bağımsız
-OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1-mini")
+# Realtime model level bazlı ayrılır (L2/L3 farklı modeller kullanabilir). OPENAI_REALTIME_MODEL
+# doluysa geriye dönük uyumluluk için her iki level'ın da varsayılanını ezer (eski tek-değişkenli
+# deploy'larda davranış değişmesin diye). get_realtime_model() tek okuma noktasıdır — model adı
+# başka hiçbir yerde sabit kodlanmaz.
+OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "")
+REALTIME_MODEL_LEVEL2 = os.getenv("REALTIME_MODEL_LEVEL2") or OPENAI_REALTIME_MODEL or "gpt-realtime-2.1-mini"
+REALTIME_MODEL_LEVEL3 = os.getenv("REALTIME_MODEL_LEVEL3") or OPENAI_REALTIME_MODEL or "gpt-realtime-2.1"
+
+def get_realtime_model(level: int) -> str:
+    return REALTIME_MODEL_LEVEL3 if level == 3 else REALTIME_MODEL_LEVEL2
+
 OPENAI_REALTIME_VOICE = os.getenv("OPENAI_REALTIME_VOICE", "marin")  # Doğal ses: Railway env ile değiştirilebilir (örn. marin/verse)
 OPENAI_REPORT_MODEL = os.getenv("OPENAI_REPORT_MODEL", "gpt-4o")  # L2 kaliteli OpenAI raporu; env ile değiştirilebilir
 
@@ -2653,13 +2663,14 @@ async def create_realtime_session(payload=Depends(verify_token)):
     db.close()
     if not candidate:
         raise HTTPException(status_code=404, detail="Aday kaydı bulunamadı")
-    if (candidate["level"] or 1) != 2:
-        raise HTTPException(status_code=400, detail="Bu uç nokta sadece Level 2 adaylar için geçerlidir.")
+    candidate_level = candidate["level"] or 1
+    if candidate_level not in (2, 3):
+        raise HTTPException(status_code=400, detail="Bu uç nokta Level 2 ve Level 3 adaylar için geçerlidir.")
     if not (candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20):
         raise HTTPException(status_code=400, detail="Bu seviyedeki mülakata başlamadan önce CV yüklemeniz gerekiyor.")
 
     depth_tier = (candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart") or "standart"
-    depth_cfg = get_effective_level_config(2, depth_tier)
+    depth_cfg = get_effective_level_config(candidate_level, depth_tier)
 
     # BUG FIX (started_at): interviews satırı önceden sadece ilk heartbeat (/api/realtime/sync,
     # 25sn'de bir) ya da hiç heartbeat gelmezse finalize (/api/realtime/report) anında oluşuyordu.
@@ -2668,12 +2679,12 @@ async def create_realtime_session(payload=Depends(verify_token)):
     # (WebRTC bağlantısı) kurulur kurulmaz satır burada, gerçek başlangıç anında oluşturuluyor.
     db2 = get_db()
     existing_interview = db2.execute(
-        "SELECT completed_at FROM interviews WHERE candidate_id=? AND level=2", (candidate_id,)
+        "SELECT completed_at FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, candidate_level)
     ).fetchone()
     if not existing_interview:
         db2.execute(
-            "INSERT INTO interviews (candidate_id, level, messages, depth_tier) VALUES (?, 2, '[]', ?)",
-            (candidate_id, depth_tier)
+            "INSERT INTO interviews (candidate_id, level, messages, depth_tier) VALUES (?, ?, '[]', ?)",
+            (candidate_id, candidate_level, depth_tier)
         )
         db2.commit()
     elif not existing_interview["completed_at"]:
@@ -2689,10 +2700,12 @@ async def create_realtime_session(payload=Depends(verify_token)):
         candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["interview_language"] or "tr", depth_tier
     )
 
+    realtime_model = get_realtime_model(candidate_level)
+    print(f"[REALTIME_MODEL] candidate_id={candidate_id} level=L{candidate_level} model={realtime_model}")
     session_body = {
         "session": {
             "type": "realtime",
-            "model": OPENAI_REALTIME_MODEL,
+            "model": realtime_model,
             "instructions": instructions,
             "audio": {
                 "output": {"voice": OPENAI_REALTIME_VOICE},
@@ -2746,10 +2759,10 @@ async def create_realtime_session(payload=Depends(verify_token)):
             print(f"HATA (OpenAI Realtime session): {resp.status_code} {resp.text[:400]}")
             raise HTTPException(status_code=502, detail="Sesli mülakat oturumu oluşturulamadı (OpenAI Realtime hatası).")
         result = resp.json()
-        log_ai_provider(2, "openai", "realtime_session")
+        log_ai_provider(candidate_level, "openai", "realtime_session")
         return {
             "client_secret": result.get("value"),
-            "model": OPENAI_REALTIME_MODEL,
+            "model": realtime_model,
             "turn_detection": session_body["session"]["audio"]["input"]["turn_detection"],
             "depth_tier": depth_tier,
             "coverage_threshold": depth_cfg["coverage_threshold"],
