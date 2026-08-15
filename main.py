@@ -233,6 +233,8 @@ def init_db():
                 output_tokens INTEGER DEFAULT 0,
                 audio_input_tokens INTEGER DEFAULT 0,
                 audio_output_tokens INTEGER DEFAULT 0,
+                cached_input_tokens INTEGER DEFAULT 0,
+                cached_audio_input_tokens INTEGER DEFAULT 0,
                 total_tokens INTEGER DEFAULT 0,
                 estimated_cost_usd DOUBLE PRECISION DEFAULT 0,
                 raw_json TEXT,
@@ -325,7 +327,9 @@ def init_db():
             CREATE TABLE IF NOT EXISTS ai_usage_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, candidate_id INTEGER, level INTEGER DEFAULT 1,
                 provider TEXT, model TEXT, action TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
-                audio_input_tokens INTEGER DEFAULT 0, audio_output_tokens INTEGER DEFAULT 0, total_tokens INTEGER DEFAULT 0,
+                audio_input_tokens INTEGER DEFAULT 0, audio_output_tokens INTEGER DEFAULT 0,
+                cached_input_tokens INTEGER DEFAULT 0, cached_audio_input_tokens INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
                 estimated_cost_usd REAL DEFAULT 0, raw_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
             );
@@ -377,6 +381,8 @@ def init_db():
         ("interviews", "question_count", "INTEGER DEFAULT 0"),
         ("interviews", "depth_tier", "TEXT DEFAULT 'standart'"),
         ("ai_usage_logs", "estimated_cost_usd", "DOUBLE PRECISION DEFAULT 0" if USE_POSTGRES else "REAL DEFAULT 0"),
+        ("ai_usage_logs", "cached_input_tokens", "INTEGER DEFAULT 0"),
+        ("ai_usage_logs", "cached_audio_input_tokens", "INTEGER DEFAULT 0"),
         ("candidates", "person_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("candidates", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("positions", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
@@ -915,51 +921,71 @@ def _safe_int(value) -> int:
     except Exception:
         return 0
 
-# Yaklaşık USD fiyatlandırma (1M token başına). Sadece log/panel için kaba maliyet tahmini içindir,
-# fatura değildir — gerçek fiyatlar değişirse burası güncellenmeli.
+# Yaklaşık USD fiyatlandırma (1M token başına) — TEK KAYNAK. Hem backend (panel/log) hem
+# frontend'in canlı tahmini (/api/realtime/session yanıtındaki "pricing" alanı üzerinden) bu
+# tabloyu okur; fiyat değişirse SADECE burası güncellenir. input_cached/audio_input_cached,
+# OpenAI'nin prompt caching indirimli oranı (bkz. developers.openai.com/api/docs/models/<model>).
+# input_cached/audio_input_cached bilinmiyorsa (ör. eski/varsayım modeller) fresh orana eşitlenir —
+# yani "indirim yok" varsayılır, maliyet asla olduğundan düşük gösterilmez.
 AI_PRICING_PER_1M = {
-    # Resmî rate-card: text ve audio ayrı ücretlenir.
-    ("openai", "gpt-realtime-2.1"):      {"input": 4.0, "output": 24.0, "audio_input": 32.0, "audio_output": 64.0},
-    ("openai", "gpt-realtime-2.1-mini"): {"input": 0.6, "output": 2.4,  "audio_input": 10.0, "audio_output": 20.0},
-    # Eski env kullanan kurulumlar için geriye uyumlu yaklaşık kayıt.
-    ("openai", "gpt-realtime-2"):        {"input": 4.0, "output": 24.0, "audio_input": 32.0, "audio_output": 64.0},
-    ("openai", "gpt-4o"):                {"input": 2.5, "output": 10.0, "audio_input": 0.0, "audio_output": 0.0},
-    ("anthropic", "claude-sonnet-4-6"): {"input": 3.0, "output": 15.0, "audio_input": 3.0, "audio_output": 15.0},
+    # Resmî rate-card (Ağustos 2026 itibarıyla doğrulandı): text ve audio ayrı ücretlenir.
+    ("openai", "gpt-realtime-2.1"):      {"input": 4.0, "input_cached": 0.4,  "output": 24.0, "audio_input": 32.0, "audio_input_cached": 0.4,  "audio_output": 64.0},
+    ("openai", "gpt-realtime-2.1-mini"): {"input": 0.6, "input_cached": 0.06, "output": 2.4,  "audio_input": 10.0, "audio_input_cached": 0.3,  "audio_output": 20.0},
+    # Eski env kullanan kurulumlar için geriye uyumlu yaklaşık kayıt — cache oranı doğrulanmadı, fresh varsayılır.
+    ("openai", "gpt-realtime-2"):        {"input": 4.0, "input_cached": 4.0,  "output": 24.0, "audio_input": 32.0, "audio_input_cached": 32.0, "audio_output": 64.0},
+    ("openai", "gpt-4o"):                {"input": 2.5, "input_cached": 2.5,  "output": 10.0, "audio_input": 0.0,  "audio_input_cached": 0.0,  "audio_output": 0.0},
+    ("anthropic", "claude-sonnet-4-6"): {"input": 3.0, "input_cached": 3.0,  "output": 15.0, "audio_input": 3.0,  "audio_input_cached": 3.0,  "audio_output": 15.0},
 }
 
 def _estimate_cost_usd(provider: str, model: str, input_tokens: int, output_tokens: int,
-                        audio_input_tokens: int, audio_output_tokens: int) -> float:
+                        audio_input_tokens: int, audio_output_tokens: int,
+                        cached_input_tokens: int = 0, cached_audio_input_tokens: int = 0) -> float:
     rates = AI_PRICING_PER_1M.get((provider, model))
     if not rates:
         return 0.0
+    # cached_* değerleri input_tokens/audio_input_tokens'ın ALT KÜMESİDİR (OpenAI'nin
+    # input_token_details.cached_tokens_details ile aynı semantik) — ayrıca toplanmaz.
+    cached_input_tokens = min(cached_input_tokens, input_tokens)
+    cached_audio_input_tokens = min(cached_audio_input_tokens, audio_input_tokens)
+    fresh_input = input_tokens - cached_input_tokens
+    fresh_audio_input = audio_input_tokens - cached_audio_input_tokens
     return round(
-        (input_tokens * rates["input"] + output_tokens * rates["output"] +
-         audio_input_tokens * rates["audio_input"] + audio_output_tokens * rates["audio_output"]) / 1_000_000,
+        (fresh_input * rates["input"] + cached_input_tokens * rates.get("input_cached", rates["input"]) +
+         output_tokens * rates["output"] +
+         fresh_audio_input * rates["audio_input"] + cached_audio_input_tokens * rates.get("audio_input_cached", rates["audio_input"]) +
+         audio_output_tokens * rates["audio_output"]) / 1_000_000,
         4
     )
 
 def record_ai_usage(candidate_id: int, level: int, provider: str, model: str, action: str,
                     input_tokens: int = 0, output_tokens: int = 0,
                     audio_input_tokens: int = 0, audio_output_tokens: int = 0,
+                    cached_input_tokens: int = 0, cached_audio_input_tokens: int = 0,
                     raw: Optional[Any] = None):
     """Her AI çağrısını/mülakat realtime kullanımını ayrı satır olarak kaydeder.
     Amaç: Her mülakat sonunda hangi işlem kaç token kullanmış net görülsün.
     Hata olursa mülakat akışını bozmaz.
     NOT: audio token'lar metin token'larından ~6-13x daha pahalı olduğu için ayrı tutuluyor;
-    tabloda/panelde "toplam token" tek başına maliyeti temsil etmez, bu yüzden estimated_cost_usd de kaydediliyor."""
+    tabloda/panelde "toplam token" tek başına maliyeti temsil etmez, bu yüzden estimated_cost_usd de kaydediliyor.
+    cached_* alanları girildiğinde (bkz. cache oranı ~%80-99 indirimli) maliyet tahmini buna göre düşer."""
     try:
         input_tokens = _safe_int(input_tokens)
         output_tokens = _safe_int(output_tokens)
         audio_input_tokens = _safe_int(audio_input_tokens)
         audio_output_tokens = _safe_int(audio_output_tokens)
+        cached_input_tokens = min(_safe_int(cached_input_tokens), input_tokens)
+        cached_audio_input_tokens = min(_safe_int(cached_audio_input_tokens), audio_input_tokens)
         total_tokens = input_tokens + output_tokens + audio_input_tokens + audio_output_tokens
-        cost_usd = _estimate_cost_usd(provider, model, input_tokens, output_tokens, audio_input_tokens, audio_output_tokens)
+        cost_usd = _estimate_cost_usd(provider, model, input_tokens, output_tokens, audio_input_tokens, audio_output_tokens,
+                                       cached_input_tokens, cached_audio_input_tokens)
         db = get_db()
         db.execute("""
             INSERT INTO ai_usage_logs
-            (candidate_id, level, provider, model, action, input_tokens, output_tokens, audio_input_tokens, audio_output_tokens, total_tokens, estimated_cost_usd, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (candidate_id, level, provider, model, action, input_tokens, output_tokens, audio_input_tokens, audio_output_tokens, total_tokens, cost_usd,
+            (candidate_id, level, provider, model, action, input_tokens, output_tokens, audio_input_tokens, audio_output_tokens,
+             cached_input_tokens, cached_audio_input_tokens, total_tokens, estimated_cost_usd, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (candidate_id, level, provider, model, action, input_tokens, output_tokens, audio_input_tokens, audio_output_tokens,
+              cached_input_tokens, cached_audio_input_tokens, total_tokens, cost_usd,
               json.dumps(raw or {}, ensure_ascii=False)[:8000]))
         db.execute("""
             UPDATE interviews
@@ -968,7 +994,7 @@ def record_ai_usage(candidate_id: int, level: int, provider: str, model: str, ac
             WHERE candidate_id=? AND level=?
         """, (input_tokens + audio_input_tokens, output_tokens + audio_output_tokens, candidate_id, level))
         db.commit(); db.close()
-        print(f"[AI_USAGE] c={candidate_id} L{level} {provider}/{model} {action} in={input_tokens} out={output_tokens} audio_in={audio_input_tokens} audio_out={audio_output_tokens} total={total_tokens} ~${cost_usd}")
+        print(f"[AI_USAGE] c={candidate_id} L{level} {provider}/{model} {action} in={input_tokens} out={output_tokens} audio_in={audio_input_tokens} audio_out={audio_output_tokens} cached_in={cached_input_tokens} cached_audio_in={cached_audio_input_tokens} total={total_tokens} ~${cost_usd}")
     except Exception as e:
         print(f"UYARI (AI kullanım kaydı yazılamadı): {type(e).__name__}: {e}")
 
@@ -1002,6 +1028,8 @@ def record_realtime_usage_summary(candidate_id: int, level: int, model: str, sum
         output_tokens=summary.get("output_tokens", 0),
         audio_input_tokens=summary.get("audio_input_tokens", 0),
         audio_output_tokens=summary.get("audio_output_tokens", 0),
+        cached_input_tokens=summary.get("cached_input_tokens", 0),
+        cached_audio_input_tokens=summary.get("cached_audio_input_tokens", 0),
         raw=summary
     )
 
@@ -2768,6 +2796,9 @@ async def create_realtime_session(payload=Depends(verify_token)):
         return {
             "client_secret": result.get("value"),
             "model": realtime_model,
+            # Frontend'in canlı maliyet tahmini bu tabloyu okur — fiyat sadece AI_PRICING_PER_1M'de
+            # değişir, frontend'de ayrı bir kopya tutulmaz.
+            "pricing": AI_PRICING_PER_1M.get(("openai", realtime_model), {}),
             "turn_detection": session_body["session"]["audio"]["input"]["turn_detection"],
             "depth_tier": depth_tier,
             "coverage_threshold": depth_cfg["coverage_threshold"],
@@ -3322,7 +3353,8 @@ def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depend
         WHERE i.candidate_id = ? AND i.level = ?
     """, (candidate_id, level)).fetchone()
     usage_rows = db.execute("""
-        SELECT provider, model, action, input_tokens, output_tokens, audio_input_tokens, audio_output_tokens, total_tokens, estimated_cost_usd, created_at
+        SELECT provider, model, action, input_tokens, output_tokens, audio_input_tokens, audio_output_tokens,
+               cached_input_tokens, cached_audio_input_tokens, total_tokens, estimated_cost_usd, created_at
         FROM ai_usage_logs
         WHERE candidate_id=? AND level=?
         ORDER BY id ASC
@@ -3334,4 +3366,9 @@ def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depend
     result["usage_logs"] = [dict(r) for r in usage_rows]
     result["usage_total_tokens"] = sum(_safe_int(r["total_tokens"]) for r in usage_rows)
     result["usage_total_cost_usd"] = round(sum((r["estimated_cost_usd"] or 0) for r in usage_rows), 4)
+    # Cache oranı: cache'lenebilir toplam girdi (input + audio_input) içindeki cache'li pay.
+    cacheable_input = sum(_safe_int(r["input_tokens"]) + _safe_int(r["audio_input_tokens"]) for r in usage_rows)
+    cached_input = sum(_safe_int(r["cached_input_tokens"]) + _safe_int(r["cached_audio_input_tokens"]) for r in usage_rows)
+    result["usage_cached_input_tokens"] = cached_input
+    result["usage_cache_hit_pct"] = round(cached_input / cacheable_input * 100, 1) if cacheable_input > 0 else None
     return result
