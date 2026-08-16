@@ -242,6 +242,20 @@ def init_db():
                 FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
             );
 
+            -- Faz D1: ham Realtime olayları (session.created, speech_started/stopped, truncation,
+            -- response.done). Sadece toplama/kayıt — metrik hesaplama Faz D2'nin işi.
+            CREATE TABLE IF NOT EXISTS realtime_events (
+                id BIGSERIAL PRIMARY KEY,
+                candidate_id BIGINT,
+                level INTEGER DEFAULT 1,
+                event_type TEXT,
+                event_data TEXT,
+                elapsed_ms INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_realtime_events_candidate ON realtime_events (candidate_id, level);
+
             CREATE TABLE IF NOT EXISTS organizations (
                 id BIGSERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -333,6 +347,12 @@ def init_db():
                 estimated_cost_usd REAL DEFAULT 0, raw_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS realtime_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, candidate_id INTEGER, level INTEGER DEFAULT 1,
+                event_type TEXT, event_data TEXT, elapsed_ms INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_realtime_events_candidate ON realtime_events (candidate_id, level);
             CREATE TABLE IF NOT EXISTS organizations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, is_active INTEGER DEFAULT 1,
@@ -1033,6 +1053,25 @@ def record_realtime_usage_summary(candidate_id: int, level: int, model: str, sum
         raw=summary
     )
 
+def record_realtime_events(candidate_id: int, level: int, events: Optional[list]):
+    """Faz D1: ham Realtime olaylarını (session.created, speech_started/stopped, truncation,
+    response.done) toplu kaydeder. Sadece gözlemlenebilirlik içindir — metrik hesaplama yok
+    (Faz D2'nin işi). Hata olursa mülakat akışını bozmaz."""
+    if not events:
+        return
+    try:
+        db = get_db()
+        for evt in events:
+            if not isinstance(evt, dict) or not evt.get("type"):
+                continue
+            db.execute(
+                "INSERT INTO realtime_events (candidate_id, level, event_type, event_data, elapsed_ms) VALUES (?, ?, ?, ?, ?)",
+                (candidate_id, level, str(evt.get("type"))[:100], json.dumps(evt.get("data") or {}, ensure_ascii=False)[:4000], _safe_int(evt.get("elapsed_ms")))
+            )
+        db.commit(); db.close()
+    except Exception as e:
+        print(f"UYARI (realtime_events kaydı yazılamadı): {type(e).__name__}: {e}")
+
 def save_interview_state(db, candidate_id: int, messages: list, level: int = 1):
     compact = build_compact_memory(messages)
     q_count = sum(1 for m in messages if m.get("role") == "assistant" and "---RAPOR---" not in (m.get("content") or ""))
@@ -1223,40 +1262,45 @@ def build_criteria_table_template(criteria: list) -> str:
 # kümülatif ilkeyle örtüşüyor). Faz D'de L3'e yeni bir bölüm eklemek için: aşağıya {3} (veya
 # {1,3}/{2,3}) levels'lı yeni bir satır eklemek yeterli — iki prompt üretim yolu da otomatik alır.
 REPORT_BODY_SECTIONS = [
+    # FAZ D1: L3 artık report_body_l2 çağrısında candidate_level ile süzülüyor (main.py, /api/realtime/report),
+    # sabit 2 değil. Bunun L3'ün BUGÜNKÜ (Faz C'den beri hardcoded-2 üzerinden hep L2 gövdesi almış)
+    # çıktısını birebir korumasının tek yolu şu: eskiden {2} olan her satır {2,3} oldu (L3 artık L2'nin
+    # zengin talimatını da alsın) VE eskiden {1,3} olan her satır {1} oldu (L3, L1'in yalın "..." varyantını
+    # artık ALMASIN — aksi halde aynı bölüm iki kez, hem L2 hem L1 metniyle render edilirdi).
     ("aday",           {1, 2, 3}, "**Aday:** {candidate_name}"),
     ("pozisyon",       {1, 2, 3}, "**Pozisyon:** {position_name}"),
-    ("kategori",       {1, 3},    "**Kategori:** {category}"),
+    ("kategori",       {1},       "**Kategori:** {category}"),
     ("tarih",          {1, 2, 3}, "**Tarih:** {date_str}"),
     ("_blank1",        {1, 2, 3}, ""),
-    ("yonetici_ozeti", {2},       "**Yönetici Özeti:** (adayın genel profili, pozisyona uyumu, en güçlü 2-3 sinyal, en önemli 2-3 risk ve karar önerisi; genel kalıp değil, bu adaya özgü)"),
-    ("_blank2",        {2},       ""),
+    ("yonetici_ozeti", {2, 3},    "**Yönetici Özeti:** (adayın genel profili, pozisyona uyumu, en güçlü 2-3 sinyal, en önemli 2-3 risk ve karar önerisi; genel kalıp değil, bu adaya özgü)"),
+    ("_blank2",        {2, 3},    ""),
     ("toplam_puan",    {1, 2, 3}, "**TOPLAM PUAN: XX/{total_weight}**"),
-    ("puanlama_kapsami", {2},     "**Puanlama Kapsamı:** (hangi kriterler değerlendirildi, hangileri değerlendirilmedi; normalize yöntemini kısa açıkla)"),
+    ("puanlama_kapsami", {2, 3},  "**Puanlama Kapsamı:** (hangi kriterler değerlendirildi, hangileri değerlendirilmedi; normalize yöntemini kısa açıkla)"),
     ("_blank3",        {1, 2, 3}, ""),
-    ("kriter_tablosu_l13", {1, 3}, "{table_template}"),
-    ("kriter_tablosu_l2", {2},    "| Kriter | Puan | Kanıt ve Analiz |\n|--------|------|-----------------|\n(her kriteri doldur; veri yoksa puan yerine “Değerlendirilmedi” yaz)"),
+    ("kriter_tablosu_l13", {1},   "{table_template}"),
+    ("kriter_tablosu_l2", {2, 3}, "| Kriter | Puan | Kanıt ve Analiz |\n|--------|------|-----------------|\n(her kriteri doldur; veri yoksa puan yerine “Değerlendirilmedi” yaz)"),
     ("_blank4",        {1, 2, 3}, ""),
-    ("analitik_dusunme", {2},     "**Analitik Düşünme ve Muhakeme:** (soruyu kavrama, problemi parçalama, neden-sonuç, alternatif kıyaslama, ölçüm/veri kullanımı; somut kanıtlarla)"),
-    ("problem_cozme",  {2},       "**Problem Çözme ve Karar Verme Yaklaşımı:** (izlediği yöntem, seçenekler, riskler, sonuç takibi)"),
-    ("kavrama_iletisim", {2},     "**Kavrama ve İletişim:** (soruyu doğru anlama, cevabı yapılandırma, açıklık, gereksiz dağılma veya güçlü sentez yeteneği)"),
-    ("tutarlilik_l13", {1, 3},    "**Tutarlılık / Çelişki Analizi:** ..."),
-    ("tutarlilik_l2",  {2},       "**Tutarlılık / Çelişki Analizi:** (yalnızca gerçek çelişkiler; yoksa açıkça yok de)"),
-    ("guclu_yonler_l13", {1, 3},  "**Güçlü Yönler:** ..."),
-    ("guclu_yonler_l2", {2},      "**Güçlü Yönler:** (her maddeyi kanıtla)"),
-    ("gelisim_l13",    {1, 3},    "**Gelişim Alanları:** ..."),
-    ("gelisim_l2",     {2},       "**Gelişim Alanları ve Riskler:** (adayın pozisyon performansına etkisini açıkla; klişe yazma)"),
-    ("proje_l13",      {1, 3},    "**Proje/Deneyim Özeti:** ..."),
-    ("proje_l2",       {2},       "**Öne Çıkan Proje ve Deneyimler:** (transkriptte anlatılan somut örnekler, adayın kişisel katkısı ve sonuçları)"),
-    ("cv_uyum_l13",    {1, 3},    "**CV Tutarlılığı:** ..."),
-    ("cv_uyum_l2",     {2},       "**CV ↔ Mülakat ↔ Pozisyon Uyumu:** (CV'deki kıdem/deneyim, mülakatta doğrulananlar, doğrulanamayanlar ve pozisyonla bağlantı)"),
-    ("degerlendirilemeyen", {2},  "**Değerlendirilemeyen Alanlar:** (sorulmamış veya yeterli veri oluşmamış alanlar)"),
-    ("takip_sorulari", {2},       "**Takip Mülakatında Sorulması Önerilen Sorular:** (3-6 adet, bu adaya özgü)"),
-    ("serbest_l13",    {1, 3},    "**Serbest Gözlemler:** ... (kriter dışı sinyaller; yoksa \"Belirtilecek bir gözlem yok\" yaz)"),
-    ("serbest_l2",     {2},       "**Serbest Gözlemler:** (kriter dışı ama işle ilgili anlamlı sinyaller; yoksa neden veri oluşmadığını yaz)"),
-    ("genel_kani_l13", {1, 3},    "**Genel Kanı:** ...{note_report_field}"),
-    ("genel_kani_l2",  {2},       "**Genel Kanı:** (kanıtların dengeli sentezi){ai_note_report_field}"),
+    ("analitik_dusunme", {2, 3},  "**Analitik Düşünme ve Muhakeme:** (soruyu kavrama, problemi parçalama, neden-sonuç, alternatif kıyaslama, ölçüm/veri kullanımı; somut kanıtlarla)"),
+    ("problem_cozme",  {2, 3},    "**Problem Çözme ve Karar Verme Yaklaşımı:** (izlediği yöntem, seçenekler, riskler, sonuç takibi)"),
+    ("kavrama_iletisim", {2, 3},  "**Kavrama ve İletişim:** (soruyu doğru anlama, cevabı yapılandırma, açıklık, gereksiz dağılma veya güçlü sentez yeteneği)"),
+    ("tutarlilik_l13", {1},       "**Tutarlılık / Çelişki Analizi:** ..."),
+    ("tutarlilik_l2",  {2, 3},    "**Tutarlılık / Çelişki Analizi:** (yalnızca gerçek çelişkiler; yoksa açıkça yok de)"),
+    ("guclu_yonler_l13", {1},     "**Güçlü Yönler:** ..."),
+    ("guclu_yonler_l2", {2, 3},   "**Güçlü Yönler:** (her maddeyi kanıtla)"),
+    ("gelisim_l13",    {1},       "**Gelişim Alanları:** ..."),
+    ("gelisim_l2",     {2, 3},    "**Gelişim Alanları ve Riskler:** (adayın pozisyon performansına etkisini açıkla; klişe yazma)"),
+    ("proje_l13",      {1},       "**Proje/Deneyim Özeti:** ..."),
+    ("proje_l2",       {2, 3},    "**Öne Çıkan Proje ve Deneyimler:** (transkriptte anlatılan somut örnekler, adayın kişisel katkısı ve sonuçları)"),
+    ("cv_uyum_l13",    {1},       "**CV Tutarlılığı:** ..."),
+    ("cv_uyum_l2",     {2, 3},    "**CV ↔ Mülakat ↔ Pozisyon Uyumu:** (CV'deki kıdem/deneyim, mülakatta doğrulananlar, doğrulanamayanlar ve pozisyonla bağlantı)"),
+    ("degerlendirilemeyen", {2, 3}, "**Değerlendirilemeyen Alanlar:** (sorulmamış veya yeterli veri oluşmamış alanlar)"),
+    ("takip_sorulari", {2, 3},    "**Takip Mülakatında Sorulması Önerilen Sorular:** (3-6 adet, bu adaya özgü)"),
+    ("serbest_l13",    {1},       "**Serbest Gözlemler:** ... (kriter dışı sinyaller; yoksa \"Belirtilecek bir gözlem yok\" yaz)"),
+    ("serbest_l2",     {2, 3},    "**Serbest Gözlemler:** (kriter dışı ama işle ilgili anlamlı sinyaller; yoksa neden veri oluşmadığını yaz)"),
+    ("genel_kani_l13", {1},       "**Genel Kanı:** ...{note_report_field}"),
+    ("genel_kani_l2",  {2, 3},    "**Genel Kanı:** (kanıtların dengeli sentezi){ai_note_report_field}"),
     ("oneri",          {1, 2, 3}, "**Öneri:** İşe Al / Değerlendirmeye Al / Reddet"),
-    ("oneri_gerekcesi", {2},      "**Öneri Gerekçesi:** (tek paragraf, somut ve karar destekleyici)"),
+    ("oneri_gerekcesi", {2, 3},   "**Öneri Gerekçesi:** (tek paragraf, somut ve karar destekleyici)"),
     ("raporson",       {1, 2, 3}, "---RAPORSON---"),
     ("_blank5",        {1, 2, 3}, ""),
     ("standartcv_baslangic", {1, 2, 3}, "---STANDARTCV---"),
@@ -1265,9 +1309,9 @@ REPORT_BODY_SECTIONS = [
     ("egitim",         {1, 2, 3}, "**EĞİTİM:** ..."),
     ("deneyim",        {1, 2, 3}, "**DENEYİM:** ..."),
     ("teknik_yetkinlikler", {1, 2, 3}, "**TEKNİK YETKİNLİKLER:** ..."),
-    ("is_sektor_yetkinlikleri", {2}, "**İŞ / SEKTÖR YETKİNLİKLERİ:** ..."),
+    ("is_sektor_yetkinlikleri", {2, 3}, "**İŞ / SEKTÖR YETKİNLİKLERİ:** ..."),
     ("dil_becerileri", {1, 2, 3}, "**DİL BECERİLERİ:** ..."),
-    ("sertifikalar",   {2},       "**SERTİFİKALAR:** ..."),
+    ("sertifikalar",   {2, 3},    "**SERTİFİKALAR:** ..."),
     ("mulakat_notu",   {1, 2, 3}, "**MÜLAKAT NOTU:** ..."),
     ("standartcv_son", {1, 2, 3}, "---STANDARTCVSON---"),
 ]
@@ -1380,7 +1424,13 @@ Bu notu mülakat boyunca aktif bir koşul olarak uygula: notta bir konu/iddia ge
     # Faz C: TAM FORMAT gövdesi (Aday: ... ---STANDARTCVSON---) artık REPORT_BODY_SECTIONS'tan
     # deriveniyor — bkz. build_criteria_table_template üstündeki tanım. KISA FORMAT (aşağıda)
     # L1/L3'e özgü kaldığı için listeye dahil edilmedi.
-    report_body_l13 = build_report_body(level or 1, {
+    # FAZ D1: level SABİT 1 — level=3 için de. Sebep: bu fonksiyonun ctx'i L2/L3-ortak bölümlerin
+    # ihtiyaç duyduğu ai_note_report_field'ı hiç taşımıyor; level=3 geçilirse (ör. report_violation'ın
+    # L3 dalı, main.py:2585 — L3 artık ana akışta RealtimeInterview.js/voice kullanıyor ama bu uç nokta
+    # hâlâ token'la erişilebilir) artık {2,3} olan bölümlerde KeyError ile çöker. Ayrıca bu zaten
+    # davranış değişikliği DEĞİL: Faz D1 öncesinde de {1,3} bölümlerinin metni level=1 ile level=3
+    # arasında hiç farklı değildi (aynı literal string) — yani level=1'e sabitlemek çıktıyı bozmuyor.
+    report_body_l13 = build_report_body(1, {
         "candidate_name": candidate_name, "position_name": position_name, "category": category,
         "date_str": datetime.now().strftime('%d.%m.%Y'), "total_weight": total_weight,
         "table_template": table_template, "note_report_field": note_report_field,
@@ -2719,6 +2769,7 @@ class RealtimeReportRequest(BaseModel):
     answered_count: int = 0
     end_reason: str = "tamamlandı"  # tamamlandı | aday_talebi | baglanti_koptu
     realtime_usage: Optional[dict] = None  # Frontend'in response.done eventlerinden topladığı token/audio usage özeti
+    events: Optional[List[dict]] = None  # Faz D1: son heartbeat'ten bu yana biriken ham Realtime olayları (bkz. record_realtime_events)
 
 class RealtimeSyncRequest(BaseModel):
     """Görüşme SÜRERKEN periyodik olarak ve sekme kapanırken (sendBeacon ile) gönderilen
@@ -2731,6 +2782,7 @@ class RealtimeSyncRequest(BaseModel):
     answered_count: int = 0
     usage_delta: Optional[dict] = None  # son sync'ten bu yana biriken usage farkı (kümülatif değil)
     token: Optional[str] = None  # sendBeacon Authorization header gönderemediği için yedek yol
+    events: Optional[List[dict]] = None  # Faz D1: son sync'ten bu yana biriken ham Realtime olayları (bkz. record_realtime_events)
 
 MIN_L2_DURATION_SECONDS = 90  # Güvenilir rapor için asgari görüşme süresi
 MIN_L2_ANSWERED_COUNT = 3  # En az üç gerçek aday cevabı olmadan puan/ret üretme
@@ -2934,6 +2986,8 @@ async def sync_realtime_progress(data: RealtimeSyncRequest, request: Request):
     if data.usage_delta:
         record_realtime_usage_summary(effective_candidate_id, candidate_level, get_realtime_model(candidate_level), data.usage_delta, action="realtime_heartbeat")
 
+    record_realtime_events(effective_candidate_id, candidate_level, data.events)
+
     return {"ok": True}
 
 def get_interview_usage_cost(candidate_id: int, level: int = 2) -> float:
@@ -3007,6 +3061,7 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
     # üretimi zaten yukarıdaki idempotency guard'ıyla (completed_at) engelleniyor.
     if data.realtime_usage:
         record_realtime_usage_summary(effective_candidate_id, candidate_level, get_realtime_model(candidate_level), data.realtime_usage, action="realtime_final_frontend")
+    record_realtime_events(effective_candidate_id, candidate_level, data.events)
     db = get_db()
     # Transkripti (rapor/PDF görüntüleme ve gelecekteki debug için) kaydet.
     save_interview_state(db, effective_candidate_id, [{"role": "user", "content": data.transcript}], candidate_level)
@@ -3050,16 +3105,13 @@ async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_t
         ai_note_report_field = "\n**AI Notuna Uyum:** (bu adaya özel notun transkriptte nasıl ele alındığını somut olarak yaz: hangi soru/turlarda test edildi, sonucu ne oldu)"
 
     # Faz C: TAM FORMAT gövdesi REPORT_BODY_SECTIONS'tan deriveniyor (bkz. build_criteria_table_template
-    # üstündeki tanım main.py'de) — L1/L3 ile aynı kaynak. Level SABİT 2: Faz B'nin kararı gereği bu
-    # rapor yolu Level 3 adaylar için de OLDUĞU GİBİ (L2 gövdesiyle) kullanılıyor, dallanma yok —
-    # candidate_level burada kullanılırsa Level 3'ün rapor gövdesi sessizce L1/L3 stiline döner.
-    #
-    # FAZ D NOTU: L3'e özel rapor bölümü eklemek İKİ adım gerektirir, sadece REPORT_BODY_SECTIONS'a
-    # levels={3} satırı eklemek YETMEZ — bu satır burada okunmadığı sürece L3 sesli yolu o bölümü
-    # asla almaz. Faz D'nin İLK adımı: yukarıdaki sabit 2'yi candidate_level'a çevirmek (ve o anda
-    # L3'ün gerçekten kendi bölümlerini alacağını tekrar uçtan uca doğrulamak) — sonra yeni levels={3}
-    # satırları eklenebilir. Bu iki adım aynı commit'te, sırayla yapılmalı.
-    report_body_l2 = build_report_body(2, {
+    # üstündeki tanım main.py'de) — L1/L3 ile aynı kaynak.
+    # FAZ D1: level artık candidate_level (eskiden sabit 2). REPORT_BODY_SECTIONS'ta eskiden {2} olan
+    # her satır {2,3} yapıldı — böylece Level 3, Level 2'nin bugüne kadar aldığı zengin gövdeyi
+    # (Yönetici Özeti, Puanlama Kapsamı, Analitik Düşünme vb. dahil) artık kendi seviyesi için de alıyor.
+    # Bu, L3'ün BUGÜNKÜ çıktısını (Faz C'den beri sabit-2 üzerinden zaten hep L2 gövdesi almıştı)
+    # birebir korur — davranış değişikliği yok, sadece süzme mekanizması artık doğru alanı okuyor.
+    report_body_l2 = build_report_body(candidate_level, {
         "candidate_name": candidate["name"], "position_name": candidate["position"],
         "date_str": datetime.now().strftime('%d.%m.%Y'), "total_weight": total_weight,
         "ai_note_report_field": ai_note_report_field,
