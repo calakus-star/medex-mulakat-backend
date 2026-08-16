@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Request
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
@@ -15,6 +15,7 @@ import jwt
 import anthropic
 import httpx
 import resend
+import asyncio
 from datetime import datetime, timedelta
 import json
 import re
@@ -211,6 +212,15 @@ def init_db():
                 depth_tier TEXT DEFAULT 'standart',
                 started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 completed_at TIMESTAMP,
+                processing_status TEXT,
+                processing_error TEXT,
+                processing_started_at TIMESTAMP,
+                pending_finish_reason TEXT,
+                pending_finish_provider TEXT,
+                pending_finish_model TEXT,
+                pending_finish_system TEXT,
+                pending_finish_payload TEXT,
+                pending_finish_terminated_reason TEXT,
                 FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
             );
 
@@ -332,6 +342,9 @@ def init_db():
                 messages TEXT DEFAULT '[]', report TEXT, standard_cv TEXT, score INTEGER, recommendation TEXT,
                 compact_memory TEXT DEFAULT '', question_count INTEGER DEFAULT 0, depth_tier TEXT DEFAULT 'standart',
                 started_at TEXT DEFAULT CURRENT_TIMESTAMP, completed_at TEXT,
+                processing_status TEXT, processing_error TEXT, processing_started_at TEXT, pending_finish_reason TEXT,
+                pending_finish_provider TEXT, pending_finish_model TEXT, pending_finish_system TEXT,
+                pending_finish_payload TEXT, pending_finish_terminated_reason TEXT,
                 FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS snapshots (
@@ -400,6 +413,15 @@ def init_db():
         ("interviews", "compact_memory", "TEXT DEFAULT ''"),
         ("interviews", "question_count", "INTEGER DEFAULT 0"),
         ("interviews", "depth_tier", "TEXT DEFAULT 'standart'"),
+        ("interviews", "processing_status", "TEXT"),
+        ("interviews", "processing_error", "TEXT"),
+        ("interviews", "processing_started_at", "TIMESTAMP" if USE_POSTGRES else "TEXT"),
+        ("interviews", "pending_finish_reason", "TEXT"),
+        ("interviews", "pending_finish_provider", "TEXT"),
+        ("interviews", "pending_finish_model", "TEXT"),
+        ("interviews", "pending_finish_system", "TEXT"),
+        ("interviews", "pending_finish_payload", "TEXT"),
+        ("interviews", "pending_finish_terminated_reason", "TEXT"),
         ("ai_usage_logs", "estimated_cost_usd", "DOUBLE PRECISION DEFAULT 0" if USE_POSTGRES else "REAL DEFAULT 0"),
         ("ai_usage_logs", "cached_input_tokens", "INTEGER DEFAULT 0"),
         ("ai_usage_logs", "cached_audio_input_tokens", "INTEGER DEFAULT 0"),
@@ -1759,7 +1781,8 @@ def get_candidates(payload=Depends(verify_admin), org_id: Optional[int] = None):
     db = get_db()
     scoped_org_id = get_org_id_for_admin(db, payload, org_id)
     rows = db.execute("""
-        SELECT c.*, i.score, i.recommendation, i.completed_at as interview_completed, i.total_input_tokens, i.total_output_tokens
+        SELECT c.*, i.score, i.recommendation, i.completed_at as interview_completed, i.total_input_tokens, i.total_output_tokens,
+               i.processing_status, i.processing_error
         FROM candidates c
         LEFT JOIN interviews i ON c.id = i.candidate_id AND i.level = c.level
         WHERE c.org_id=?
@@ -1780,7 +1803,8 @@ def get_person(person_id: int, payload=Depends(verify_admin)):
     attempts = db.execute("""
         SELECT c.id as candidate_id, c.position, c.level, c.depth_tier, c.status, c.invite_type,
                c.is_archived, c.created_at, c.completed_at,
-               i.score, i.recommendation, i.completed_at as interview_completed_at
+               i.score, i.recommendation, i.completed_at as interview_completed_at,
+               i.processing_status, i.processing_error
         FROM candidates c
         LEFT JOIN interviews i ON i.candidate_id = c.id AND i.level = c.level
         WHERE c.person_id = ?
@@ -2331,7 +2355,7 @@ def start_interview(payload=Depends(verify_token)):
         raise HTTPException(status_code=500, detail="Mülakat başlatılırken beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.")
 
 @app.post("/api/interview/chat")
-def interview_chat(data: ChatMessage, payload=Depends(verify_token)):
+def interview_chat(data: ChatMessage, background_tasks: BackgroundTasks, payload=Depends(verify_token)):
     if payload.get("role") != "candidate":
         raise HTTPException(status_code=403, detail="Yetkisiz")
 
@@ -2413,10 +2437,28 @@ GÖREV:
     exit_requested_this_turn = False
 
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level, (candidate["interview_language"] if candidate and "interview_language" in candidate.keys() else "tr") or "tr", (candidate["report_language"] if candidate and "report_language" in candidate.keys() else "tr") or "tr", (candidate["depth_tier"] if candidate and "depth_tier" in candidate.keys() else "standart") or "standart")
+
+        # KAPANIŞ İŞLEMİNİ ARKA PLANA ALMA: should_finish=True olduğunda bu tur zaten rapor
+        # üretecek yavaş (4000 token) çağrıyı tetikleyecekti. Onun yerine adayın son cevabını
+        # hemen kaydedip, gönderilecek promptu (system+user_payload) AYNEN DB'ye yazıp arka
+        # planda çalıştırıyoruz — aday 2-3 dakika değil, DB yazımı kadar bekliyor.
+        if should_finish:
+            # data.message zaten messages'a eklendi (fonksiyon başında) — burada tekrar eklenmez.
+            db = get_db()
+            save_interview_state(db, effective_candidate_id, messages, level)
+            db.commit(); db.close()
+            _mark_finish_pending(effective_candidate_id, level, provider="claude", model="claude-sonnet-4-6",
+                                  system=system, payload=user_payload, terminated_reason=None, reason="normal")
+            background_tasks.add_task(run_deferred_finish_job, effective_candidate_id, level)
+            return {
+                "message": "Mülakatınız tamamlandı, teşekkür ederiz. Raporunuz hazırlanıyor.",
+                "completed": True, "processing": True, "score": None, "recommendation": None,
+            }
+
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=4000 if should_finish else 260, system=cached_system(system),
+            model="claude-sonnet-4-6", max_tokens=260, system=cached_system(system),
             messages=[{"role": "user", "content": user_payload}]
         )
         reply = response.content[0].text
@@ -2426,9 +2468,9 @@ GÖREV:
         if exit_requested_this_turn:
             reply = reply.replace("[ADAY_CIKIS_TALEBI]", "").strip()
 
-        if "[MÜLAKATBİTTİ]" in reply and not should_finish:
-            # GÜVENLİK AĞI: Süre dolması veya adayın "bitirelim" demesi tüm mülakatı bitirmez.
-            # Minimum soru sayısı dolmadan gelen tüm final/rapor bloklarını tamamen atarız.
+        if "[MÜLAKATBİTTİ]" in reply:
+            # GÜVENLİK AĞI: should_finish=False bir turda (sabit 260 token'lık çağrı) AI yine de
+            # erken bitirme denerse (nadir), rapor bloğunu at, mülakat devam etsin.
             print(f"UYARI: AI erken bitirme denedi (q_count={q_count}, elapsed={data.elapsed_seconds}); rapor atıldı, mülakat devam ediyor.")
             reply = re.sub(r'\[MÜLAKATBİTTİ\][\s\S]*', '', reply).strip()
             reply = re.sub(r'---RAPOR---[\s\S]*', '', reply).strip()
@@ -2450,27 +2492,26 @@ GÖREV:
             if not real_answers:
                 # HİÇ gerçek cevap yoksa (mülakat aslında hiç başlamadıysa), Claude'a
                 # pahalı bir "rapor üret" çağrısı (4000 token) yapmadan direkt ücretsiz
-                # şablon raporla bitir — boş bir mülakat için token harcamanın anlamı yok.
+                # şablon raporla bitir — boş bir mülakat için token harcamanın anlamı yok. Zaten
+                # hızlı (AI çağrısı yok), arka plana almaya gerek yok.
                 return finalize_interview(effective_candidate_id, "[MÜLAKATBİTTİ]",
                                            terminated_reason="Aday talebiyle erken sonlandırıldı (gerçek veri toplanamadı)", level=level)
 
-            # Aday net bir sonlandırma talebinde bulundu — ikna etmeye çalışmadan,
-            # mevcut konuşma içeriğiyle GERÇEK bir bitiş/rapor üretimi tetikleniyor.
-            # (İhlal sonrası zorla bitirme ile aynı desen: ayrı, doğrudan bir "bitir" çağrısı.)
+            # Aday net bir sonlandırma talebinde bulundu — ikna etmeye çalışmadan, mevcut konuşma
+            # içeriğiyle GERÇEK bir bitiş/rapor üretimi tetiklenir. Bu da yavaş (4000 token) bir
+            # çağrı olduğu için should_finish dalıyla AYNI mekanizmayla arka plana alınır.
             finish_payload = f"""ÖNCEKİ KISA HAFIZA:
 {build_compact_memory(messages)}
 
 GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir teknik arıza bildirimi de olabilir). Mülakatı şimdi bitir ve mevcut bilgilere göre raporu üret. Adayı ikna etmeye çalışma, sadece elindeki bilgiyle adil bir değerlendirme yap; eksik kalan kısımları düşük puan nedeni yapma, sadece "yeterli veri toplanamadı" notu düş. [MÜLAKATBİTTİ] etiketini kullan."""
-            finish_response = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=4000, system=cached_system(system),
-                messages=[{"role": "user", "content": finish_payload}]
-            )
-            add_token_usage(effective_candidate_id, level, finish_response)
-            return finalize_interview(effective_candidate_id, finish_response.content[0].text,
-                                       terminated_reason="Aday talebiyle erken sonlandırıldı", level=level)
-
-        if "[MÜLAKATBİTTİ]" in reply:
-            return finalize_interview(effective_candidate_id, reply, level=level)
+            _mark_finish_pending(effective_candidate_id, level, provider="claude", model="claude-sonnet-4-6",
+                                  system=system, payload=finish_payload,
+                                  terminated_reason="Aday talebiyle erken sonlandırıldı", reason="aday_talebi")
+            background_tasks.add_task(run_deferred_finish_job, effective_candidate_id, level)
+            return {
+                "message": "Anlıyorum, mülakatı burada sonlandıralım. Raporunuz hazırlanıyor.",
+                "completed": True, "processing": True, "score": None, "recommendation": None,
+            }
 
         clean, duration = parse_duration(reply)
         return {"message": clean, "completed": False, "question_duration": duration}
@@ -2511,6 +2552,138 @@ Pozisyona özgü teknik bilgi, somut deneyim örnekleri ve yapılandırılmış 
 Genel Kanı:
 Mevcut veri rapor için sınırlıdır. Nihai karar için adaydan daha kapsamlı ve pozisyona doğrudan bağlı örnekler alınması önerilir.
 """.strip()
+
+# ============ KAPANIŞ İŞLEMİNİ ARKA PLANA ALMA (rapor üretimi) ============
+# Tasarım: "yavaş" olan tek şey rapor üreten AI çağrısı (Claude L1/L3, GPT-4o L2). Bu çağrıya
+# GİDECEK TAM promptu (system+payload, hazır metin olarak) senkron kısımda üretip DB'ye
+# aynen kaydediyoruz (pending_finish_*), sonra ya BackgroundTasks ile hemen ya da kurtarma
+# taramasıyla sonradan aynı promptu birebir tekrar gönderiyoruz — mantığı yeniden kurmuyoruz,
+# sadece "gönderilecek olanı" saklayıp tekrar oynatıyoruz. Bu yüzden normal kapanış, aday-talebi
+# kapanışı, ihlal kapanışı ve L2 sesli raporu TEK bir arka plan fonksiyonundan geçer.
+def _mark_finish_pending(candidate_id: int, level: int, provider: str, model: Optional[str], system: Optional[str],
+                          payload: str, terminated_reason: Optional[str], reason: str):
+    db = get_db()
+    db.execute("""
+        UPDATE interviews SET processing_status='processing', processing_started_at=CURRENT_TIMESTAMP,
+               processing_error=NULL, pending_finish_reason=?, pending_finish_provider=?, pending_finish_model=?,
+               pending_finish_system=?, pending_finish_payload=?, pending_finish_terminated_reason=?
+        WHERE candidate_id=? AND level=?
+    """, (reason, provider, model, system, payload, terminated_reason, candidate_id, level))
+    db.commit(); db.close()
+
+def _mark_finish_failed(candidate_id: int, level: int, error_text: str):
+    db = get_db()
+    db.execute("UPDATE interviews SET processing_status='failed', processing_error=? WHERE candidate_id=? AND level=?",
+               (error_text[:2000], candidate_id, level))
+    db.commit(); db.close()
+    print(f"[PROCESSING_FAILED] candidate_id={candidate_id} level={level} error={error_text[:300]}")
+
+def run_deferred_finish_job(candidate_id: int, level: int):
+    """BackgroundTasks'ten (mülakat az önce bitti) VEYA kurtarma taramasından (takılı kalmış eski
+    kayıt) çağrılır — girdisini SADECE DB'deki pending_finish_* alanlarından okur, hangi
+    tetikleyiciden geldiği önemli değildir. İDEMPOTENT: completed_at zaten doluysa no-op —
+    iki kez tetiklenirse (ör. hem arka plan görevi hem kurtarma taraması aynı satırı yakalarsa)
+    ikinci çağrı hiçbir şey yapmadan çıkar, ikinci bir rapor/e-posta üretmez."""
+    db = get_db()
+    interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+    db.close()
+    if not interview or interview["completed_at"]:
+        return
+    provider = interview["pending_finish_provider"]
+    model = interview["pending_finish_model"]
+    system = interview["pending_finish_system"]
+    payload = interview["pending_finish_payload"]
+    terminated_reason = interview["pending_finish_terminated_reason"]
+    if not payload:
+        _mark_finish_failed(candidate_id, level, "pending_finish_payload boş — gönderilecek kayıtlı istek yok")
+        return
+    try:
+        if provider == "claude":
+            if not ANTHROPIC_API_KEY:
+                raise RuntimeError("ANTHROPIC_API_KEY tanımlı değil")
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            response = client.messages.create(
+                model=model or "claude-sonnet-4-6", max_tokens=4000,
+                system=cached_system(system) if system else anthropic.NOT_GIVEN,
+                messages=[{"role": "user", "content": payload}]
+            )
+            add_token_usage(candidate_id, level, response)
+            reply = response.content[0].text
+            # Normal kapanış çağrısı bile [ADAY_CIKIS_TALEBI] üretebilir (mevcut senkron
+            # interview_chat akışıyla aynı davranış) — öyleyse ikinci bir "gerçek bitiş" çağrısı yap.
+            if "[ADAY_CIKIS_TALEBI]" in reply:
+                exit_payload = f"""ÖNCEKİ KISA HAFIZA:
+{interview["compact_memory"] or "Henüz yok."}
+
+GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir teknik arıza bildirimi de olabilir). Mülakatı şimdi bitir ve mevcut bilgilere göre raporu üret. Adayı ikna etmeye çalışma, sadece elindeki bilgiyle adil bir değerlendirme yap; eksik kalan kısımları düşük puan nedeni yapma, sadece "yeterli veri toplanamadı" notu düş. [MÜLAKATBİTTİ] etiketini kullan."""
+                exit_response = client.messages.create(
+                    model=model or "claude-sonnet-4-6", max_tokens=4000,
+                    system=cached_system(system) if system else anthropic.NOT_GIVEN,
+                    messages=[{"role": "user", "content": exit_payload}]
+                )
+                add_token_usage(candidate_id, level, exit_response)
+                reply = exit_response.content[0].text
+                terminated_reason = terminated_reason or "Aday talebiyle erken sonlandırıldı"
+        elif provider == "openai":
+            with httpx.Client(timeout=60) as client:
+                resp = client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                    json={"model": model or OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": payload}], "max_tokens": 2600, "temperature": 0.1}
+                )
+            if resp.status_code != 200:
+                raise RuntimeError(f"OpenAI rapor üretimi HTTP {resp.status_code}: {resp.text[:400]}")
+            result = resp.json()
+            record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "l2_report_generation_deferred", result)
+            reply = result["choices"][0]["message"]["content"]
+        else:
+            raise RuntimeError(f"Bilinmeyen pending_finish_provider: {provider!r}")
+
+        finalize_interview(candidate_id, reply, terminated_reason=terminated_reason, level=level)
+        print(f"[PROCESSING_DONE] candidate_id={candidate_id} level={level}")
+    except Exception as e:
+        print(f"HATA (run_deferred_finish_job c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        _mark_finish_failed(candidate_id, level, f"{type(e).__name__}: {e}")
+
+def recover_stale_processing_interviews(stale_after_seconds: int = 180):
+    """DAYANIKLILIK: konteyner yeniden başlarsa ya da bir arka plan görevi sessizce ölürse,
+    'processing' durumunda takılı kalan kayıtları bulup run_deferred_finish_job ile yeniden
+    dener. run_deferred_finish_job idempotent olduğu için güvenle tekrar tekrar çağrılabilir."""
+    try:
+        db = get_db()
+        rows = db.execute("""
+            SELECT candidate_id, level, processing_started_at FROM interviews
+            WHERE processing_status='processing' AND completed_at IS NULL
+        """).fetchall()
+        db.close()
+        now = datetime.now()
+        for r in rows:
+            started = r["processing_started_at"]
+            if isinstance(started, str):
+                try:
+                    started = datetime.fromisoformat(started.split(".")[0].replace("T", " "))
+                except Exception:
+                    started = None
+            if started is None:
+                continue
+            age = (now - started).total_seconds()
+            if age >= stale_after_seconds:
+                print(f"[RECOVERY] Takılı kalan kapanış yeniden deneniyor: candidate_id={r['candidate_id']} level={r['level']} yaş={int(age)}sn")
+                run_deferred_finish_job(r["candidate_id"], r["level"])
+    except Exception as e:
+        print(f"UYARI (recover_stale_processing_interviews): {type(e).__name__}: {e}")
+
+async def _periodic_recovery_loop():
+    while True:
+        await asyncio.sleep(120)
+        await asyncio.to_thread(recover_stale_processing_interviews)
+
+@app.on_event("startup")
+async def _on_startup_recovery():
+    # Konteyner az önce başladıysa, önceki süreçten kalan "processing" kayıtları hemen bir kez
+    # tara (0 sn bekleme — bunlar zaten kesin sahipsiz, önceki süreç artık yok).
+    await asyncio.to_thread(recover_stale_processing_interviews, 0)
+    asyncio.create_task(_periodic_recovery_loop())
 
 def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optional[str] = None, level: int = 1):
     report_match = re.search(r'---RAPOR---([\s\S]*?)(?:---RAPORSON---|---STANDARTCV---|\Z)', reply)
@@ -2554,7 +2727,8 @@ Mevcut transkript ve aday yanıtları yönetici incelemesine sunulmalıdır.
     # ile atomik). Eğer bu satır başka bir eşzamanlı çağrı tarafından zaten tamamlanmışsa
     # (rowcount=0), üzerine yazma ve tekrar e-posta gönderme — mevcut kayıtlı sonucu dön.
     cur = db.execute("""
-        UPDATE interviews SET report=?, standard_cv=?, score=?, recommendation=?, completed_at=CURRENT_TIMESTAMP
+        UPDATE interviews SET report=?, standard_cv=?, score=?, recommendation=?, completed_at=CURRENT_TIMESTAMP,
+               processing_status='completed', processing_error=NULL
         WHERE candidate_id=? AND level=? AND completed_at IS NULL
     """, (report, standard_cv, score, recommendation, candidate_id, level))
     already_finalized = cur.rowcount == 0
@@ -2590,7 +2764,7 @@ Mevcut transkript ve aday yanıtları yönetici incelemesine sunulmalıdır.
 
 # ---- Violation handling (sekme değişimi vs.) ----
 @app.post("/api/interview/violation")
-def report_violation(data: ViolationReport, payload=Depends(verify_token)):
+def report_violation(data: ViolationReport, background_tasks: BackgroundTasks, payload=Depends(verify_token)):
     if payload.get("role") != "candidate":
         raise HTTPException(status_code=403, detail="Yetkisiz")
 
@@ -2626,18 +2800,20 @@ def report_violation(data: ViolationReport, payload=Depends(verify_token)):
                 "score": 0, "recommendation": "Reddet"
             }
         try:
-            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
             system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"], candidate_level, candidate["interview_language"] or "tr", candidate["report_language"] or "tr", (candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart") or "standart")
             force_msg = "Aday 3 kez sekme/ekran değişimi ihlali yaptı. Mülakatı şimdi sonlandır, mevcut bilgilere göre rapor ver. Düşük puan ver ve raporda ihlal nedeniyle sonlandırıldığını belirt. [MÜLAKATBİTTİ] etiketini kullan."
             log_ai_provider(candidate_level, "claude", "analysis")
-            response = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=4000, system=cached_system(system),
-                messages=[{"role": "user", "content": force_msg}]
-            )
-            add_token_usage(data.candidate_id, candidate_level, response)
-            result = finalize_interview(data.candidate_id, response.content[0].text,
-                                         terminated_reason="Sekme/ekran değişimi ihlali (3 kez tespit edildi)", level=candidate_level)
-            return {"violation_count": new_count, "terminated": True, **result}
+            # Yavaş (4000 token) çağrı — interview_chat'teki should_finish ile aynı mekanizmayla
+            # arka plana alınır; aday hemen "sonlandırıldı" cevabını alır, rapor arkada üretilir.
+            terminated_reason = "Sekme/ekran değişimi ihlali (3 kez tespit edildi)"
+            _mark_finish_pending(data.candidate_id, candidate_level, provider="claude", model="claude-sonnet-4-6",
+                                  system=system, payload=force_msg, terminated_reason=terminated_reason, reason="violation")
+            background_tasks.add_task(run_deferred_finish_job, data.candidate_id, candidate_level)
+            return {
+                "violation_count": new_count, "terminated": True,
+                "message": "Mülakat kuralları ihlal edildiği için süreç sonlandırılmıştır. Rapor hazırlanıyor.",
+                "processing": True, "score": None, "recommendation": None,
+            }
         except Exception as e:
             print(f"HATA (report_violation, mülakat zorla sonlandırma): {type(e).__name__}: {e}")
             # AI çağrısı başarısız olsa bile adayı manuel olarak sonlandırılmış say
@@ -3006,7 +3182,8 @@ def finalize_incomplete_interview(candidate_id: int, report: str, terminated_rea
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
     standard_cv = f"AD SOYAD: {candidate['name'] if candidate else '-'}\nPOZİSYON: {candidate['position'] if candidate else '-'}\nMÜLAKAT NOTU: Görüşme tamamlanamadığı için puanlama yapılmadı."
     db.execute("""
-        UPDATE interviews SET report=?, standard_cv=?, score=NULL, recommendation='Değerlendirilemedi', completed_at=CURRENT_TIMESTAMP
+        UPDATE interviews SET report=?, standard_cv=?, score=NULL, recommendation='Değerlendirilemedi', completed_at=CURRENT_TIMESTAMP,
+               processing_status='completed', processing_error=NULL
         WHERE candidate_id=? AND level=? AND completed_at IS NULL
     """, (report, standard_cv, candidate_id, level))
     if candidate and (candidate["level"] or 1) == level:
@@ -3018,7 +3195,7 @@ def finalize_incomplete_interview(candidate_id: int, report: str, terminated_rea
 
 
 @app.post("/api/realtime/report")
-async def create_l2_report(data: RealtimeReportRequest, payload=Depends(verify_token)):
+async def create_l2_report(data: RealtimeReportRequest, background_tasks: BackgroundTasks, payload=Depends(verify_token)):
     if payload.get("role") != "candidate":
         raise HTTPException(status_code=403, detail="Yetkisiz")
 
@@ -3153,31 +3330,17 @@ TAM FORMAT:
 
 Çıktı mutlaka [MÜLAKATBİTTİ] ve ---RAPOR--- bloklarıyla başlasın."""
 
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                json={"model": OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": report_prompt}], "max_tokens": 2600, "temperature": 0.1}
-            )
-        if resp.status_code != 200:
-            print(f"HATA (OpenAI rapor üretimi): model={OPENAI_REPORT_MODEL} status={resp.status_code} body={resp.text[:1200]}")
-            raise HTTPException(status_code=502, detail="Rapor üretilemedi (OpenAI hatası).")
-        result = resp.json()
-        record_openai_chat_usage(effective_candidate_id, candidate_level, OPENAI_REPORT_MODEL, "l2_report_generation", result)
-        reply = result["choices"][0]["message"]["content"]
-        log_ai_provider(candidate_level, "openai", "report_generated")
-    except HTTPException as e:
-        print(f"HATA (create_l2_report, OpenAI): {getattr(e, 'detail', e)}")
-        # Rapor üretimi patlasa bile mülakat zinciri kırılmasın: aday tamamlandı, admin tamamlandı, mail yedek raporla gitsin.
-        reply = build_l2_short_report(candidate["name"], candidate["position"], "OpenAI rapor üretimi sırasında hata oluştu; transkript kaydedildi ve yedek rapor oluşturuldu. Yönetici transkripti ayrıca incelemelidir.")
-        return finalize_interview(effective_candidate_id, reply, terminated_reason=None, level=candidate_level)
-    except Exception as e:
-        print(f"HATA (create_l2_report, beklenmeyen): {type(e).__name__}: {e}")
-        reply = build_l2_short_report(candidate["name"], candidate["position"], "Rapor üretimi sırasında beklenmeyen hata oluştu; transkript kaydedildi ve yedek rapor oluşturuldu. Yönetici transkripti ayrıca incelemelidir.")
-        return finalize_interview(effective_candidate_id, reply, terminated_reason=None, level=candidate_level)
-
-    return finalize_interview(effective_candidate_id, reply, level=candidate_level)
+    # KAPANIŞ İŞLEMİNİ ARKA PLANA ALMA: GPT-4o çağrısı (2600 token) burada YAPILMAZ — gönderilecek
+    # tam promptu (report_prompt) aynen DB'ye yazıp arka planda çalıştırıyoruz. Aday bekleme süresi
+    # DB yazımı kadar; rapor üretimi/parse/e-posta arkada olur. interview_chat'teki should_finish
+    # ile aynı mekanizma (run_deferred_finish_job), sadece provider="openai".
+    _mark_finish_pending(effective_candidate_id, candidate_level, provider="openai", model=OPENAI_REPORT_MODEL,
+                          system=None, payload=report_prompt, terminated_reason=None, reason="l2_normal")
+    background_tasks.add_task(run_deferred_finish_job, effective_candidate_id, candidate_level)
+    return {
+        "message": "Mülakatınız tamamlandı, teşekkür ederiz. Raporunuz hazırlanıyor.",
+        "completed": True, "processing": True, "score": None, "recommendation": None,
+    }
 
 @app.get("/api/admin/snapshots/{candidate_id}")
 def get_snapshots(candidate_id: int, payload=Depends(verify_admin)):
@@ -3495,12 +3658,16 @@ def download_interview_pdf(candidate_id: int, level: Optional[int] = None, paylo
     pos = get_position(candidate["position"], org_id=candidate["org_id"] if "org_id" in candidate.keys() else None)
     total_weight = sum(c["weight"] for c in pos["criteria"]) if pos else 100
     score = interview["score"]
+    processing_status = interview["processing_status"] if "processing_status" in interview.keys() else None
     if score is None or (total_weight > 0 and (score / total_weight) < 0.20):
-        msg = (
-            "Mülakat tamamlanmadığı için değerlendirme oluşturulamamıştır."
-            if score is None
-            else "Bu mülakat sonucunda aday hakkında güvenilir bir değerlendirme oluşturabilecek yeterli veri elde edilememiştir. Bu nedenle ayrıntılı rapor oluşturulmamıştır."
-        )
+        if processing_status == "processing":
+            msg = "Rapor hazırlanıyor, birkaç dakika içinde tekrar deneyin."
+        elif processing_status == "failed":
+            msg = "Rapor üretimi başarısız oldu; yönetici tekrar denemesi gerekiyor."
+        elif score is None:
+            msg = "Mülakat tamamlanmadığı için değerlendirme oluşturulamamıştır."
+        else:
+            msg = "Bu mülakat sonucunda aday hakkında güvenilir bir değerlendirme oluşturabilecek yeterli veri elde edilememiştir. Bu nedenle ayrıntılı rapor oluşturulmamıştır."
         raise HTTPException(status_code=422, detail=msg)
 
     pdf = _make_report_pdf(dict(candidate), dict(interview), [dict(s) for s in snapshots])
