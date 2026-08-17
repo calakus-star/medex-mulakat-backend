@@ -735,6 +735,25 @@ class CandidateCreate(BaseModel):
     ai_note: Optional[str] = None
     send_email: bool = True
 
+class CandidateUpdate(BaseModel):
+    """admin_update_candidate (PATCH) için — CandidateCreate'ten farklı olarak TÜM alanlar
+    Optional/varsayılan None. exclude_unset=True ile sadece istekte GERÇEKTEN gönderilen
+    alanlar DB'ye yazılır; gönderilmeyen alan eski değerinde kalır (tam-değiştirme değil,
+    kısmi güncelleme)."""
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    position: Optional[str] = None
+    level: Optional[int] = None
+    depth_tier: Optional[str] = None
+    interview_language: Optional[str] = None
+    report_language: Optional[str] = None
+    education: Optional[str] = None
+    university: Optional[str] = None
+    department: Optional[str] = None
+    experience_years: Optional[int] = None
+    ai_note: Optional[str] = None
+
 class CvPoolInvite(BaseModel):
     position: str
     level: int = 1
@@ -2102,6 +2121,25 @@ def delete_candidate(candidate_id: int, payload=Depends(verify_admin)):
     return {"message": "Aday silindi"}
 
 # ---- Admin CV Upload ----
+CV_EMAIL_RE = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
+
+def _cv_ownership_check(candidate_email: Optional[str], cv_text: Optional[str]) -> dict:
+    """İsim yerine e-posta ile sahiplik kontrolü (isim eşleşmesi kaldırıldı — yazım/kısaltma
+    farkları çok fazla yanlış pozitif üretiyordu, e-posta daha güvenilir bir kimlik alanı).
+    Kesin/kanıtlanmış bir doğrulama değil; eşleşmediğinde veya belirsiz olduğunda kayıt
+    REDDEDİLMEZ, sadece admine görünür bir uyarı/bilgi notu döner."""
+    found_emails = sorted(set(m.group(0).strip().lower() for m in CV_EMAIL_RE.finditer(cv_text or "")))
+    if not found_emails:
+        return {"warning": None, "note": "CV'de e-posta bulunamadı, sahiplik doğrulanamadı."}
+    cand_email = (candidate_email or "").strip().lower()
+    if cand_email and cand_email in found_emails:
+        return {"warning": None, "note": None}
+    return {
+        "warning": "Yüklenen CV'de aday e-postası bulunamadı, CV başka kişiye ait olabilir. "
+                    f"CV'de bulunan e-postalar: {', '.join(found_emails)}",
+        "note": None,
+    }
+
 @app.post("/api/admin/candidates/{candidate_id}/upload-cv")
 async def admin_upload_cv(candidate_id: int, file: UploadFile = File(...), payload=Depends(verify_admin)):
     if not (file.filename.lower().endswith(".pdf") or file.filename.lower().endswith(".docx")):
@@ -2110,42 +2148,79 @@ async def admin_upload_cv(candidate_id: int, file: UploadFile = File(...), paylo
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Dosya boyutu 10MB'ı geçemez")
     cv_text = extract_cv_text(file.filename, content)
-    db = get_db()
-    candidate = db.execute("SELECT id FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-    if not candidate:
-        db.close()
-        raise HTTPException(status_code=404, detail="Aday bulunamadı")
-    db.execute("UPDATE candidates SET cv_text=?, cv_filename=? WHERE id=?", (cv_text, file.filename, candidate_id))
-    db.commit(); db.close()
-    return {"message": "CV yüklendi", "preview": cv_text[:300]}
+
+    db = None
+    try:
+        db = get_db()
+        candidate = db.execute("SELECT id, email FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Aday bulunamadı")
+        db.execute("UPDATE candidates SET cv_text=?, cv_filename=? WHERE id=?", (cv_text, file.filename, candidate_id))
+        db.commit()
+    except HTTPException:
+        if db:
+            db.rollback()
+        raise
+    except Exception as e:
+        if db:
+            db.rollback()
+        print(f"HATA (admin_upload_cv candidate_id={candidate_id}): {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="CV yüklenirken beklenmeyen bir hata oluştu.")
+    finally:
+        if db:
+            db.close()
+
+    ownership = _cv_ownership_check(candidate["email"], cv_text)
+    return {
+        "message": "CV yüklendi", "preview": cv_text[:300],
+        "cv_ownership_warning": ownership["warning"], "cv_ownership_note": ownership["note"],
+    }
 
 @app.patch("/api/admin/candidates/{candidate_id}")
-def admin_update_candidate(candidate_id: int, data: CandidateCreate, payload=Depends(verify_admin)):
-    db = get_db()
-    candidate = db.execute("SELECT id, level FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-    if not candidate:
-        db.close()
-        raise HTTPException(status_code=404, detail="Aday bulunamadı")
+def admin_update_candidate(candidate_id: int, data: CandidateUpdate, payload=Depends(verify_admin)):
+    db = None
+    try:
+        db = get_db()
+        candidate = db.execute("SELECT id, level FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Aday bulunamadı")
 
-    new_level = data.level or 1
-    level_changed = (candidate["level"] or 1) != new_level
+        # KISMİ YAZMA: sadece istekte gerçekten gönderilen alanlar yazılır — CandidateCreate'in
+        # tam-değiştirme davranışı (gönderilmeyen alanı None'a düşürme) burada terk edildi.
+        fields = data.model_dump(exclude_unset=True)
+        if "email" in fields:
+            fields["email"] = normalize_email(fields["email"])
 
-    db.execute("""
-        UPDATE candidates SET name=?, email=?, phone=?, education=?, university=?, department=?, experience_years=?, ai_note=?, position=?, level=?, depth_tier=?, interview_language=?, report_language=?
-        WHERE id=?
-    """, (data.name, normalize_email(data.email), data.phone, data.education, data.university, data.department, data.experience_years or 0, data.ai_note, data.position, new_level, data.depth_tier or "standart", data.interview_language or "tr", data.report_language or "tr", candidate_id))
+        new_level = fields.get("level", candidate["level"] or 1)
+        level_changed = "level" in fields and (candidate["level"] or 1) != new_level
 
-    if level_changed:
-        # Aday farklı bir seviyeye taşındı: bu seviye için yeni bir mülakat denemesi
-        # başlatılabilsin diye durumu sıfırla. Önceki seviyenin kaydı (interviews
-        # tablosunda level ile ayrı satır) olduğu gibi kalır, silinmez.
-        db.execute("""
-            UPDATE candidates SET status='pending', completed_at=NULL, violation_count=0, terminated_reason=NULL
-            WHERE id=?
-        """, (candidate_id,))
+        if fields:
+            set_clause = ", ".join(f"{k}=?" for k in fields.keys())
+            db.execute(f"UPDATE candidates SET {set_clause} WHERE id=?", list(fields.values()) + [candidate_id])
 
-    db.commit(); db.close()
-    return {"message": "Aday bilgileri güncellendi" + (" (yeni seviye için mülakat sıfırlandı)" if level_changed else "")}
+        if level_changed:
+            # Aday farklı bir seviyeye taşındı: bu seviye için yeni bir mülakat denemesi
+            # başlatılabilsin diye durumu sıfırla. Önceki seviyenin kaydı (interviews
+            # tablosunda level ile ayrı satır) olduğu gibi kalır, silinmez.
+            db.execute("""
+                UPDATE candidates SET status='pending', completed_at=NULL, violation_count=0, terminated_reason=NULL
+                WHERE id=?
+            """, (candidate_id,))
+
+        db.commit()
+        return {"message": "Aday bilgileri güncellendi" + (" (yeni seviye için mülakat sıfırlandı)" if level_changed else "")}
+    except HTTPException:
+        if db:
+            db.rollback()
+        raise
+    except Exception as e:
+        if db:
+            db.rollback()
+        print(f"HATA (admin_update_candidate candidate_id={candidate_id}): {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Aday güncellenirken beklenmeyen bir hata oluştu.")
+    finally:
+        if db:
+            db.close()
 
 # ---- CV Upload ----
 @app.post("/api/candidate/upload-cv")
