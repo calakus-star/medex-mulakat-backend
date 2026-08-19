@@ -21,6 +21,7 @@ import json
 import re
 import io
 import base64
+import traceback
 from xml.sax.saxutils import escape as xml_escape
 
 app = FastAPI(title="MedeX Mülakat Sistemi")
@@ -32,6 +33,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ============ HATA YÖNETİMİ STANDARDI (Aşama 4, CLAUDE.md'de belgelendi) ============
+# Global exception handler: bir route handler kendi try/except'i içinde yakalamadığı HERHANGİ
+# bir hatayı burada yakalar. İstemciye ASLA ham hata metni/stack trace dönmez — sadece generic
+# bir mesaj + 500. Tam hata (tip + mesaj + stack trace) sunucu logunda kalır. Bu, tek tek her
+# endpoint'e try/except yazılmasa bile "sessiz düşme / ham hata sızması" olmamasını garantiler.
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    from fastapi.responses import JSONResponse
+    print(f"[UNHANDLED_ERROR] {request.method} {request.url.path}: {type(exc).__name__}: {exc}")
+    print(traceback.format_exc())
+    return JSONResponse(status_code=500, content={"detail": "Beklenmeyen bir sunucu hatası oluştu."})
 
 # ============ CONFIG ============
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -148,6 +161,23 @@ def get_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def db_dep():
+    """Route handler'lar için tercih edilen DB erişimi: `db=Depends(db_dep)`. Hata durumunda
+    rollback, HER durumda (başarı/hata) close — bu iki satırı 40'tan fazla endpoint'e tek tek
+    kopyalamak yerine tek yerde. Endpoint hâlâ kendi db.commit()'ini kendisi çağırır; burası
+    sadece açılış/rollback/kapanışı üstleniyor. Not: bazı yardımcı fonksiyonlar (find_or_create_person,
+    run_deferred_finish_job, vb.) route handler değildir ve kendi get_db()/try-except'ini kullanmaya
+    devam eder — bu dependency sadece @app.* handler'lar içindir."""
+    db = get_db()
+    try:
+        yield db
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def init_db():
@@ -436,7 +466,10 @@ def init_db():
             else:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             conn.commit()
-        except Exception:
+        except Exception as e:
+            # Beklenen durum: kolon zaten var (idempotent migration). Ama gerçek bir DB
+            # hatasını da sessizce yutmamak için logluyoruz.
+            print(f"[MIGRATION] {table}.{column} eklenemedi (muhtemelen zaten var): {type(e).__name__}: {e}")
             conn.rollback()
     conn.commit()
 
@@ -468,11 +501,13 @@ def init_db():
         if USE_POSTGRES:
             try:
                 conn.execute("ALTER TABLE positions DROP CONSTRAINT IF EXISTS positions_name_key")
-            except Exception:
+            except Exception as e:
+                print(f"[MIGRATION] positions_name_key düşürülemedi: {type(e).__name__}: {e}")
                 conn.rollback()
             try:
                 conn.execute("ALTER TABLE positions ADD CONSTRAINT positions_org_name_key UNIQUE (org_id, name)")
-            except Exception:
+            except Exception as e:
+                print(f"[MIGRATION] positions_org_name_key eklenemedi (muhtemelen zaten var): {type(e).__name__}: {e}")
                 conn.rollback()
         else:
             conn.executescript("""
@@ -951,7 +986,8 @@ def get_interview_messages(db, candidate_id: int, level: int = None) -> list:
         return []
     try:
         return json.loads(row["messages"] or "[]")
-    except Exception:
+    except Exception as e:
+        print(f"UYARI (get_interview_messages: messages JSON bozuk, candidate_id={candidate_id}): {type(e).__name__}: {e}")
         return []
 
 def add_token_usage(candidate_id: int, level: int, response):
@@ -979,7 +1015,8 @@ def add_token_usage(candidate_id: int, level: int, response):
 def _safe_int(value) -> int:
     try:
         return int(value or 0)
-    except Exception:
+    except Exception as e:
+        print(f"UYARI (_safe_int: sayıya çevrilemedi, value={value!r}): {type(e).__name__}: {e}")
         return 0
 
 # Yaklaşık USD fiyatlandırma (1M token başına) — TEK KAYNAK. Hem backend (panel/log) hem
@@ -1177,11 +1214,15 @@ def send_invite_email(candidate_name: str, email: str, username: str, password: 
             </div>
         </div>
         """
-        resend.Emails.send({
-            "from": FROM_EMAIL, "to": email,
-            "subject": f"MedeX SMO - {position} Pozisyonu Mülakat Daveti",
-            "html": html
-        })
+        # NOT: resend SDK'sının Emails.send()'i timeout kabul etmiyor (requests.request'i
+        # timeout=None ile çağırıyor) — dış çağrılarda timeout zorunlu kuralı için Resend'in
+        # REST uç noktasına doğrudan httpx ile, açık bir timeout'la gidiliyor.
+        httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+            json={"from": FROM_EMAIL, "to": email, "subject": f"MedeX SMO - {position} Pozisyonu Mülakat Daveti", "html": html},
+            timeout=20.0,
+        ).raise_for_status()
         return True
     except Exception as e:
         print(f"Mail hatası: {e}")
@@ -1223,11 +1264,12 @@ def send_report_email(candidate_name, position, report, score, recommendation, s
             </div>
         </div>
         """
-        resend.Emails.send({
-            "from": FROM_EMAIL, "to": REPORT_EMAILS,
-            "subject": f"Mülakat Raporu: {candidate_name} - {position}",
-            "html": html
-        })
+        httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+            json={"from": FROM_EMAIL, "to": REPORT_EMAILS, "subject": f"Mülakat Raporu: {candidate_name} - {position}", "html": html},
+            timeout=20.0,
+        ).raise_for_status()
         return True
     except Exception as e:
         print(f"Rapor mail hatası: {e}")
@@ -1578,7 +1620,8 @@ def normalize_recommendation(score: int, ai_recommendation: Optional[str] = None
     """Tek iş kuralı: admin ekranı, PDF ve mail aynı öneriyi kullansın."""
     try:
         s = int(score or 0)
-    except Exception:
+    except Exception as e:
+        print(f"UYARI (normalize_recommendation: score sayıya çevrilemedi, score={score!r}): {type(e).__name__}: {e}")
         s = 0
     if s < 40:
         return "Reddet"
@@ -1623,10 +1666,8 @@ def root():
 
 # ---- Admin Auth ----
 @app.post("/api/admin/login")
-def admin_login(data: AdminLogin):
-    db = get_db()
+def admin_login(data: AdminLogin, db=Depends(db_dep)):
     row = db.execute("SELECT * FROM admin_users WHERE email=? AND is_active=1", (data.email,)).fetchone()
-    db.close()
     if row and hash_password(data.password) == row["password_hash"]:
         token = create_token({
             "role": "admin", "email": row["email"], "admin_id": row["id"],
@@ -1651,24 +1692,20 @@ def get_admin_profile(payload=Depends(verify_admin)):
     }
 
 @app.put("/api/admin/profile")
-def update_admin_profile(data: AdminProfileUpdate, payload=Depends(verify_admin)):
+def update_admin_profile(data: AdminProfileUpdate, payload=Depends(verify_admin), db=Depends(db_dep)):
     admin_id = payload.get("admin_id")
     if not admin_id:
         raise HTTPException(status_code=400, detail="Bu hesap için şifre değişikliği desteklenmiyor (env-var admin). Lütfen bir admin_users kaydı üzerinden giriş yapın.")
-    db = get_db()
     row = db.execute("SELECT * FROM admin_users WHERE id=?", (admin_id,)).fetchone()
     if not row or hash_password(data.current_password) != row["password_hash"]:
-        db.close()
         raise HTTPException(status_code=401, detail="Mevcut şifre hatalı")
     db.execute("UPDATE admin_users SET password_hash=? WHERE id=?", (hash_password(data.new_password), admin_id))
     db.commit()
-    db.close()
     return {"message": "Şifre güncellendi"}
 
 # ---- Süperadmin: Kurum (Organization) Yönetimi ----
 @app.get("/api/superadmin/organizations")
-def list_organizations(payload=Depends(verify_superadmin)):
-    db = get_db()
+def list_organizations(payload=Depends(verify_superadmin), db=Depends(db_dep)):
     rows = db.execute("""
         SELECT o.*,
             (SELECT COUNT(*) FROM admin_users a WHERE a.org_id = o.id) AS admin_count,
@@ -1676,17 +1713,14 @@ def list_organizations(payload=Depends(verify_superadmin)):
         FROM organizations o
         ORDER BY o.created_at DESC
     """).fetchall()
-    db.close()
     return [dict(r) for r in rows]
 
 @app.post("/api/superadmin/organizations")
-def create_organization(data: OrganizationCreate, payload=Depends(verify_superadmin)):
-    db = get_db()
+def create_organization(data: OrganizationCreate, payload=Depends(verify_superadmin), db=Depends(db_dep)):
     try:
         db.execute("INSERT INTO organizations (name, slug) VALUES (?, ?)", (data.name, data.slug))
         db.commit()
     except (sqlite3.IntegrityError, psycopg.IntegrityError):
-        db.close()
         raise HTTPException(status_code=400, detail="Bu slug zaten kullanılıyor")
     org_row = db.execute("SELECT id FROM organizations WHERE slug=?", (data.slug,)).fetchone()
     new_org_id = org_row["id"]
@@ -1702,15 +1736,12 @@ def create_organization(data: OrganizationCreate, payload=Depends(verify_superad
                 (p["name"], p["category"], p["role_description"], p["criteria_json"], p["active"], new_org_id)
             )
         db.commit()
-    db.close()
     return {"id": new_org_id, "name": data.name, "slug": data.slug, "message": "Kurum oluşturuldu, pozisyon kataloğu MedeX şablonundan kopyalandı"}
 
 @app.post("/api/superadmin/organizations/{org_id}/admins")
-def create_org_admin(org_id: int, data: OrgAdminCreate, payload=Depends(verify_superadmin)):
-    db = get_db()
+def create_org_admin(org_id: int, data: OrgAdminCreate, payload=Depends(verify_superadmin), db=Depends(db_dep)):
     org = db.execute("SELECT id FROM organizations WHERE id=?", (org_id,)).fetchone()
     if not org:
-        db.close()
         raise HTTPException(status_code=404, detail="Kurum bulunamadı")
     password = data.password or generate_password()
     try:
@@ -1720,37 +1751,30 @@ def create_org_admin(org_id: int, data: OrgAdminCreate, payload=Depends(verify_s
         )
         db.commit()
     except (sqlite3.IntegrityError, psycopg.IntegrityError):
-        db.close()
         raise HTTPException(status_code=400, detail="Bu e-posta zaten kayıtlı")
-    db.close()
     return {"email": data.email, "password": password, "message": "Kurum admini oluşturuldu"}
 
 @app.get("/api/superadmin/organizations/{org_id}/admins")
-def list_org_admins(org_id: int, payload=Depends(verify_superadmin)):
-    db = get_db()
+def list_org_admins(org_id: int, payload=Depends(verify_superadmin), db=Depends(db_dep)):
     rows = db.execute(
         "SELECT id, org_id, name, email, role, is_active, created_at FROM admin_users WHERE org_id=? ORDER BY created_at DESC",
         (org_id,)
     ).fetchall()
-    db.close()
     return [dict(r) for r in rows]
 
 # ---- Position Management ----
 @app.get("/api/admin/positions")
-def list_positions(payload=Depends(verify_admin), org_id: Optional[int] = None):
-    db = get_db()
+def list_positions(payload=Depends(verify_admin), org_id: Optional[int] = None, db=Depends(db_dep)):
     scoped_org_id = get_org_id_for_admin(db, payload, org_id)
     rows = db.execute("SELECT * FROM positions WHERE org_id=? ORDER BY created_at DESC", (scoped_org_id,)).fetchall()
-    db.close()
     return [{
         "id": r["id"], "name": r["name"], "category": r["category"] if "category" in r.keys() else "Genel", "role_description": r["role_description"],
         "criteria": json.loads(r["criteria_json"]), "active": bool(r["active"])
     } for r in rows]
 
 @app.post("/api/admin/positions")
-def create_position(data: PositionCreate, payload=Depends(verify_admin)):
+def create_position(data: PositionCreate, payload=Depends(verify_admin), db=Depends(db_dep)):
     total = sum(c.weight for c in data.criteria)
-    db = get_db()
     org_id = get_org_id_for_admin(db, payload)
     try:
         db.execute(
@@ -1759,45 +1783,36 @@ def create_position(data: PositionCreate, payload=Depends(verify_admin)):
         )
         db.commit()
     except (sqlite3.IntegrityError, psycopg.IntegrityError):
-        db.close()
         raise HTTPException(status_code=400, detail="Bu pozisyon adı zaten var")
-    db.close()
     warning = None if total == 100 else f"Uyarı: kriter ağırlıkları toplamı {total}, 100 olması önerilir"
     return {"message": "Pozisyon eklendi", "warning": warning}
 
 @app.put("/api/admin/positions/{position_id}")
-def update_position(position_id: int, data: PositionCreate, payload=Depends(verify_admin)):
-    db = get_db()
+def update_position(position_id: int, data: PositionCreate, payload=Depends(verify_admin), db=Depends(db_dep)):
     org_id = get_org_id_for_admin(db, payload)
     owned = db.execute("SELECT id FROM positions WHERE id=? AND org_id=?", (position_id, org_id)).fetchone()
     if not owned:
-        db.close()
         raise HTTPException(status_code=404, detail="Pozisyon bulunamadı")
     db.execute(
         "UPDATE positions SET name=?, category=?, role_description=?, criteria_json=? WHERE id=?",
         (data.name, data.category, data.role_description, json.dumps([c.dict() for c in data.criteria], ensure_ascii=False), position_id)
     )
     db.commit()
-    db.close()
     return {"message": "Pozisyon güncellendi"}
 
 @app.delete("/api/admin/positions/{position_id}")
-def delete_position(position_id: int, payload=Depends(verify_admin)):
-    db = get_db()
+def delete_position(position_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
     org_id = get_org_id_for_admin(db, payload)
     owned = db.execute("SELECT id FROM positions WHERE id=? AND org_id=?", (position_id, org_id)).fetchone()
     if not owned:
-        db.close()
         raise HTTPException(status_code=404, detail="Pozisyon bulunamadı")
     db.execute("UPDATE positions SET active=0 WHERE id=?", (position_id,))
     db.commit()
-    db.close()
     return {"message": "Pozisyon pasifleştirildi"}
 
 # ---- Candidate Management ----
 @app.get("/api/admin/candidates")
-def get_candidates(payload=Depends(verify_admin), org_id: Optional[int] = None):
-    db = get_db()
+def get_candidates(payload=Depends(verify_admin), org_id: Optional[int] = None, db=Depends(db_dep)):
     scoped_org_id = get_org_id_for_admin(db, payload, org_id)
     rows = db.execute("""
         SELECT c.*, i.score, i.recommendation, i.completed_at as interview_completed, i.total_input_tokens, i.total_output_tokens,
@@ -1807,20 +1822,19 @@ def get_candidates(payload=Depends(verify_admin), org_id: Optional[int] = None):
         WHERE c.org_id=?
         ORDER BY c.created_at DESC
     """, (scoped_org_id,)).fetchall()
-    db.close()
     return [dict(r) for r in rows]
 
 @app.get("/api/admin/persons/{person_id}")
-def get_person(person_id: int, payload=Depends(verify_admin)):
+def get_person(person_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
     """Bir kişinin (person) tüm başvuru denemelerini (arşivli dahil) tek yerde döner — Faz 3'teki toplu görünümün temeli."""
-    db = get_db()
     scoped_org_id = get_org_id_for_admin(db, payload)
     person = db.execute("SELECT * FROM persons WHERE id=? AND org_id=?", (person_id, scoped_org_id)).fetchone()
     if not person:
-        db.close()
         raise HTTPException(status_code=404, detail="Kişi bulunamadı")
     attempts = db.execute("""
-        SELECT c.id as candidate_id, c.position, c.level, c.depth_tier, c.status, c.invite_type,
+        SELECT c.id as candidate_id, c.name, c.email, c.phone, c.position, c.level, c.depth_tier,
+               c.interview_language, c.report_language, c.education, c.university, c.department,
+               c.experience_years, c.ai_note, c.status, c.invite_type,
                c.is_archived, c.created_at, c.completed_at,
                i.score, i.recommendation, i.completed_at as interview_completed_at,
                i.processing_status, i.processing_error
@@ -1829,31 +1843,25 @@ def get_person(person_id: int, payload=Depends(verify_admin)):
         WHERE c.person_id = ?
         ORDER BY c.created_at DESC
     """, (person_id,)).fetchall()
-    db.close()
     return {
         "person": dict(person),
         "attempts": [dict(r) for r in attempts],
     }
 
 @app.get("/api/admin/persons/{person_id}/notes")
-def list_person_notes(person_id: int, payload=Depends(verify_admin)):
-    db = get_db()
+def list_person_notes(person_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
     scoped_org_id = get_org_id_for_admin(db, payload)
     person = db.execute("SELECT id FROM persons WHERE id=? AND org_id=?", (person_id, scoped_org_id)).fetchone()
     if not person:
-        db.close()
         raise HTTPException(status_code=404, detail="Kişi bulunamadı")
     rows = db.execute("SELECT * FROM person_notes WHERE person_id=? ORDER BY created_at DESC, id DESC", (person_id,)).fetchall()
-    db.close()
     return [dict(r) for r in rows]
 
 @app.post("/api/admin/persons/{person_id}/notes")
-def create_person_note(person_id: int, data: PersonNoteCreate, payload=Depends(verify_admin)):
-    db = get_db()
+def create_person_note(person_id: int, data: PersonNoteCreate, payload=Depends(verify_admin), db=Depends(db_dep)):
     scoped_org_id = get_org_id_for_admin(db, payload)
     person = db.execute("SELECT id FROM persons WHERE id=? AND org_id=?", (person_id, scoped_org_id)).fetchone()
     if not person:
-        db.close()
         raise HTTPException(status_code=404, detail="Kişi bulunamadı")
     db.execute(
         "INSERT INTO person_notes (person_id, org_id, admin_user_id, note_type, body) VALUES (?, ?, ?, 'manual', ?)",
@@ -1861,7 +1869,6 @@ def create_person_note(person_id: int, data: PersonNoteCreate, payload=Depends(v
     )
     db.commit()
     note = db.execute("SELECT * FROM person_notes WHERE person_id=? ORDER BY id DESC LIMIT 1", (person_id,)).fetchone()
-    db.close()
     return dict(note)
 
 @app.post("/api/admin/persons/{person_id}/evaluate")
@@ -1898,7 +1905,7 @@ def evaluate_person(person_id: int, payload=Depends(verify_admin)):
         "arasındaki tutarlılık veya çelişkiler, ve genel bir işe alım önerisi.\n\n" + reports_text
     )
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
         response = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=800,
             messages=[{"role": "user", "content": prompt}]
@@ -1923,10 +1930,9 @@ def evaluate_person(person_id: int, payload=Depends(verify_admin)):
 
 # ---- CV Havuzu (bireysel/genel başvuranlar — org_id=NULL, kuruma özel değil) ----
 @app.get("/api/admin/cv-pool")
-def get_cv_pool(payload=Depends(verify_admin)):
+def get_cv_pool(payload=Depends(verify_admin), db=Depends(db_dep)):
     """Genel başvuru ile üye olmuş, henüz hiçbir kuruma davet edilmemiş kişiler.
     Bu havuz kuruma özel değildir — hangi kurumun admini olursa olsun görebilir."""
-    db = get_db()
     rows = db.execute("""
         SELECT id, name, email, phone, position, education, university, department,
                experience_years, ai_note, cv_filename, cv_text, status, created_at, person_id
@@ -1934,17 +1940,14 @@ def get_cv_pool(payload=Depends(verify_admin)):
         WHERE invite_type='general'
         ORDER BY created_at DESC
     """).fetchall()
-    db.close()
     return [dict(r) for r in rows]
 
 @app.post("/api/admin/cv-pool/{candidate_id}/invite")
-def invite_from_cv_pool(candidate_id: int, data: CvPoolInvite, payload=Depends(verify_admin)):
+def invite_from_cv_pool(candidate_id: int, data: CvPoolInvite, payload=Depends(verify_admin), db=Depends(db_dep)):
     """Havuzdaki bir kişiyi, çağıran adminin kurumuna gerçek bir mülakat davetine çevirir
     (yeni kullanıcı adı/şifre üretilir, kuruma özel person kaydı açılır)."""
-    db = get_db()
     pool_candidate = db.execute("SELECT * FROM candidates WHERE id=? AND invite_type='general'", (candidate_id,)).fetchone()
     if not pool_candidate:
-        db.close()
         raise HTTPException(status_code=404, detail="Havuzda böyle bir kayıt bulunamadı")
 
     org_id = get_org_id_for_admin(db, payload)
@@ -1983,8 +1986,7 @@ def invite_from_cv_pool(candidate_id: int, data: CvPoolInvite, payload=Depends(v
     }
 
 @app.post("/api/admin/candidates")
-def create_candidate(data: CandidateCreate, payload=Depends(verify_admin)):
-    db = get_db()
+def create_candidate(data: CandidateCreate, payload=Depends(verify_admin), db=Depends(db_dep)):
     previous = find_latest_candidate_by_email(db, data.email) if data.email else None
     previous_id = previous["id"] if previous else None
     if previous_id:
@@ -2020,8 +2022,7 @@ def create_candidate(data: CandidateCreate, payload=Depends(verify_admin)):
 
 # ---- Walk-in (Hızlı Giriş) ----
 @app.post("/api/admin/walkin")
-def create_walkin(data: CandidateCreate, payload=Depends(verify_admin)):
-    db = get_db()
+def create_walkin(data: CandidateCreate, payload=Depends(verify_admin), db=Depends(db_dep)):
     email = data.email or f"walkin_{secrets.token_hex(4)}@medex-smo.local"
     username = generate_username(data.name, db)
     password = generate_password()
@@ -2041,7 +2042,6 @@ def create_walkin(data: CandidateCreate, payload=Depends(verify_admin)):
         db.execute(insert_sql, params)
         candidate_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.commit()
-    db.close()
 
     return {
         "id": candidate_id, "username": username, "password": password,
@@ -2050,14 +2050,12 @@ def create_walkin(data: CandidateCreate, payload=Depends(verify_admin)):
 
 # ---- Resend invite (mevcut şifreyle) / show credentials / reset password / delete ----
 @app.post("/api/admin/candidates/{candidate_id}/resend")
-def resend_invite(candidate_id: int, payload=Depends(verify_admin)):
+def resend_invite(candidate_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
     """Mevcut şifreyi DEĞİŞTİRMEDEN aynı bilgilerle maili tekrar gönderir."""
-    db = get_db()
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
     if not candidate:
-        db.close()
         raise HTTPException(status_code=404, detail="Aday bulunamadı")
-    db.close()
+    db.close()  # yavaş e-posta gönderiminden önce bağlantıyı bilerek erken kapatıyoruz
 
     if not candidate["plain_password"]:
         raise HTTPException(status_code=400, detail="Bu adayın şifresi sistemde saklanmıyor (eski kayıt). Şifre Sıfırla kullanın.")
@@ -2072,11 +2070,9 @@ def resend_invite(candidate_id: int, payload=Depends(verify_admin)):
     }
 
 @app.post("/api/admin/candidates/{candidate_id}/show-credentials")
-def show_credentials(candidate_id: int, payload=Depends(verify_admin)):
+def show_credentials(candidate_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
     """Mevcut şifreyi DEĞİŞTİRMEDEN ekranda gösterir."""
-    db = get_db()
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-    db.close()
     if not candidate:
         raise HTTPException(status_code=404, detail="Aday bulunamadı")
     if not candidate["plain_password"]:
@@ -2084,40 +2080,32 @@ def show_credentials(candidate_id: int, payload=Depends(verify_admin)):
     return {"username": candidate["username"], "password": candidate["plain_password"]}
 
 @app.post("/api/admin/candidates/{candidate_id}/reset-password")
-def reset_password(candidate_id: int, payload=Depends(verify_admin)):
+def reset_password(candidate_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
     """Yeni şifre üretir, eskisini geçersiz kılar. Ayrı, bilinçli bir aksiyon."""
-    db = get_db()
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
     if not candidate:
-        db.close()
         raise HTTPException(status_code=404, detail="Aday bulunamadı")
     new_password = generate_password()
     db.execute("UPDATE candidates SET password_hash=?, plain_password=? WHERE id=?",
                (hash_password(new_password), new_password, candidate_id))
     db.commit()
-    db.close()
     return {"username": candidate["username"], "password": new_password, "message": "Şifre sıfırlandı"}
 
 @app.post("/api/admin/candidates/{candidate_id}/allow-reapply")
-def allow_reapply(candidate_id: int, payload=Depends(verify_admin)):
-    db = get_db()
+def allow_reapply(candidate_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
     if not candidate:
-        db.close()
         raise HTTPException(status_code=404, detail="Aday bulunamadı")
     new_value = 0 if candidate["reapply_allowed"] else 1
     db.execute("UPDATE candidates SET reapply_allowed=? WHERE id=?", (new_value, candidate_id))
     db.commit()
-    db.close()
     return {"reapply_allowed": bool(new_value), "message": "Tekrar başvuru izni güncellendi"}
 
 @app.delete("/api/admin/candidates/{candidate_id}")
-def delete_candidate(candidate_id: int, payload=Depends(verify_admin)):
-    db = get_db()
+def delete_candidate(candidate_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
     db.execute("DELETE FROM interviews WHERE candidate_id=?", (candidate_id,))
     db.execute("DELETE FROM candidates WHERE id=?", (candidate_id,))
     db.commit()
-    db.close()
     return {"message": "Aday silindi"}
 
 # ---- Admin CV Upload ----
@@ -2224,7 +2212,7 @@ def admin_update_candidate(candidate_id: int, data: CandidateUpdate, payload=Dep
 
 # ---- CV Upload ----
 @app.post("/api/candidate/upload-cv")
-async def upload_cv(file: UploadFile = File(...), payload=Depends(verify_token)):
+async def upload_cv(file: UploadFile = File(...), payload=Depends(verify_token), db=Depends(db_dep)):
     if payload.get("role") != "candidate":
         raise HTTPException(status_code=403, detail="Yetkisiz")
 
@@ -2237,28 +2225,24 @@ async def upload_cv(file: UploadFile = File(...), payload=Depends(verify_token))
 
     cv_text = extract_cv_text(file.filename, content)
 
-    db = get_db()
     db.execute("UPDATE candidates SET cv_text=?, cv_filename=? WHERE id=?",
                (cv_text, file.filename, payload["candidate_id"]))
     db.commit()
-    db.close()
 
     return {"message": "CV yüklendi ve okundu", "preview": cv_text[:300]}
 
 # ---- General Application ----
 @app.get("/api/positions")
-def get_positions_public():
-    db = get_db()
+def get_positions_public(db=Depends(db_dep)):
     medex_org_id = get_medex_org_id(db)
     rows = db.execute("SELECT name, category FROM positions WHERE active=1 AND org_id=? ORDER BY category, name", (medex_org_id,)).fetchall()
-    db.close()
     groups = {}
     for r in rows:
         groups.setdefault(r["category"] or "Genel", []).append(r["name"])
     return {"positions": [r["name"] for r in rows], "groups": groups}
 
 @app.post("/api/apply")
-async def general_apply(request: Request):
+async def general_apply(request: Request, db=Depends(db_dep)):
     """Genel başvuru. JSON veya multipart/form-data kabul eder; CV opsiyoneldir."""
     content_type = request.headers.get("content-type", "")
     cv_text = None
@@ -2276,7 +2260,8 @@ async def general_apply(request: Request):
         ai_note = str(form.get("ai_note") or "").strip()
         try:
             experience_years = int(form.get("experience_years") or 0)
-        except Exception:
+        except Exception as e:
+            print(f"UYARI (general_apply/multipart: experience_years sayıya çevrilemedi): {type(e).__name__}: {e}")
             experience_years = 0
         file = form.get("cv_file")
         if file is not None and getattr(file, "filename", ""):
@@ -2299,18 +2284,17 @@ async def general_apply(request: Request):
         ai_note = str(payload.get("ai_note") or "").strip()
         try:
             experience_years = int(payload.get("experience_years") or 0)
-        except Exception:
+        except Exception as e:
+            print(f"UYARI (general_apply/json: experience_years sayıya çevrilemedi): {type(e).__name__}: {e}")
             experience_years = 0
 
     if not all([name, email, phone, position, education]):
         raise HTTPException(status_code=400, detail="Ad soyad, e-posta, telefon, pozisyon ve eğitim bilgisi zorunludur")
 
-    db = get_db()
     previous = find_latest_candidate_by_email(db, email)
     previous_id = None
     if previous:
         if not previous["reapply_allowed"]:
-            db.close()
             raise HTTPException(status_code=400, detail="Bu e-posta ile daha önce başvuru yapılmış. Tekrar başvuru için lütfen yönetici onayı isteyin.")
         previous_id = previous["id"]
         db.execute("UPDATE candidates SET reapply_allowed=0, is_archived=1 WHERE id=?", (previous_id,))
@@ -2325,20 +2309,18 @@ async def general_apply(request: Request):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'general', ?, ?, ?, NULL, ?)
     """, (name, normalize_email(email), phone, education, university, department, experience_years, ai_note, position, username, password_hash, password, previous_id, cv_text, cv_filename, person_id))
     db.commit()
-    db.close()
+    db.close()  # yavaş e-posta gönderiminden önce bağlantıyı bilerek erken kapatıyoruz
 
     send_invite_email(name, email, username, password, position)
     return {"message": "Başvurunuz alındı, giriş bilgileri e-posta adresinize gönderildi"}
 
 # ---- Candidate Auth & Interview ----
 @app.post("/api/candidate/login")
-def candidate_login(data: CandidateLogin):
-    db = get_db()
+def candidate_login(data: CandidateLogin, db=Depends(db_dep)):
     candidate = db.execute(
         "SELECT * FROM candidates WHERE username=? AND password_hash=?",
         (data.username, hash_password(data.password))
     ).fetchone()
-    db.close()
 
     if not candidate:
         raise HTTPException(status_code=401, detail="Hatalı kullanıcı adı veya şifre")
@@ -2409,7 +2391,7 @@ def start_interview(payload=Depends(verify_token)):
         raise HTTPException(status_code=500, detail="Sistem yapılandırma hatası (API anahtarı eksik). Lütfen yöneticinize bildirin.")
 
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
         system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level, (candidate["interview_language"] if candidate and "interview_language" in candidate.keys() else "tr") or "tr", (candidate["report_language"] if candidate and "report_language" in candidate.keys() else "tr") or "tr", (candidate["depth_tier"] if candidate and "depth_tier" in candidate.keys() else "standart") or "standart")
         response = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=220, system=cached_system(system),
@@ -2531,7 +2513,7 @@ GÖREV:
                 "completed": True, "processing": True, "score": None, "recommendation": None,
             }
 
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
         response = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=260, system=cached_system(system),
             messages=[{"role": "user", "content": user_payload}]
@@ -2676,7 +2658,7 @@ def run_deferred_finish_job(candidate_id: int, level: int):
         if provider == "claude":
             if not ANTHROPIC_API_KEY:
                 raise RuntimeError("ANTHROPIC_API_KEY tanımlı değil")
-            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
             response = client.messages.create(
                 model=model or "claude-sonnet-4-6", max_tokens=4000,
                 system=cached_system(system) if system else anthropic.NOT_GIVEN,
@@ -2737,7 +2719,8 @@ def recover_stale_processing_interviews(stale_after_seconds: int = 180):
             if isinstance(started, str):
                 try:
                     started = datetime.fromisoformat(started.split(".")[0].replace("T", " "))
-                except Exception:
+                except Exception as e:
+                    print(f"UYARI (recover_stale_processing_interviews: processing_started_at ayrıştırılamadı, candidate_id={r['candidate_id']}): {type(e).__name__}: {e}")
                     started = None
             if started is None:
                 continue
@@ -2907,7 +2890,7 @@ def report_violation(data: ViolationReport, background_tasks: BackgroundTasks, p
 
 # ---- Kamera snapshot (4 sabit kare) ----
 @app.post("/api/interview/snapshot")
-def save_snapshot(data: SnapshotData, payload=Depends(verify_token)):
+def save_snapshot(data: SnapshotData, payload=Depends(verify_token), db=Depends(db_dep)):
     if payload.get("role") != "candidate":
         raise HTTPException(status_code=403, detail="Yetkisiz")
 
@@ -2915,13 +2898,11 @@ def save_snapshot(data: SnapshotData, payload=Depends(verify_token)):
     if len(data.image_base64) > 3_000_000:
         raise HTTPException(status_code=400, detail="Görsel çok büyük")
 
-    db = get_db()
     existing_count = db.execute(
         "SELECT COUNT(*) as c FROM snapshots WHERE candidate_id=?", (data.candidate_id,)
     ).fetchone()["c"]
 
     if existing_count >= 4:
-        db.close()
         return {"message": "Maksimum kare sayısına ulaşıldı, kaydedilmedi", "count": existing_count}
 
     db.execute(
@@ -2929,7 +2910,6 @@ def save_snapshot(data: SnapshotData, payload=Depends(verify_token)):
         (data.candidate_id, data.image_base64)
     )
     db.commit()
-    db.close()
     return {"message": "Kare kaydedildi", "count": existing_count + 1}
 
 # ---- Sesli mod (OpenAI Whisper STT + TTS) ----
@@ -3242,13 +3222,19 @@ async def sync_realtime_progress(data: RealtimeSyncRequest, request: Request):
     return {"ok": True}
 
 def get_interview_usage_cost(candidate_id: int, level: int = 2) -> float:
+    db = None
     try:
         db = get_db()
         row = db.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) AS total FROM ai_usage_logs WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
-        db.close()
         return float(row["total"] or 0)
-    except Exception:
+    except Exception as e:
+        # Sessizce 0.0 dönmek admin paneline "$0 harcandı" gibi yanlış bir bilgi verebilir —
+        # en azından logluyoruz ki gerçek bir DB hatası fark edilebilsin.
+        print(f"UYARI (get_interview_usage_cost candidate_id={candidate_id} level={level}): {type(e).__name__}: {e}")
         return 0.0
+    finally:
+        if db:
+            db.close()
 
 
 def finalize_incomplete_interview(candidate_id: int, report: str, terminated_reason: Optional[str] = None, level: int = 2):
@@ -3418,13 +3404,11 @@ TAM FORMAT:
     }
 
 @app.get("/api/admin/snapshots/{candidate_id}")
-def get_snapshots(candidate_id: int, payload=Depends(verify_admin)):
-    db = get_db()
+def get_snapshots(candidate_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
     rows = db.execute(
         "SELECT id, image_base64, captured_at FROM snapshots WHERE candidate_id=? ORDER BY captured_at ASC",
         (candidate_id,)
     ).fetchall()
-    db.close()
     return [{"id": r["id"], "image_base64": r["image_base64"], "captured_at": r["captured_at"]} for r in rows]
 
 
@@ -3496,8 +3480,8 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
         try:
             candidates += sorted(glob.glob("/nix/store/*dejavu*/share/fonts/**/DejaVuSans.ttf", recursive=True))
             bold_candidates += sorted(glob.glob("/nix/store/*dejavu*/share/fonts/**/DejaVuSans-Bold.ttf", recursive=True))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"UYARI (register_unicode_font: Nix store glob taraması başarısız): {type(e).__name__}: {e}")
         regular = next((f for f in candidates if os.path.exists(f)), None)
         bold = next((f for f in bold_candidates if os.path.exists(f)), None)
         if regular:
@@ -3717,14 +3701,12 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     return buffer
 
 @app.get("/api/admin/interviews/{candidate_id}/pdf")
-def download_interview_pdf(candidate_id: int, level: Optional[int] = None, payload=Depends(verify_admin)):
-    db = get_db()
+def download_interview_pdf(candidate_id: int, level: Optional[int] = None, payload=Depends(verify_admin), db=Depends(db_dep)):
     scoped_org_id = get_org_id_for_admin(db, payload)
     candidate = db.execute("SELECT * FROM candidates WHERE id=? AND org_id=?", (candidate_id, scoped_org_id)).fetchone()
     target_level = level if level is not None else ((candidate["level"] or 1) if candidate else 1)
     interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, target_level)).fetchone()
     snapshots = db.execute("SELECT id, image_base64, captured_at FROM snapshots WHERE candidate_id=? ORDER BY captured_at ASC", (candidate_id,)).fetchall()
-    db.close()
     if not candidate or not interview:
         raise HTTPException(status_code=404, detail="Rapor bulunamadı")
 
@@ -3751,12 +3733,10 @@ def download_interview_pdf(candidate_id: int, level: Optional[int] = None, paylo
 
 # ---- Admin Report Detail ----
 @app.get("/api/admin/interviews/{candidate_id}")
-def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depends(verify_admin)):
-    db = get_db()
+def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depends(verify_admin), db=Depends(db_dep)):
     scoped_org_id = get_org_id_for_admin(db, payload)
     c = db.execute("SELECT level FROM candidates WHERE id=? AND org_id=?", (candidate_id, scoped_org_id)).fetchone()
     if not c:
-        db.close()
         raise HTTPException(status_code=404, detail="Mülakat bulunamadı")
     if level is None:
         level = c["level"] or 1
@@ -3772,7 +3752,6 @@ def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depend
         WHERE candidate_id=? AND level=?
         ORDER BY id ASC
     """, (candidate_id, level)).fetchall()
-    db.close()
     if not interview:
         raise HTTPException(status_code=404, detail="Mülakat bulunamadı")
     result = dict(interview)
