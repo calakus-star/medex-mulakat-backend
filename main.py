@@ -63,6 +63,14 @@ def get_realtime_model(level: int) -> str:
 
 OPENAI_REALTIME_VOICE = os.getenv("OPENAI_REALTIME_VOICE", "marin")  # Doğal ses: Railway env ile değiştirilebilir (örn. marin/verse)
 OPENAI_REPORT_MODEL = os.getenv("OPENAI_REPORT_MODEL", "gpt-4o")  # L2 kaliteli OpenAI raporu; env ile değiştirilebilir
+# FAZ D: mimik (yüz/duruş) kare analizi modeli — TEK SABİT, tek satırla değiştirilebilir.
+# L2 adayların kareleri için bu model kullanılır (L2'de Anthropic YASAK). L1/L3 de bugün aynı
+# modeli kullanır; karşılaştırma sonucu farklı bir model seçilirse SADECE burası değişir.
+MIMIC_ANALYSIS_MODEL = os.getenv("MIMIC_ANALYSIS_MODEL", "gpt-4o")
+# FAZ D: ortak rapor "muhalif denetçi" modeli. Her zaman OpenAI — Claude-primary (L1/L3-metin)
+# için "diğer sağlayıcı", GPT-4o-primary (L2/L3-sesli) için "ikinci OpenAI modeli". L2'de
+# Anthropic'e ASLA gidilmez.
+OPENAI_REVIEWER_MODEL = os.getenv("OPENAI_REVIEWER_MODEL", "gpt-4.1")
 
 def log_ai_provider(level: int, provider: str, action: str):
     """Görev dokümanı zorunluluğu: L2'de Claude çağrısı yapılmadığını denetlenebilir kılmak için."""
@@ -455,6 +463,15 @@ def init_db():
         ("ai_usage_logs", "estimated_cost_usd", "DOUBLE PRECISION DEFAULT 0" if USE_POSTGRES else "REAL DEFAULT 0"),
         ("ai_usage_logs", "cached_input_tokens", "INTEGER DEFAULT 0"),
         ("ai_usage_logs", "cached_audio_input_tokens", "INTEGER DEFAULT 0"),
+        # FAZ D: mimik analizi + ses metrikleri + ses gözlemleri
+        ("snapshots", "level", "INTEGER DEFAULT 1"),
+        ("snapshots", "elapsed_ms", "BIGINT" if USE_POSTGRES else "INTEGER"),
+        ("snapshots", "reason", "TEXT"),
+        ("interviews", "mimic_analysis_json", "TEXT"),
+        ("interviews", "voice_metrics_json", "TEXT"),
+        ("interviews", "voice_observations_json", "TEXT"),
+        ("interviews", "reviewer_status", "TEXT"),  # FAZ D: ok | skipped | failed
+        ("interviews", "reviewer_error", "TEXT"),   # FAZ D: kısa hata/atlama nedeni
         ("candidates", "person_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("candidates", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("positions", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
@@ -841,6 +858,8 @@ class SnapshotData(BaseModel):
     candidate_id: int
     image_base64: str
     reason: Optional[str] = None
+    elapsed_ms: Optional[int] = None  # FAZ D: mülakat başından beri geçen süre (transkriptle hizalama)
+    level: Optional[int] = None       # FAZ D: kare hangi seviye mülakatında alındı
 
 # ============ HELPERS ============
 def hash_password(password: str) -> str:
@@ -1047,6 +1066,11 @@ AI_PRICING_PER_1M = {
     # Eski env kullanan kurulumlar için geriye uyumlu yaklaşık kayıt — cache oranı doğrulanmadı, fresh varsayılır.
     ("openai", "gpt-realtime-2"):        {"input": 4.0, "input_cached": 4.0,  "output": 24.0, "audio_input": 32.0, "audio_input_cached": 32.0, "audio_output": 64.0},
     ("openai", "gpt-4o"):                {"input": 2.5, "input_cached": 2.5,  "output": 10.0, "audio_input": 0.0,  "audio_input_cached": 0.0,  "audio_output": 0.0},
+    # FAZ D: mimik analizi (MIMIC_ANALYSIS_MODEL varsayılanı gpt-4o, yukarıda) ve ortak rapor
+    # muhalif denetçisi (OPENAI_REVIEWER_MODEL varsayılanı gpt-4.1) — panelde ayrı kalem olarak
+    # görünsün diye fiyatları burada. Farklı bir model env ile seçilirse buraya da eklenmeli
+    # (aksi halde token sayılır ama estimated_cost_usd 0 çıkar).
+    ("openai", "gpt-4.1"):              {"input": 2.0, "input_cached": 0.5,  "output": 8.0,  "audio_input": 0.0,  "audio_input_cached": 0.0,  "audio_output": 0.0},
     ("anthropic", "claude-sonnet-4-6"): {"input": 3.0, "input_cached": 3.0,  "output": 15.0, "audio_input": 3.0,  "audio_input_cached": 3.0,  "audio_output": 15.0},
 }
 
@@ -1123,6 +1147,31 @@ def record_openai_chat_usage(candidate_id: int, level: int, model: str, action: 
         output_tokens=usage.get("completion_tokens") or usage.get("output_tokens") or 0,
         raw=usage
     )
+
+def record_anthropic_usage(candidate_id: int, level: int, model: str, action: str, response) -> None:
+    """FAZ D: bir Anthropic (Claude) çağrısını ai_usage_logs'a AYRI SATIR olarak yazar ve
+    interviews.total_*'ı BİR KEZ artırır (record_ai_usage üzerinden). add_token_usage'ın
+    YERİNE geçer — ikisini birlikte çağırma, token'lar interviews.total_*'a çift eklenir.
+    Mülakat turları (interview_chat) hâlâ add_token_usage kullanır; burası yalnızca ayrı
+    kalem olarak görünmesi istenen çağrılar (ör. birincil rapor üretimi) içindir."""
+    try:
+        u = getattr(response, "usage", None)
+        if not u:
+            return
+        fresh_in = getattr(u, "input_tokens", 0) or 0
+        cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
+        cache_create = getattr(u, "cache_creation_input_tokens", 0) or 0
+        out_tok = getattr(u, "output_tokens", 0) or 0
+        total_in = fresh_in + cache_read + cache_create  # record_ai_usage input_tokens = TAM girdi (cache dahil)
+        record_ai_usage(
+            candidate_id=candidate_id, level=level, provider="anthropic", model=model, action=action,
+            input_tokens=total_in, output_tokens=out_tok,
+            cached_input_tokens=cache_read,  # input_tokens'ın alt kümesi
+            raw={"input_tokens": fresh_in, "cache_read_input_tokens": cache_read,
+                 "cache_creation_input_tokens": cache_create, "output_tokens": out_tok},
+        )
+    except Exception as e:
+        print(f"UYARI (record_anthropic_usage c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
 def record_realtime_usage_summary(candidate_id: int, level: int, model: str, summary: Optional[dict], action: str = "realtime_session_total_frontend"):
     if not summary:
@@ -1352,6 +1401,13 @@ KAPANIŞ PROTOKOLÜ ZORUNLUDUR:
 3) Ardından kısa ve profesyonel biçimde teşekkür et: “Teşekkür ederim. Görüşmemiz burada tamamlandı. Katılımınız ve ayırdığınız zaman için teşekkür ederim.”
 4) Yalnızca bu kapanış cümlesi tamamen bittikten sonra end_interview(reason='tamamlandı', criteria_coverage={{...}}) çağır: {criteria_names}.
 - Aday açıkça bitirmek isterse end_interview(reason='aday_talebi'); tekrarlanan uygunsuz davranışta end_interview(reason='uygunsuz_davranis').
+
+SES GÖZLEMİ ARACI (note_voice_observation) — SIKI KULLANIM:
+- Bu aracı YALNIZCA adayın SESİNDE rapora değecek, BELİRGİN bir şey fark ettiğinde çağır: net tereddüt, akıcılık kaybı, tonda belirgin kayma, aşırı gerginlik veya aşırı güven.
+- Sıradan, beklenen veya nötr konuşma için ASLA çağırma. Emin değilsen çağırma.
+- TÜM GÖRÜŞMEDE EN FAZLA 5 KEZ. Kotanı erken tüketme.
+- Bu araç sesli yanıt ÜRETMEZ ve mülakat akışını KESMEZ: çağır, hiçbir şey söyleme, bir sonraki sorunla devam et.
+- gozlem alanı tek cümle, somut ve tarafsız olsun; teşhis/kişilik hükmü/duygu iddiası yazma.
 """
 
 def build_criteria_text(criteria: list) -> str:
@@ -2740,6 +2796,317 @@ def _mark_finish_failed(candidate_id: int, level: int, error_text: str):
     db.commit(); db.close()
     print(f"[PROCESSING_FAILED] candidate_id={candidate_id} level={level} error={error_text[:300]}")
 
+# ============ FAZ D — ÇOK MODLU ANALİZ (mimik + ses metrikleri + ses gözlemleri + ortak rapor) ============
+# TÜM BU KATMAN "en iyi çaba" (best effort): herhangi biri patlarsa loglanır ve BOŞ geçilir —
+# mülakat ve rapor akışı asla etkilenmez, aday hiçbir teknik hata görmez. Ağır işlerin (görü
+# modeli çağrısı, denetçi çağrısı) hepsi run_deferred_finish_job içinde, arka planda çalışır.
+# KURAL: mimik/denetçi için L2 adayında Anthropic ASLA çağrılmaz (MIMIC_ANALYSIS_MODEL ve
+# OPENAI_REVIEWER_MODEL ikisi de OpenAI). Mimik/ses çıktıları PUANI OYNATMAZ.
+
+def _store_interview_json(candidate_id: int, level: int, column: str, value) -> None:
+    if column not in ("mimic_analysis_json", "voice_metrics_json", "voice_observations_json"):
+        return
+    try:
+        db = get_db()
+        db.execute(f"UPDATE interviews SET {column}=? WHERE candidate_id=? AND level=?",
+                   (json.dumps(value, ensure_ascii=False), candidate_id, level))
+        db.commit(); db.close()
+    except Exception as e:
+        print(f"UYARI (_store_interview_json {column} c={candidate_id} L{level}): {type(e).__name__}: {e}")
+
+def compute_voice_metrics(candidate_id: int, level: int) -> dict:
+    """realtime_events satırlarından TUR BAZLI ses metrikleri üretir. semantic_vad turu bütün
+    olarak kapattığı için CÜMLE İÇİ DURAKLAMALAR ÖLÇÜLMEZ — tüm metrikler turlar arası / tur
+    bütünü düzeyindedir ('olcum_turu': 'tur_bazli'). sync POST'u kaybolursa olay dizisinde
+    boşluk olabilir; çıktıdaki 'guven' ve 'eksik_veri' alanları bunu işaretler. AI ÇAĞRISI YOK."""
+    try:
+        db = get_db()
+        rows = db.execute(
+            "SELECT event_type, elapsed_ms FROM realtime_events WHERE candidate_id=? AND level=? ORDER BY elapsed_ms ASC, id ASC",
+            (candidate_id, level)
+        ).fetchall()
+        db.close()
+    except Exception as e:
+        print(f"UYARI (compute_voice_metrics fetch c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        return {}
+    evs = [(r["event_type"], _safe_int(r["elapsed_ms"])) for r in rows if r["event_type"]]
+    if not evs:
+        return {}
+    starts = [ms for t, ms in evs if t == "input_audio_buffer.speech_started"]
+    stops = [ms for t, ms in evs if t == "input_audio_buffer.speech_stopped"]
+    ai_done = sorted(ms for t, ms in evs if t in ("response.audio_transcript.done", "response.output_audio_transcript.done"))
+    resp_created = sorted(ms for t, ms in evs if t == "response.created")
+    interruptions = sum(1 for t, _ in evs if t == "barge_in_confirmed")
+
+    turns = []
+    for s in starts:
+        e = next((x for x in stops if x >= s), None)
+        if e is not None:
+            turns.append((s, e))
+    talk_ms = sum(max(0, b - a) for a, b in turns)
+    turn_count = len(turns)
+
+    answer_latencies = []
+    for d in ai_done:
+        nxt = next((s for s in starts if s > d), None)
+        if nxt is not None and 0 < nxt - d < 60000:
+            answer_latencies.append(nxt - d)
+    think_times = []
+    for stp in stops:
+        nxt = next((c for c in resp_created if c > stp), None)
+        if nxt is not None and 0 < nxt - stp < 30000:
+            think_times.append(nxt - stp)
+
+    def _avg_sn(xs):
+        return round((sum(xs) / len(xs)) / 1000, 2) if xs else None
+
+    missing = []
+    if len(starts) != len(stops):
+        missing.append("speech_started/stopped sayıları eşleşmiyor — olay kaybı olası")
+    if not ai_done:
+        missing.append("AI konuşma bitiş olayı yok — yanıt gecikmesi hesaplanamadı")
+    if not resp_created:
+        missing.append("response.created olayı yok — AI düşünme süresi hesaplanamadı")
+
+    return {
+        "olcum_turu": "tur_bazli",
+        "not": "semantic_vad turu bütün olarak kapatır; cümle içi duraklamalar ölçülemez. Değerler turlar arası / tur bütünü düzeyindedir.",
+        "aday_konusma_toplam_sn": round(talk_ms / 1000, 1),
+        "tur_sayisi": turn_count,
+        "ortalama_tur_uzunlugu_sn": round((talk_ms / turn_count) / 1000, 1) if turn_count else 0,
+        "yanit_gecikmesi_ort_sn": _avg_sn(answer_latencies),
+        "yanit_gecikmesi_ornek_sayisi": len(answer_latencies),
+        "ai_dusunme_suresi_ort_sn": _avg_sn(think_times),
+        "soz_kesme_sayisi": interruptions,
+        "guven": "dusuk" if missing else "orta",
+        "eksik_veri": missing,
+    }
+
+def extract_voice_observations(candidate_id: int, level: int) -> list:
+    """Realtime mülakatçının note_voice_observation tool call'larından (realtime_events'e
+    yazılan) yapılandırılmış ses gözlemlerini toplar. Üst sınır güvenlik ağı: 10 kayıt."""
+    try:
+        db = get_db()
+        rows = db.execute(
+            "SELECT event_data, elapsed_ms FROM realtime_events WHERE candidate_id=? AND level=? AND event_type='note_voice_observation' ORDER BY elapsed_ms ASC, id ASC",
+            (candidate_id, level)
+        ).fetchall()
+        db.close()
+    except Exception as e:
+        print(f"UYARI (extract_voice_observations c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        return []
+    out = []
+    for r in rows[:10]:
+        try:
+            d = json.loads(r["event_data"] or "{}")
+        except Exception:
+            continue
+        out.append({
+            "elapsed_ms": _safe_int(r["elapsed_ms"]),
+            "ton": d.get("ton"),
+            "akicilik": d.get("akicilik"),
+            "tereddut": d.get("tereddut"),
+            "gozlem": (d.get("gozlem") or "")[:500],
+        })
+    return out
+
+MIMIC_ANALYSIS_PROMPT = """Aşağıda bir iş mülakatı sırasında adayın web kamerasından ~45 saniye arayla alınmış kareler var; her karenin öncesinde [t=SANİYE] etiketi bulunur. Bu kareler DÜŞÜK çözünürlüklüdür ve seyrektir.
+
+Görevin: yalnızca karelerde GÖZLENEBİLEN şeyleri, GÖZLEM olarak (teşhis/duygu/kişilik hükmü DEĞİL) yaz. Emin olmadığın hiçbir şeyi yazma. Duygu okuması, IQ, samimiyet/yalan değerlendirmesi YAPMA.
+
+Sadece şu şemada geçerli bir JSON döndür:
+{
+  "genel_durus": "kısa gözlem (ör. dik oturuş, öne eğik, sık pozisyon değişimi)",
+  "goz_temasi_egilimi": "kısa gözlem (ör. genelde kameraya dönük, sık başka yöne bakma) veya 'kestirilemiyor'",
+  "belirgin_anlar": [
+    {"t_sn": 135, "gozlem": "kısa somut gözlem", "yorum": "gerginlik/rahatlık/nötr — sadece kareye dayanarak"}
+  ],
+  "genel_izlenim": "1-2 cümle, temkinli",
+  "guven": "dusuk | orta"
+}
+Kare sayısı azsa 'belirgin_anlar' boş kalabilir. Yorum alanı spekülatif olmasın."""
+
+def analyze_frames(candidate_id: int, level: int) -> dict:
+    """Biriken mimik analiz karelerini (reason='mimic_sample') TEK toplu multimodal çağrıda
+    değerlendirir — KARE BAŞINA AYRI ÇAĞRI YOK. Model = MIMIC_ANALYSIS_MODEL (tek sabit).
+    Çıktı yapılandırılmış JSON. Bu çıktı PUANI OYNATMAZ; yalnızca destekleyici gözlemdir.
+    Hata olursa {} döner ve rapor akışı denetçisiz/mimiksiz sürer."""
+    if not OPENAI_API_KEY:
+        return {}
+    try:
+        db = get_db()
+        frames = db.execute(
+            "SELECT image_base64, elapsed_ms FROM snapshots WHERE candidate_id=? AND reason='mimic_sample' ORDER BY elapsed_ms ASC, id ASC",
+            (candidate_id,)
+        ).fetchall()
+        db.close()
+    except Exception as e:
+        print(f"UYARI (analyze_frames fetch c={candidate_id}): {type(e).__name__}: {e}")
+        return {}
+    frames = [f for f in frames if f["image_base64"]][:24]
+    if len(frames) < 2:
+        return {"durum": "yetersiz_kare", "kare_sayisi": len(frames)}
+
+    content = [{"type": "text", "text": MIMIC_ANALYSIS_PROMPT}]
+    for f in frames:
+        secs = round(_safe_int(f["elapsed_ms"]) / 1000)
+        img = f["image_base64"]
+        if not img.startswith("data:"):
+            img = "data:image/jpeg;base64," + img
+        content.append({"type": "text", "text": f"[t={secs}s]"})
+        content.append({"type": "image_url", "image_url": {"url": img, "detail": "low"}})
+
+    try:
+        with httpx.Client(timeout=90) as client:
+            resp = client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": MIMIC_ANALYSIS_MODEL,
+                    "messages": [{"role": "user", "content": content}],
+                    "max_tokens": 1200, "temperature": 0.2,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+        if resp.status_code != 200:
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+        result = resp.json()
+        record_openai_chat_usage(candidate_id, level, MIMIC_ANALYSIS_MODEL, "mimic_frame_analysis", result)
+        parsed = json.loads(result["choices"][0]["message"]["content"])
+        parsed["kare_sayisi"] = len(frames)
+        parsed["_uyari"] = ("Bu gözlemler kameradan alınan az sayıda düşük çözünürlüklü kareye dayanır; "
+                            "teşhis, duygu tespiti veya kesin kişilik hükmü DEĞİLDİR ve mülakat puanını ETKİLEMEZ.")
+        return parsed
+    except Exception as e:
+        print(f"UYARI (analyze_frames c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        return {}
+
+def build_modality_evidence_block(candidate_id: int, level: int) -> str:
+    """Mimik + ses metrikleri + ses gözlemlerini üretir (veya daha önce üretilmişse DB'den okur —
+    kurtarma taramasında görü modelini yeniden çağırma), interviews.*_json kolonlarına yazar ve
+    birincil yazara verilecek TEK metin bloğunu döner. Her analizör ayrı try/except."""
+    try:
+        db = get_db()
+        row = db.execute(
+            "SELECT mimic_analysis_json, voice_metrics_json, voice_observations_json FROM interviews WHERE candidate_id=? AND level=?",
+            (candidate_id, level)
+        ).fetchone()
+        db.close()
+    except Exception as e:
+        print(f"UYARI (modality mevcut kayıt okuma c={candidate_id}): {type(e).__name__}: {e}")
+        row = None
+
+    mimic, metrics, obs = {}, {}, []
+    try:
+        if row and row["mimic_analysis_json"]:
+            mimic = json.loads(row["mimic_analysis_json"])
+        else:
+            mimic = analyze_frames(candidate_id, level)
+            if mimic:
+                _store_interview_json(candidate_id, level, "mimic_analysis_json", mimic)
+    except Exception as e:
+        print(f"UYARI (modality mimik c={candidate_id}): {type(e).__name__}: {e}")
+    try:
+        metrics = compute_voice_metrics(candidate_id, level)
+        if metrics:
+            _store_interview_json(candidate_id, level, "voice_metrics_json", metrics)
+        elif row and row["voice_metrics_json"]:
+            metrics = json.loads(row["voice_metrics_json"])
+    except Exception as e:
+        print(f"UYARI (modality ses metrik c={candidate_id}): {type(e).__name__}: {e}")
+    try:
+        obs = extract_voice_observations(candidate_id, level)
+        if obs:
+            _store_interview_json(candidate_id, level, "voice_observations_json", obs)
+        elif row and row["voice_observations_json"]:
+            obs = json.loads(row["voice_observations_json"])
+    except Exception as e:
+        print(f"UYARI (modality ses gözlem c={candidate_id}): {type(e).__name__}: {e}")
+
+    parts = []
+    if mimic:
+        parts.append("MİMİK / GÖRÜNTÜ GÖZLEMLERİ:\n" + json.dumps(mimic, ensure_ascii=False, indent=1))
+    if metrics:
+        parts.append("SES METRİKLERİ (tur bazlı):\n" + json.dumps(metrics, ensure_ascii=False, indent=1))
+    if obs:
+        parts.append("MÜLAKATÇI SES GÖZLEMLERİ (mülakat anında kaydedildi):\n" + json.dumps(obs, ensure_ascii=False, indent=1))
+    if not parts:
+        return ""
+    return ("=== MODALİTE KANITLARI (DESTEKLEYİCİ) ===\n"
+            "Aşağıdaki görüntü/ses sinyalleri YALNIZCA destekleyici gözlemdir. Toplam puanı ve "
+            "İşe Al / Değerlendirmeye Al / Reddet kararını DEĞİŞTİRMEZLER. Yalnızca 'Serbest Gözlemler' "
+            "bölümünü zenginleştirmek için, temkinli ve 'gözlem — teşhis değil' diliyle kullan. "
+            "Bunlar duygu tespiti, kişilik hükmü veya yalan analizi DEĞİLDİR. Sinyal zayıf/eksikse yok say.\n\n"
+            + "\n\n".join(parts))
+
+def _set_reviewer_status(candidate_id: int, level: int, status: str, error: Optional[str]) -> None:
+    """FAZ D: denetçi sessizce düşmesin — durumu ('ok'/'skipped'/'failed') + kısa nedeni
+    interviews satırına yazar; admin panelinde görünür rozet buradan beslenir."""
+    try:
+        db = get_db()
+        db.execute("UPDATE interviews SET reviewer_status=?, reviewer_error=? WHERE candidate_id=? AND level=?",
+                   (status, (error or "")[:500], candidate_id, level))
+        db.commit(); db.close()
+    except Exception as e:
+        print(f"UYARI (_set_reviewer_status c={candidate_id} L{level}): {type(e).__name__}: {e}")
+
+def run_report_reviewer(candidate_id: int, level: int, transcript_text: str, draft_report: str, modality_block: str):
+    """Ortak raporun MUHALİF DENETÇİSİ. Raporu YENİDEN YAZMAZ. Sadece: abartılı/kanıtsız iddialar,
+    eksik kanıt, puan kalibrasyon notu, güven düzeyi döner. Denetçi HER ZAMAN OpenAI'dır
+    (OPENAI_REVIEWER_MODEL) — Claude-primary için 'diğer sağlayıcı', OpenAI-primary için 'ikinci
+    OpenAI modeli'. L2'de Anthropic'e ASLA gitmez.
+    Dönüş: (notes, status, error) — status ∈ {'ok','skipped','failed'}. Hata/atlama halinde
+    notes='' ve rapor denetçisiz tamamlanır, ama durum interviews'a kaydedilir (sessiz düşme yok)."""
+    if not OPENAI_API_KEY:
+        return "", "skipped", "OPENAI_API_KEY tanımlı değil"
+    prompt = f"""Sen bir işe alım raporu DENETÇİSİSİN. Aşağıda bir mülakatın transkripti, birincil modelin yazdığı RAPOR TASLAĞI ve (varsa) modalite kanıtları var.
+
+Raporu YENİDEN YAZMA. Sadece şunları Türkçe, kısa ve madde madde ver:
+1. ABARTILI / KANITSIZ İDDİALAR: taslakta transkriptle desteklenmeyen veya aşırı iddialı cümleler (kısa alıntıyla).
+2. EKSİK KANIT: transkriptte olan ama taslağın atladığı önemli sinyaller.
+3. PUAN KALİBRASYONU: taslağın toplam puanı kanıtlara göre yüksek mi / düşük mü / uygun mu — tek cümle gerekçe.
+4. GÜVEN DÜZEYİ: (yüksek / orta / düşük) + kısa neden.
+
+İLKE: Kanıt yoksa ne lehte ne aleyhte varsayım yapma. Modalite kanıtları (mimik/ses) puanı DEĞİŞTİRMEZ; yalnızca destekleyici. Belirgin bir sorun yoksa yalnızca "Belirgin bir görüş ayrılığı yok." yaz.
+
+=== TRANSKRİPT ===
+{(transcript_text or '')[:20000]}
+
+=== RAPOR TASLAĞI ===
+{(draft_report or '')[:12000]}
+
+=== MODALİTE KANITLARI ===
+{modality_block or 'Yok'}"""
+    try:
+        with httpx.Client(timeout=60) as client:
+            resp = client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={"model": OPENAI_REVIEWER_MODEL, "messages": [{"role": "user", "content": prompt}],
+                      "max_tokens": 1000, "temperature": 0.1},
+            )
+        if resp.status_code != 200:
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+        result = resp.json()
+        record_openai_chat_usage(candidate_id, level, OPENAI_REVIEWER_MODEL, "report_reviewer", result)
+        return (result["choices"][0]["message"]["content"] or "").strip(), "ok", ""
+    except Exception as e:
+        print(f"UYARI (run_report_reviewer c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        return "", "failed", f"{type(e).__name__}: {e}"
+
+def _insert_report_section(reply: str, section_body: str) -> str:
+    """Denetçi çıktısını rapora DETERMİNİSTİK olarak ekler: '---RAPORSON---' varsa hemen öncesine,
+    yoksa '---STANDARTCV---' öncesine, o da yoksa sona. finalize_interview'in ---RAPOR--- gövde
+    regex'i bu bölümü rapor içinde yakalar."""
+    if not section_body:
+        return reply
+    block = f"\n\n**İkinci Model Değerlendirmesi / Görüş Ayrılıkları:**\n{section_body}\n"
+    if "---RAPORSON---" in reply:
+        return reply.replace("---RAPORSON---", block + "\n---RAPORSON---", 1)
+    if "---STANDARTCV---" in reply:
+        return reply.replace("---STANDARTCV---", block + "\n---STANDARTCV---", 1)
+    return reply + block
+
 def run_deferred_finish_job(candidate_id: int, level: int):
     """BackgroundTasks'ten (mülakat az önce bitti) VEYA kurtarma taramasından (takılı kalmış eski
     kayıt) çağrılır — girdisini SADECE DB'deki pending_finish_* alanlarından okur, hangi
@@ -2760,6 +3127,16 @@ def run_deferred_finish_job(candidate_id: int, level: int):
         _mark_finish_failed(candidate_id, level, "pending_finish_payload boş — gönderilecek kayıtlı istek yok")
         return
     try:
+        # FAZ D — MODALİTE KANITLARI: mimik + ses metrikleri + ses gözlemleri. En iyi çaba;
+        # patlarsa boş döner. Birincil yazara ek kanıt bloğu olarak verilir (system'e değil,
+        # user payload'ına eklenir — Claude'da cache öneki bozulmasın).
+        try:
+            modality_block = build_modality_evidence_block(candidate_id, level)
+        except Exception as e:
+            print(f"UYARI (modality blok üretimi c={candidate_id} L{level}): {type(e).__name__}: {e}")
+            modality_block = ""
+        primary_payload = payload if not modality_block else (payload + "\n\n" + modality_block)
+
         if provider == "claude":
             if not ANTHROPIC_API_KEY:
                 raise RuntimeError("ANTHROPIC_API_KEY tanımlı değil")
@@ -2767,9 +3144,11 @@ def run_deferred_finish_job(candidate_id: int, level: int):
             response = client.messages.create(
                 model=model or "claude-sonnet-4-6", max_tokens=4000,
                 system=cached_system(system) if system else anthropic.NOT_GIVEN,
-                messages=[{"role": "user", "content": payload}]
+                messages=[{"role": "user", "content": primary_payload}]
             )
-            add_token_usage(candidate_id, level, response)
+            # FAZ D: birincil rapor çağrısı panelde AYRI KALEM olsun — add_token_usage yerine
+            # record_anthropic_usage (ai_usage_logs'a satır + interviews.total_* BİR KEZ artış).
+            record_anthropic_usage(candidate_id, level, model or "claude-sonnet-4-6", "report_generation_primary", response)
             reply = response.content[0].text
             # Normal kapanış çağrısı bile [ADAY_CIKIS_TALEBI] üretebilir (mevcut senkron
             # interview_chat akışıyla aynı davranış) — öyleyse ikinci bir "gerçek bitiş" çağrısı yap.
@@ -2783,7 +3162,7 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
                     system=cached_system(system) if system else anthropic.NOT_GIVEN,
                     messages=[{"role": "user", "content": exit_payload}]
                 )
-                add_token_usage(candidate_id, level, exit_response)
+                record_anthropic_usage(candidate_id, level, model or "claude-sonnet-4-6", "report_generation_primary", exit_response)
                 reply = exit_response.content[0].text
                 terminated_reason = terminated_reason or "Aday talebiyle erken sonlandırıldı"
         elif provider == "openai":
@@ -2791,7 +3170,7 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
                 resp = client.post(
                     "https://api.openai.com/v1/chat/completions",
                     headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                    json={"model": model or OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": payload}], "max_tokens": 2600, "temperature": 0.1}
+                    json={"model": model or OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": primary_payload}], "max_tokens": 2600, "temperature": 0.1}
                 )
             if resp.status_code != 200:
                 raise RuntimeError(f"OpenAI rapor üretimi HTTP {resp.status_code}: {resp.text[:400]}")
@@ -2800,6 +3179,28 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             reply = result["choices"][0]["message"]["content"]
         else:
             raise RuntimeError(f"Bilinmeyen pending_finish_provider: {provider!r}")
+
+        # FAZ D — MUHALİF DENETÇİ (ikinci model): raporu yeniden yazmaz; görüş ayrılıkları +
+        # puan kalibrasyonu + güven düzeyi döner. Deterministik olarak rapora ayrı bölüm eklenir.
+        # En iyi çaba: patlarsa rapor denetçisiz tamamlanır. Denetçi HER ZAMAN OpenAI (L2'de bile
+        # Anthropic'e gidilmez).
+        try:
+            db3 = get_db()
+            msgs = get_interview_messages(db3, candidate_id, level)
+            db3.close()
+            transcript_text = "\n".join(
+                (m.get("content") or "") for m in msgs if m.get("role") in ("user", "assistant")
+            )
+        except Exception as e:
+            print(f"UYARI (denetçi transkript derleme c={candidate_id}): {type(e).__name__}: {e}")
+            transcript_text = ""
+        try:
+            review_notes, rv_status, rv_err = run_report_reviewer(candidate_id, level, transcript_text, reply, modality_block)
+            reply = _insert_report_section(reply, review_notes)
+        except Exception as e:
+            review_notes, rv_status, rv_err = "", "failed", f"{type(e).__name__}: {e}"
+            print(f"UYARI (denetçi/birleştirme c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        _set_reviewer_status(candidate_id, level, rv_status, rv_err)
 
         finalize_interview(candidate_id, reply, terminated_reason=terminated_reason, level=level)
         print(f"[PROCESSING_DONE] candidate_id={candidate_id} level={level}")
@@ -3003,16 +3404,25 @@ def save_snapshot(data: SnapshotData, payload=Depends(verify_token), db=Depends(
     if len(data.image_base64) > 3_000_000:
         raise HTTPException(status_code=400, detail="Görsel çok büyük")
 
+    reason = (data.reason or "").strip() or "auto"
+    is_mimic = reason == "mimic_sample"
+    # FAZ D: doğrulama kareleri (kamera kanıtı — PDF/panel) ile mimik analiz kareleri AYRI sayılır
+    # ve AYRI üst sınıra tabidir; biri diğerinin kotasını yemez.
+    if is_mimic:
+        cap, count_filter = 24, "reason='mimic_sample'"
+    else:
+        cap, count_filter = 4, "(reason IS NULL OR reason<>'mimic_sample')"
+
     existing_count = db.execute(
-        "SELECT COUNT(*) as c FROM snapshots WHERE candidate_id=?", (data.candidate_id,)
+        f"SELECT COUNT(*) as c FROM snapshots WHERE candidate_id=? AND {count_filter}", (data.candidate_id,)
     ).fetchone()["c"]
 
-    if existing_count >= 4:
-        return {"message": "Maksimum kare sayısına ulaşıldı, kaydedilmedi", "count": existing_count}
+    if existing_count >= cap:
+        return {"message": "Kare sınırına ulaşıldı, kaydedilmedi", "count": existing_count}
 
     db.execute(
-        "INSERT INTO snapshots (candidate_id, image_base64) VALUES (?, ?)",
-        (data.candidate_id, data.image_base64)
+        "INSERT INTO snapshots (candidate_id, image_base64, level, elapsed_ms, reason) VALUES (?, ?, ?, ?, ?)",
+        (data.candidate_id, data.image_base64, data.level, data.elapsed_ms, reason)
     )
     db.commit()
     return {"message": "Kare kaydedildi", "count": existing_count + 1}
@@ -3217,6 +3627,29 @@ async def create_realtime_session(payload=Depends(verify_token)):
                     },
                     "required": ["reason"]
                 }
+            }, {
+                # FAZ D — SES GÖZLEMİ: model, adayın sesinde belirgin bir şey fark ettiğinde
+                # bunu YAPILANDIRILMIŞ olarak kaydeder. Ham ses hiçbir yere gönderilmez; sadece
+                # modelin kendi gözlemi. Yanıta bağlanmaz (frontend function_call_output/response
+                # göndermez) — akış kesilmez.
+                "type": "function",
+                "name": "note_voice_observation",
+                "description": (
+                    "SES gözlemi kaydet. YALNIZCA belirgin ve rapora değer bir gözlemde çağır "
+                    "(net tereddüt, akıcılık kaybı, tonda belirgin kayma, aşırı güven/gerginlik). "
+                    "Sıradan/beklenen konuşma için ASLA çağırma. Tüm görüşmede EN FAZLA 5 kez. "
+                    "Bu araç sesli yanıt üretmez; sessizce kaydet ve mülakata devam et."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ton": {"type": "string", "enum": ["sakin", "gergin", "kararsiz", "kendinden_emin", "monoton", "istekli"]},
+                        "akicilik": {"type": "integer", "description": "0-100: konuşma akıcılığı"},
+                        "tereddut": {"type": "integer", "description": "0-100: duraksama/tereddüt düzeyi"},
+                        "gozlem": {"type": "string", "description": "Tek cümle, somut ve tarafsız."}
+                    },
+                    "required": ["gozlem"]
+                }
             }]
         }
     }
@@ -3242,7 +3675,9 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "turn_detection": session_body["session"]["audio"]["input"]["turn_detection"],
             "depth_tier": depth_tier,
             "coverage_threshold": depth_cfg["coverage_threshold"],
-            "criteria_names": criteria_names_list
+            "criteria_names": criteria_names_list,
+            # FAZ D: mimik kare örneklemesi bu planlanan süreye eşit dağıtılır (aralik = target_seconds/24).
+            "target_seconds": depth_cfg["minutes"] * 60,
         }
     except HTTPException:
         raise
@@ -3510,8 +3945,10 @@ TAM FORMAT:
 
 @app.get("/api/admin/snapshots/{candidate_id}")
 def get_snapshots(candidate_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
+    # FAZ D: mimik analiz kareleri (reason='mimic_sample') panelde/PDF'te GÖSTERİLMEZ — bunlar
+    # yalnızca arka plan analizi içindir; "4/4 doğrulama karesi" görünümü bozulmasın.
     rows = db.execute(
-        "SELECT id, image_base64, captured_at FROM snapshots WHERE candidate_id=? ORDER BY captured_at ASC",
+        "SELECT id, image_base64, captured_at FROM snapshots WHERE candidate_id=? AND (reason IS NULL OR reason<>'mimic_sample') ORDER BY captured_at ASC",
         (candidate_id,)
     ).fetchall()
     return [{"id": r["id"], "image_base64": r["image_base64"], "captured_at": r["captured_at"]} for r in rows]
@@ -3811,7 +4248,7 @@ def download_interview_pdf(candidate_id: int, level: Optional[int] = None, paylo
     candidate = db.execute("SELECT * FROM candidates WHERE id=? AND org_id=?", (candidate_id, scoped_org_id)).fetchone()
     target_level = level if level is not None else ((candidate["level"] or 1) if candidate else 1)
     interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, target_level)).fetchone()
-    snapshots = db.execute("SELECT id, image_base64, captured_at FROM snapshots WHERE candidate_id=? ORDER BY captured_at ASC", (candidate_id,)).fetchall()
+    snapshots = db.execute("SELECT id, image_base64, captured_at FROM snapshots WHERE candidate_id=? AND (reason IS NULL OR reason<>'mimic_sample') ORDER BY captured_at ASC", (candidate_id,)).fetchall()
     if not candidate or not interview:
         raise HTTPException(status_code=404, detail="Rapor bulunamadı")
 
