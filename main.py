@@ -797,6 +797,21 @@ class CvPoolInvite(BaseModel):
     report_language: str = "tr"
     send_email: bool = True
 
+class NewAttemptRequest(BaseModel):
+    """Tamamlanmış bir mülakat kaydı düzenlemeye kapalıdır; onun yerine aynı kişi için yeni bir
+    mülakat çağrısı açılır. Bu gövde sadece yeni çağrıya özgü alanları taşır — kimlik/eğitim/CV
+    alanları kaynak candidate satırından birebir kopyalanır.
+
+    KOPYALAMA KURALI: TÜM alanlar Optional/None. Sabit varsayılan YOK — gövdede None gelen her
+    alan kaynak candidate satırından kopyalanır. Aksi halde (ör. sabit level=1 / dil='tr')
+    frontend bir alanı hiç göndermediğinde kaynağın gerçek değeri sessizce ezilirdi."""
+    position: Optional[str] = None
+    level: Optional[int] = None
+    depth_tier: Optional[str] = None
+    interview_language: Optional[str] = None
+    report_language: Optional[str] = None
+    ai_note: Optional[str] = None
+
 class CandidateLogin(BaseModel):
     username: str
     password: str
@@ -1185,6 +1200,24 @@ def extract_cv_text(filename: str, content: bytes) -> str:
     elif lower.endswith(".docx"):
         return extract_text_from_docx(content)
     return "[Desteklenmeyen dosya formatı]"
+
+def cv_extraction_error(cv_text: Optional[str]) -> Optional[str]:
+    """Yüklenen CV'den metin çıkarma sonucunu doğrular. Sorun varsa yüzeye gösterilecek NET,
+    anlaşılır bir Türkçe mesaj döner (kaydı ENGELLEMEK için); sorun yoksa None. Bozuk/boş CV
+    metninin sessizce kaydedilip sonradan mülakat promptuna sızmasını ve akışı kilitlemesini
+    önler. Her arıza türü ayrı mesaj alır: okunamayan PDF, okunamayan Word, boş/görüntü CV."""
+    t = (cv_text or "").strip()
+    if not t:
+        return "Yüklediğiniz dosyadan hiç metin okunamadı. Dosya boş olabilir veya taranmış görüntüden oluşuyor olabilir; lütfen metin tabanlı bir PDF ya da Word (.docx) dosyası yükleyin."
+    if t.startswith("[PDF okunamadı"):
+        return "Yüklediğiniz PDF dosyası okunamadı. Dosya bozuk olabilir ya da taranmış görüntüden oluşuyor olabilir; lütfen metin tabanlı bir PDF veya Word (.docx) dosyası yükleyin."
+    if t.startswith("[Word dosyası okunamadı"):
+        return "Yüklediğiniz Word dosyası okunamadı. Lütfen dosyayı kontrol edip tekrar deneyin veya PDF olarak yükleyin."
+    if t.startswith("[Desteklenmeyen dosya formatı"):
+        return "Yüklediğiniz dosya geçerli bir CV değil. Sadece PDF veya Word (.docx) dosyası yükleyebilirsiniz."
+    if len(t) < 30:
+        return "Yüklediğiniz dosyada yeterli okunabilir metin bulunamadı. Lütfen tam bir CV dosyası yükleyin."
+    return None
 
 # ============ MAIL ============
 def send_invite_email(candidate_name: str, email: str, username: str, password: str, position: str):
@@ -2136,6 +2169,10 @@ async def admin_upload_cv(candidate_id: int, file: UploadFile = File(...), paylo
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Dosya boyutu 10MB'ı geçemez")
     cv_text = extract_cv_text(file.filename, content)
+    cv_err = cv_extraction_error(cv_text)
+    if cv_err:
+        # Bozuk/boş/uyumsuz CV: hiç kaydetme, akışı temiz kes, net mesaj dön.
+        raise HTTPException(status_code=400, detail=cv_err)
 
     db = None
     try:
@@ -2172,6 +2209,15 @@ def admin_update_candidate(candidate_id: int, data: CandidateUpdate, payload=Dep
         candidate = db.execute("SELECT id, level FROM candidates WHERE id=?", (candidate_id,)).fetchone()
         if not candidate:
             raise HTTPException(status_code=404, detail="Aday bulunamadı")
+
+        # TAMAMLANMIŞ MÜLAKAT KİLİDİ: bu adayın herhangi bir seviyede tamamlanmış (completed_at
+        # dolu) bir mülakat kaydı varsa artık düzenlenemez — değişiklik "Yeni çağrı" ile yapılır.
+        finished_row = db.execute(
+            "SELECT 1 FROM interviews WHERE candidate_id=? AND completed_at IS NOT NULL LIMIT 1",
+            (candidate_id,)
+        ).fetchone()
+        if finished_row:
+            raise HTTPException(status_code=409, detail="Tamamlanmış mülakat düzenlenemez. Yeni çağrı açın.")
 
         # KISMİ YAZMA: sadece istekte gerçekten gönderilen alanlar yazılır — CandidateCreate'in
         # tam-değiştirme davranışı (gönderilmeyen alanı None'a düşürme) burada terk edildi.
@@ -2210,6 +2256,61 @@ def admin_update_candidate(candidate_id: int, data: CandidateUpdate, payload=Dep
         if db:
             db.close()
 
+@app.post("/api/admin/candidates/{candidate_id}/new-attempt")
+def create_new_attempt(candidate_id: int, data: NewAttemptRequest, payload=Depends(verify_admin), db=Depends(db_dep)):
+    """Tamamlanmış (veya herhangi bir) mülakat kaydından yeni bir mülakat çağrısı türetir.
+    Kimlik/eğitim/CV alanları kaynak candidate satırından birebir kopyalanır; pozisyon, seviye,
+    derinlik, dil ve AI notu gövdeden alınır; yeni kullanıcı adı/şifre üretilir; person_id ve
+    org_id kaynaktan aynen taşınır. KAYNAK KAYDA DOKUNULMAZ — arşivlenmez, alanı değişmez.
+    Alan kopyalama/kullanıcı üretimi deseni cv-pool invite ile aynıdır."""
+    src = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+    if not src:
+        raise HTTPException(status_code=404, detail="Kaynak aday bulunamadı")
+
+    src_keys = src.keys()
+
+    def _src(col, fallback=None):
+        return src[col] if col in src_keys else fallback
+
+    # KOPYALAMA KURALI: gövdede None gelen alan kaynak candidate satırından kopyalanır —
+    # sabit varsayılan asla kullanılmaz (aksi halde kaynağın dili/seviyesi sessizce ezilirdi).
+    position = data.position if data.position is not None else src["position"]
+    level = data.level if data.level is not None else (_src("level") or 1)
+    depth_tier = data.depth_tier if data.depth_tier is not None else (_src("depth_tier") or "standart")
+    interview_language = data.interview_language if data.interview_language is not None else (_src("interview_language") or "tr")
+    report_language = data.report_language if data.report_language is not None else (_src("report_language") or "tr")
+    ai_note = data.ai_note if data.ai_note is not None else _src("ai_note")
+    if not position:
+        raise HTTPException(status_code=400, detail="Yeni çağrı için pozisyon gereklidir")
+
+    username = generate_username(src["name"], db)
+    password = generate_password()
+    password_hash = hash_password(password)
+    src_org_id = _src("org_id")
+    src_person_id = _src("person_id")
+
+    insert_sql = """
+        INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, level, depth_tier, interview_language, report_language, username, password_hash, plain_password, invite_type, cv_text, cv_filename, org_id, person_id, previous_candidate_id, status, is_archived)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'invite', ?, ?, ?, ?, ?, 'pending', 0)
+    """
+    params = (
+        src["name"], src["email"], src["phone"], src["education"], src["university"], src["department"],
+        src["experience_years"] or 0, ai_note, position, level, depth_tier,
+        interview_language, report_language, username, password_hash, password,
+        src["cv_text"], src["cv_filename"], src_org_id, src_person_id, candidate_id,
+    )
+    if USE_POSTGRES:
+        new_id = db.execute(insert_sql + " RETURNING id", params).fetchone()["id"]
+    else:
+        db.execute(insert_sql, params)
+        new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.commit()
+
+    return {
+        "id": new_id, "username": username, "password": password,
+        "message": "Yeni mülakat çağrısı oluşturuldu",
+    }
+
 # ---- CV Upload ----
 @app.post("/api/candidate/upload-cv")
 async def upload_cv(file: UploadFile = File(...), payload=Depends(verify_token), db=Depends(db_dep)):
@@ -2224,6 +2325,10 @@ async def upload_cv(file: UploadFile = File(...), payload=Depends(verify_token),
         raise HTTPException(status_code=400, detail="Dosya boyutu 10MB'ı geçemez")
 
     cv_text = extract_cv_text(file.filename, content)
+    cv_err = cv_extraction_error(cv_text)
+    if cv_err:
+        # Bozuk/boş/uyumsuz CV: kaydetme, akışı temiz kes. Adaya sadece bu anlaşılır mesaj gider.
+        raise HTTPException(status_code=400, detail=cv_err)
 
     db.execute("UPDATE candidates SET cv_text=?, cv_filename=? WHERE id=?",
                (cv_text, file.filename, payload["candidate_id"]))
