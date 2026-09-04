@@ -828,6 +828,7 @@ class NewAttemptRequest(BaseModel):
     interview_language: Optional[str] = None
     report_language: Optional[str] = None
     ai_note: Optional[str] = None
+    send_email: bool = True  # diğer davet uçlarıyla aynı: varsayılan davet maili gönderilir
 
 class CandidateLogin(BaseModel):
     username: str
@@ -2149,12 +2150,18 @@ def resend_invite(candidate_id: int, payload=Depends(verify_admin), db=Depends(d
     if not candidate["plain_password"]:
         raise HTTPException(status_code=400, detail="Bu adayın şifresi sistemde saklanmıyor (eski kayıt). Şifre Sıfırla kullanın.")
 
+    mail_attempted = bool(candidate["email"] and "@medex-smo.local" not in candidate["email"])
     mail_sent = False
-    if candidate["email"] and "@medex-smo.local" not in candidate["email"]:
-        mail_sent = send_invite_email(candidate["name"], candidate["email"], candidate["username"], candidate["plain_password"], candidate["position"])
+    if mail_attempted:
+        try:
+            mail_sent = send_invite_email(candidate["name"], candidate["email"], candidate["username"], candidate["plain_password"], candidate["position"])
+        except Exception as e:
+            print(f"UYARI (resend_invite davet maili c={candidate_id}): {type(e).__name__}: {e}")
+            mail_sent = False
 
     return {
-        "mail_sent": mail_sent, "username": candidate["username"], "password": candidate["plain_password"],
+        "mail_sent": mail_sent, "mail_attempted": mail_attempted,
+        "username": candidate["username"], "password": candidate["plain_password"],
         "message": "Mail tekrar gönderildi (şifre değişmedi)" if mail_sent else "Mail gönderilemedi (bilgileri manuel iletin)"
     }
 
@@ -2361,10 +2368,25 @@ def create_new_attempt(candidate_id: int, data: NewAttemptRequest, payload=Depen
         db.execute(insert_sql, params)
         new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.commit()
+    db.close()  # yavaş e-posta gönderiminden önce bağlantıyı bilerek erken kapat (create_candidate ile aynı)
+
+    # DAVET MAİLİ — kayıt açma işlemini ETKİLEMEZ: kayıt yukarıda commit edildi, mail buradan
+    # sonra denenir; patlarsa (send_invite_email zaten kendi içinde yutar, ek güvenlik ağı da var)
+    # mail_sent=False döner, admin kimlik bilgilerini elle iletir. Diğer davet uçlarıyla aynı desen.
+    target_email = (src["email"] or "").strip()
+    mail_attempted = bool(data.send_email and target_email and "@medex-smo.local" not in target_email)
+    mail_sent = False
+    if mail_attempted:
+        try:
+            mail_sent = send_invite_email(src["name"], target_email, username, password, position)
+        except Exception as e:
+            print(f"UYARI (create_new_attempt davet maili c={new_id}): {type(e).__name__}: {e}")
+            mail_sent = False
 
     return {
         "id": new_id, "username": username, "password": password,
-        "message": "Yeni mülakat çağrısı oluşturuldu",
+        "mail_sent": mail_sent, "mail_attempted": mail_attempted,
+        "message": "Yeni mülakat çağrısı oluşturuldu" + (", davet maili gönderildi" if mail_sent else ""),
     }
 
 # ---- CV Upload ----
