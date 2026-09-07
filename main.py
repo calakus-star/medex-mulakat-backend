@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 import json
 import re
 import io
+import time
 import base64
 import traceback
 from xml.sax.saxutils import escape as xml_escape
@@ -81,6 +82,13 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "medex2024")
 REPORT_EMAILS = os.getenv("REPORT_EMAILS", "hr@medex-smo.com").split(",")
 FROM_EMAIL = os.getenv("FROM_EMAIL", "onboarding@resend.dev")
 BASE_URL = os.getenv("BASE_URL", "http://localhost:3000")
+# Kritik hata bildirimi gidecek adres(ler). Tanımsızsa rapor adreslerine düşer.
+ERROR_ALERT_EMAILS = [e.strip() for e in os.getenv("ERROR_ALERT_EMAILS", ",".join(REPORT_EMAILS)).split(",") if e.strip()]
+# Davet linkinin geçerlilik süresi (gün). Aday bu süre içinde hiç giriş yapmazsa "Süresi doldu".
+try:
+    INVITE_EXPIRY_DAYS = int(os.getenv("INVITE_EXPIRY_DAYS", "14"))
+except Exception:
+    INVITE_EXPIRY_DAYS = 14
 
 INTERVIEW_TOTAL_MINUTES = 18  # Level bilgisi yoksa/eski kayıtlarda kullanılan varsayılan (geriye uyumluluk)
 
@@ -345,6 +353,17 @@ def init_db():
                 FOREIGN KEY (person_id) REFERENCES persons(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS error_logs (
+                id BIGSERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                candidate_id BIGINT, candidate_name TEXT, interview_id BIGINT, level INTEGER,
+                provider TEXT, step TEXT, error_class TEXT, severity TEXT DEFAULT 'user',
+                human_message TEXT, candidate_message TEXT, technical_detail TEXT,
+                retry_count INTEGER DEFAULT 0, email_sent_at TIMESTAMP,
+                resolved INTEGER DEFAULT 0, resolved_at TIMESTAMP, resolved_by TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_error_logs_unresolved ON error_logs (resolved, severity, error_class);
+
             CREATE INDEX IF NOT EXISTS idx_candidates_email ON candidates (lower(email));
             CREATE INDEX IF NOT EXISTS idx_interviews_candidate_level ON interviews (candidate_id, level);
             CREATE INDEX IF NOT EXISTS idx_snapshots_candidate ON snapshots (candidate_id);
@@ -429,6 +448,16 @@ def init_db():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (person_id) REFERENCES persons(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS error_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                candidate_id INTEGER, candidate_name TEXT, interview_id INTEGER, level INTEGER,
+                provider TEXT, step TEXT, error_class TEXT, severity TEXT DEFAULT 'user',
+                human_message TEXT, candidate_message TEXT, technical_detail TEXT,
+                retry_count INTEGER DEFAULT 0, email_sent_at TEXT,
+                resolved INTEGER DEFAULT 0, resolved_at TEXT, resolved_by TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_error_logs_unresolved ON error_logs (resolved, severity, error_class);
         """)
     conn.commit()
 
@@ -478,6 +507,13 @@ def init_db():
         ("interviews", "partial", "INTEGER DEFAULT 0"), # kısmi mülakat mı
         ("interviews", "completion_pct", "INTEGER"),    # ~tamamlanma oranı (nullable)
         ("interviews", "technical_error_ref", "TEXT"),  # "Değerlendirilemedi" teknik sebep + log kimliği (admin-only)
+        # Aday teşebbüs izleme + davet süresi (Mülakat Denemeleri ekranı)
+        ("candidates", "login_count", "INTEGER DEFAULT 0"),
+        ("candidates", "first_login_at", "TIMESTAMP" if USE_POSTGRES else "TEXT"),
+        ("candidates", "last_login_at", "TIMESTAMP" if USE_POSTGRES else "TEXT"),
+        ("candidates", "interview_start_count", "INTEGER DEFAULT 0"),
+        ("candidates", "last_start_at", "TIMESTAMP" if USE_POSTGRES else "TEXT"),
+        ("candidates", "invite_expires_at", "TIMESTAMP" if USE_POSTGRES else "TEXT"),
         ("candidates", "person_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("candidates", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("positions", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
@@ -1055,12 +1091,12 @@ def add_token_usage(candidate_id: int, level: int, response):
 
 
 
-def _safe_int(value) -> int:
+def _safe_int(value, default: int = 0) -> int:
     try:
-        return int(value or 0)
+        return int(value if value is not None else default)
     except Exception as e:
         print(f"UYARI (_safe_int: sayıya çevrilemedi, value={value!r}): {type(e).__name__}: {e}")
-        return 0
+        return default
 
 # Yaklaşık USD fiyatlandırma (1M token başına) — TEK KAYNAK. Hem backend (panel/log) hem
 # frontend'in canlı tahmini (/api/realtime/session yanıtındaki "pricing" alanı üzerinden) bu
@@ -1535,6 +1571,317 @@ def send_report_email(candidate_name, position, report, score, recommendation, s
     except Exception as e:
         print(f"Rapor mail hatası: {e}")
         return False
+
+# ============ MERKEZİ AI ÇAĞRI KATMANI + HATA SINIFLANDIRMA + HATA LOGU ============
+# Amaç: OpenAI ve Anthropic'e giden her HTTP çağrısı tek yerden geçsin; hata sınıflandırılsın,
+# adaya ASLA ham kod/status/teknik metin sızmasın, admin panelinde görünsün, kritik durumda
+# anında e-posta gitsin, uygun sınıflarda otomatik retry yapılsın.
+
+_RETRY_BACKOFF = [1, 3, 7]  # saniye — 3 deneme
+
+# error_class -> adaya gösterilecek metin (İŞ EMRİ 1.4 tablosu). Backend'de "kota/bakiye/API/quota"
+# kelimeleri bu sözlüğün dışına ÇIKMAZ; frontend yalnızca buradaki 'message'ı gösterir.
+AI_ERROR_USER_MESSAGES = {
+    "insufficient_quota":  "Mülakat şu anda başlatılamıyor. Lütfen yetkiliyle iletişime geçin.",
+    "invalid_api_key":     "Mülakat şu anda başlatılamıyor. Lütfen yetkiliyle iletişime geçin.",
+    "rate_limit_exceeded": "Sistem şu anda yoğun. Lütfen birkaç dakika sonra tekrar deneyin.",
+    "server_error":        "Servise şu an ulaşılamıyor. Lütfen tekrar deneyin.",
+    "network":             "Bağlantı kurulamadı. İnternet bağlantınızı kontrol edin.",
+    "mic_permission":      "Mikrofon erişimi verilmedi. Tarayıcı ayarlarından izin verin.",
+    "unknown":             "Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.",
+}
+_RETRYABLE_CLASSES = {"rate_limit_exceeded", "server_error", "network"}
+_CRITICAL_CLASSES = {"insufficient_quota", "invalid_api_key"}
+
+class AIError(Exception):
+    """Sınıflandırılmış AI çağrı hatası. Route handler bunu yakalayıp uygun HTTP yanıtını üretir."""
+    def __init__(self, error_class: str, provider: str, step: str, technical_detail: str,
+                 retry_count: int = 0, http_status: int = 502):
+        self.error_class = error_class
+        self.provider = provider
+        self.step = step
+        self.technical_detail = (technical_detail or "")[:4000]
+        self.retry_count = retry_count
+        self.http_status = http_status
+        self.user_message = AI_ERROR_USER_MESSAGES.get(error_class, AI_ERROR_USER_MESSAGES["unknown"])
+        self.retryable = error_class in _RETRYABLE_CLASSES
+        super().__init__(f"{provider}/{step}: {error_class}")
+
+def _http_status_for_class(error_class: str) -> int:
+    return {
+        "insufficient_quota": 503, "invalid_api_key": 503,
+        "rate_limit_exceeded": 429, "server_error": 502, "network": 504,
+    }.get(error_class, 500)
+
+def classify_ai_error(provider: str, status: Optional[int], body) -> str:
+    """HTTP status + sağlayıcı hata kodunu BİRLİKTE okuyarak sınıflandırır.
+    429 tek başına 'rate_limit' varsayılmaz — kod 'insufficient_quota' ise kota tükenmesidir."""
+    code = ""
+    try:
+        b = body if isinstance(body, dict) else (json.loads(body) if isinstance(body, str) and body.strip().startswith("{") else {})
+        err = (b.get("error") or {}) if isinstance(b, dict) else {}
+        code = str(err.get("code") or err.get("type") or "").lower()
+    except Exception:
+        code = str(body or "").lower()
+    blob = f"{code} {str(body or '')[:500]}".lower()
+    if "insufficient_quota" in blob or "exceeded your current quota" in blob or "billing" in blob:
+        return "insufficient_quota"
+    if status in (401, 403) or "invalid_api_key" in blob or "authentication" in blob or "permission" in blob:
+        return "invalid_api_key"
+    if status == 429 or "rate_limit" in blob or "overloaded" in blob:
+        return "rate_limit_exceeded"
+    if (status is not None and status >= 500) or "server_error" in blob or "api_error" in blob:
+        return "server_error"
+    return "unknown"
+
+def _human_error_message(provider: str, step: str, error_class: str) -> str:
+    """Admin panelinde gösterilecek İNSAN DİLİNDE açıklama (teknik jargonsuz)."""
+    who = "OpenAI" if provider == "openai" else ("Claude (AI mülakatçı)" if provider == "anthropic" else provider)
+    step_tr = {
+        "realtime_session": "sesli mülakat oturumu başlatılırken",
+        "sdp_exchange": "sesli bağlantı kurulurken",
+        "interview_start": "mülakat başlatılırken",
+        "interview_chat": "mülakat sırasında yanıt üretilirken",
+        "report_generation": "rapor üretilirken",
+        "report_reviewer": "rapor ikinci-model denetimi sırasında",
+        "mimic_analysis": "mimik analizi sırasında",
+        "voice_transcribe": "ses metne çevrilirken",
+        "voice_speak": "metin sese çevrilirken",
+    }.get(step, "AI çağrısında")
+    cls_tr = {
+        "insufficient_quota": f"{who} kotası/bakiyesi tükendiği için",
+        "invalid_api_key": f"{who} API anahtarı geçersiz veya yetkisiz olduğu için",
+        "rate_limit_exceeded": f"{who} hız sınırı aşıldığı (sistem yoğun) için",
+        "server_error": f"{who} servisine geçici olarak ulaşılamadığı için",
+        "network": f"{who} servisine ağ bağlantısı kurulamadığı için",
+        "unknown": f"{who} servisinde bilinmeyen bir hata oluştuğu için",
+    }.get(error_class, f"{who} servisinde bir hata oluştuğu için")
+    return f"{cls_tr} {step_tr} işlem tamamlanamadı."
+
+def record_error_log(*, provider: str, step: str, error_class: str, technical_detail: str,
+                     candidate_message: str = "", retry_count: int = 0, severity: str = "user",
+                     candidate_id: Optional[int] = None, candidate_name: Optional[str] = None,
+                     interview_id: Optional[int] = None, level: Optional[int] = None,
+                     human_message: Optional[str] = None) -> Optional[int]:
+    """Adaya bir hata gösterilen (veya arka planda oluşan) her durumu error_logs'a yazar.
+    En iyi çaba — kayıt yazılamazsa mülakat akışı ETKİLENMEZ."""
+    try:
+        hm = human_message or _human_error_message(provider, step, error_class)
+        cm = candidate_message or AI_ERROR_USER_MESSAGES.get(error_class, AI_ERROR_USER_MESSAGES["unknown"])
+        db = get_db()
+        insert_sql = """INSERT INTO error_logs
+            (candidate_id, candidate_name, interview_id, level, provider, step, error_class, severity,
+             human_message, candidate_message, technical_detail, retry_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        params = (candidate_id, candidate_name, interview_id, level, provider, step, error_class, severity,
+                  hm, cm, (technical_detail or "")[:4000], retry_count)
+        if USE_POSTGRES:
+            new_id = db.execute(insert_sql + " RETURNING id", params).fetchone()["id"]
+        else:
+            db.execute(insert_sql, params)
+            new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.commit(); db.close()
+        print(f"[ERROR_LOG #{new_id}] {severity} {provider}/{step} {error_class} — {hm}")
+        return new_id
+    except Exception as e:
+        print(f"UYARI (record_error_log yazılamadı): {type(e).__name__}: {e}")
+        return None
+
+def maybe_send_critical_email(error_class: str, human_message: str, technical_detail: str,
+                              candidate_name: Optional[str], log_id: Optional[int]) -> None:
+    """Kota tükenmesi / geçersiz anahtar gibi KRİTİK hatalarda admin'e ANINDA e-posta.
+    Aynı error_class için son 1 saatte e-posta gittiyse TEKRAR göndermez (spam koruması)."""
+    if error_class not in _CRITICAL_CLASSES:
+        return
+    if not RESEND_API_KEY or not ERROR_ALERT_EMAILS:
+        return
+    try:
+        db = get_db()
+        recent = db.execute(
+            "SELECT id FROM error_logs WHERE error_class=? AND email_sent_at IS NOT NULL AND email_sent_at > ? LIMIT 1",
+            (error_class, (datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds"))
+        ).fetchone()
+        db.close()
+        if recent:
+            print(f"[CRITICAL_EMAIL] {error_class} — 1 saat içinde zaten gönderildi, atlanıyor.")
+            return
+    except Exception as e:
+        print(f"UYARI (kritik e-posta dedup kontrolü): {type(e).__name__}: {e}")
+
+    subj_map = {
+        "insufficient_quota": "MedeX Mülakat — OpenAI/Claude kotası tükendi, mülakatlar başlatılamıyor",
+        "invalid_api_key": "MedeX Mülakat — API anahtarı geçersiz, mülakatlar başlatılamıyor",
+    }
+    subject = subj_map.get(error_class, "MedeX Mülakat — kritik servis hatası")
+    who_line = f"Etkilenen aday: {candidate_name}" if candidate_name else "Bir aday mülakatı başlatamadı."
+    action = ("OpenAI hesabının bakiyesini/kotasını yükleyin veya faturalandırmayı kontrol edin."
+              if error_class == "insufficient_quota" else
+              "OPENAI_API_KEY / ANTHROPIC_API_KEY ortam değişkenini kontrol edip güncelleyin.")
+    html = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+      <div style="background:#b91c1c;padding:18px;text-align:center;color:#fff"><h2 style="margin:0">MedeX Mülakat — Kritik Hata</h2></div>
+      <div style="padding:24px;background:#f8fafc">
+        <p><strong>Ne oldu:</strong> {xml_escape(human_message)}</p>
+        <p>{xml_escape(who_line)}</p>
+        <p><strong>Zaman:</strong> {datetime.now().strftime('%d.%m.%Y %H:%M')}</p>
+        <p><strong>Yapılması gereken:</strong> {xml_escape(action)}</p>
+        <p style="color:#64748b;font-size:12px">Aday tarafında yalnızca nötr bir mesaj gösterildi; kota/API gibi bir ifade adaya iletilmedi.</p>
+        <hr><p style="color:#94a3b8;font-size:11px;white-space:pre-wrap">Teknik detay (hata kaydı #{log_id}):\n{xml_escape((technical_detail or '')[:1500])}</p>
+      </div></div>"""
+    try:
+        httpx.post("https://api.resend.com/emails",
+                   headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                   json={"from": FROM_EMAIL, "to": ERROR_ALERT_EMAILS, "subject": subject, "html": html},
+                   timeout=20.0).raise_for_status()
+        if log_id:
+            db = get_db()
+            db.execute("UPDATE error_logs SET email_sent_at=? WHERE id=?", (_now_ts(), log_id))
+            db.commit(); db.close()
+        print(f"[CRITICAL_EMAIL] gönderildi: {error_class} -> {ERROR_ALERT_EMAILS}")
+    except Exception as e:
+        print(f"UYARI (kritik e-posta gönderilemedi): {type(e).__name__}: {e}")
+
+def _handle_ai_failure(err: "AIError", context: Optional[dict], severity: str) -> "AIError":
+    """AIError'ı error_logs'a yazar, kritik e-postayı tetikler ve err'i geri döner
+    (route handler raise etsin diye). context: candidate_id/candidate_name/interview_id/level."""
+    ctx = context or {}
+    log_id = record_error_log(
+        provider=err.provider, step=err.step, error_class=err.error_class,
+        technical_detail=err.technical_detail, retry_count=err.retry_count, severity=severity,
+        candidate_id=ctx.get("candidate_id"), candidate_name=ctx.get("candidate_name"),
+        interview_id=ctx.get("interview_id"), level=ctx.get("level"),
+    )
+    if severity == "user":
+        maybe_send_critical_email(err.error_class, _human_error_message(err.provider, err.step, err.error_class),
+                                  err.technical_detail, ctx.get("candidate_name"), log_id)
+    return err
+
+def openai_call(method: str, url: str, *, json_body=None, files=None, data=None, headers_extra=None,
+                timeout: float = 60.0, step: str = "openai", context: Optional[dict] = None,
+                severity: str = "user", retry: bool = True) -> httpx.Response:
+    """TÜM OpenAI HTTP çağrıları buradan geçer. Loglar, sınıflandırır, uygun sınıflarda retry yapar.
+    Başarısızlıkta error_logs'a yazar + kritik e-postayı tetikler + AIError raise eder."""
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+    if json_body is not None:
+        headers["Content-Type"] = "application/json"
+    if headers_extra:
+        headers.update(headers_extra)
+    attempts = (len(_RETRY_BACKOFF) + 1) if retry else 1
+    last_err_class = "unknown"
+    last_detail = ""
+    for i in range(attempts):
+        t0 = time.time()
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.request(method, url, headers=headers, json=json_body, files=files, data=data)
+            dt = int((time.time() - t0) * 1000)
+        except (httpx.TimeoutException, httpx.RequestError) as e:
+            last_err_class = "network"
+            last_detail = f"{type(e).__name__}: {e} | {method} {url}"
+            print(f"[OPENAI_ERR] {step} network attempt={i+1}/{attempts}: {last_detail}")
+            if retry and i < attempts - 1:
+                time.sleep(_RETRY_BACKOFF[i]); continue
+            raise _handle_ai_failure(AIError("network", "openai", step, last_detail, retry_count=i,
+                                             http_status=504), context, severity)
+        if resp.status_code < 400:
+            print(f"[OPENAI_OK] {step} {resp.status_code} {dt}ms {method} {url}")
+            return resp
+        body_text = resp.text[:2000]
+        last_err_class = classify_ai_error("openai", resp.status_code, body_text)
+        last_detail = f"HTTP {resp.status_code} | {method} {url} | {body_text}"
+        print(f"[OPENAI_ERR] {step} {last_err_class} HTTP {resp.status_code} attempt={i+1}/{attempts}: {body_text[:300]}")
+        if retry and last_err_class in _RETRYABLE_CLASSES and i < attempts - 1:
+            time.sleep(_RETRY_BACKOFF[i]); continue
+        raise _handle_ai_failure(AIError(last_err_class, "openai", step, last_detail, retry_count=i,
+                                         http_status=_http_status_for_class(last_err_class)), context, severity)
+    # buraya normalde ulaşılmaz
+    raise _handle_ai_failure(AIError(last_err_class, "openai", step, last_detail, retry_count=attempts - 1,
+                                     http_status=_http_status_for_class(last_err_class)), context, severity)
+
+def ai_error_from_anthropic(e, step: str, context: Optional[dict], severity: str = "user") -> "AIError":
+    """anthropic SDK istisnasını sınıflandırıp AIError'a çevirir + loglar + kritik e-postayı tetikler."""
+    status = getattr(e, "status_code", None)
+    body = getattr(e, "body", None) or str(e)
+    cls = classify_ai_error("anthropic", status, body)
+    detail = f"anthropic {type(e).__name__} status={status}: {str(e)[:1500]}"
+    return _handle_ai_failure(AIError(cls, "anthropic", step, detail, http_status=_http_status_for_class(cls)),
+                              context, severity)
+
+def ai_http_exception(err: "AIError") -> HTTPException:
+    """AIError -> istemciye dönecek HTTPException. detail bir OBJE: {message, error_class, retryable}.
+    Ham kod/status/teknik metin ASLA girmez."""
+    return HTTPException(status_code=err.http_status, detail={
+        "message": err.user_message, "error_class": err.error_class, "retryable": err.retryable,
+    })
+
+# ============ DAVET SÜRESİ + TEŞEBBÜS DURUMU (Mülakat Denemeleri ekranı) ============
+def _invite_expiry() -> str:
+    """Yeni davet oluşturulurken invite_expires_at değeri — bugünden INVITE_EXPIRY_DAYS gün sonra."""
+    return (datetime.now() + timedelta(days=INVITE_EXPIRY_DAYS)).isoformat(timespec="seconds")
+
+_ATTEMPT_STATUS_LABELS = {
+    "sent": "Gönderildi",
+    "opened_not_started": "Açıldı, başlatılmadı",
+    "in_progress": "Devam ediyor",
+    "partial": "Yarıda kaldı",
+    "completed": "Tamamlandı",
+    "terminated": "İhlal ile sonlandı",
+    "tech_error": "Teknik hata",
+    "expired": "Süresi doldu",
+    "processing": "Rapor hazırlanıyor",
+}
+
+def derive_attempt_status(a: dict) -> dict:
+    """Bir aday/mülakat satırından tek-kaynak teşebbüs durumu türetir.
+    PDF, dashboard ve PersonDetail hepsi bunu kullanır. Girdi anahtarları get_person
+    attempts sorgusundan gelir (candidates + interviews join)."""
+    def g(k, default=None):
+        v = a.get(k) if isinstance(a, dict) else None
+        return v if v is not None else default
+
+    interview_completed = bool(g("interview_completed_at"))
+    proc = (g("processing_status") or "").lower()
+    terminated = bool(g("terminated_reason"))
+    partial = bool(g("partial"))
+    completion_pct = _safe_int(g("completion_pct"), 0)
+    tech_ref = g("technical_error_ref")
+    login_count = _safe_int(g("login_count"), 0)
+    start_count = _safe_int(g("interview_start_count"), 0)
+    expires_at = _parse_iso(g("invite_expires_at"))
+
+    status = "sent"
+    if interview_completed:
+        status = "terminated" if terminated else "completed"
+    elif proc in ("processing", "pending"):
+        status = "processing"
+    elif proc == "failed" or tech_ref:
+        status = "tech_error"
+    elif terminated:
+        status = "terminated"
+    elif partial or (0 < completion_pct < 100):
+        status = "partial"
+    elif start_count > 0:
+        status = "in_progress"
+    elif login_count > 0:
+        status = "opened_not_started"
+    elif expires_at and datetime.now() > expires_at:
+        status = "expired"
+
+    label = _ATTEMPT_STATUS_LABELS.get(status, status)
+    if status == "partial" and completion_pct:
+        label = f"Yarıda kaldı (%{completion_pct})"
+
+    return {
+        "attempt_status": status,
+        "attempt_status_label": label,
+        "login_count": login_count,
+        "interview_start_count": start_count,
+        "first_login_at": g("first_login_at"),
+        "last_login_at": g("last_login_at"),
+        "last_start_at": g("last_start_at"),
+        "invite_expires_at": g("invite_expires_at"),
+        "completion_pct": completion_pct or None,
+        "technical_error_ref": tech_ref,
+    }
 
 # ============ AI PROMPT ============
 def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_text: Optional[str], ai_note: Optional[str], interview_language: str = "tr", depth_tier: Optional[str] = "standart", level: int = 2) -> str:
@@ -2101,14 +2448,21 @@ def delete_position(position_id: int, payload=Depends(verify_admin), db=Depends(
 def get_candidates(payload=Depends(verify_admin), org_id: Optional[int] = None, db=Depends(db_dep)):
     scoped_org_id = get_org_id_for_admin(db, payload, org_id)
     rows = db.execute("""
-        SELECT c.*, i.score, i.recommendation, i.completed_at as interview_completed, i.total_input_tokens, i.total_output_tokens,
-               i.processing_status, i.processing_error
+        SELECT c.*, i.score, i.recommendation, i.completed_at as interview_completed,
+               i.completed_at as interview_completed_at, i.total_input_tokens, i.total_output_tokens,
+               i.processing_status, i.processing_error, i.started_at,
+               i.partial, i.completion_pct, i.technical_error_ref
         FROM candidates c
         LEFT JOIN interviews i ON c.id = i.candidate_id AND i.level = c.level
         WHERE c.org_id=?
         ORDER BY c.created_at DESC
     """, (scoped_org_id,)).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d.update(derive_attempt_status(d))
+        out.append(d)
+    return out
 
 @app.get("/api/admin/persons/{person_id}")
 def get_person(person_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
@@ -2121,17 +2475,25 @@ def get_person(person_id: int, payload=Depends(verify_admin), db=Depends(db_dep)
         SELECT c.id as candidate_id, c.name, c.email, c.phone, c.position, c.level, c.depth_tier,
                c.interview_language, c.report_language, c.education, c.university, c.department,
                c.experience_years, c.ai_note, c.status, c.invite_type,
-               c.is_archived, c.created_at, c.completed_at,
+               c.is_archived, c.created_at, c.completed_at, c.terminated_reason,
+               c.login_count, c.first_login_at, c.last_login_at,
+               c.interview_start_count, c.last_start_at, c.invite_expires_at,
                i.score, i.recommendation, i.completed_at as interview_completed_at,
-               i.processing_status, i.processing_error
+               i.processing_status, i.processing_error, i.started_at,
+               i.partial, i.completion_pct, i.technical_error_ref
         FROM candidates c
         LEFT JOIN interviews i ON i.candidate_id = c.id AND i.level = c.level
         WHERE c.person_id = ?
         ORDER BY c.created_at DESC
     """, (person_id,)).fetchall()
+    out = []
+    for r in attempts:
+        d = dict(r)
+        d.update(derive_attempt_status(d))
+        out.append(d)
     return {
         "person": dict(person),
-        "attempts": [dict(r) for r in attempts],
+        "attempts": out,
     }
 
 @app.get("/api/admin/persons/{person_id}/notes")
@@ -2199,7 +2561,8 @@ def evaluate_person(person_id: int, payload=Depends(verify_admin)):
         summary = response.content[0].text
         print(f"[AI_PROVIDER] level=cross-person provider=claude action=person_evaluate person_id={person_id}")
     except anthropic.APIError as e:
-        raise HTTPException(status_code=502, detail=f"Yapay zeka servisinde bir hata oluştu: {str(e)[:200]}")
+        err = ai_error_from_anthropic(e, "evaluate_person", {}, severity="user")
+        raise ai_http_exception(err)
     except Exception as e:
         print(f"HATA (evaluate_person, beklenmeyen): {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Değerlendirme oluşturulurken beklenmeyen bir hata oluştu.")
@@ -2213,6 +2576,59 @@ def evaluate_person(person_id: int, payload=Depends(verify_admin)):
     note = db.execute("SELECT * FROM person_notes WHERE person_id=? ORDER BY id DESC LIMIT 1", (person_id,)).fetchone()
     db.close()
     return dict(note)
+
+# ---- Hata Kayıtları (adaya gösterilen / arka plan AI hataları) ----
+@app.get("/api/admin/error-logs")
+def list_error_logs(payload=Depends(verify_admin), db=Depends(db_dep),
+                    date_from: Optional[str] = None, date_to: Optional[str] = None,
+                    candidate_id: Optional[int] = None, error_class: Optional[str] = None,
+                    resolved: Optional[str] = None, include_background: Optional[str] = None,
+                    limit: int = 200):
+    """Filtrelenebilir hata kaydı listesi + çözülmemiş kritik hata sayısı (kırmızı bandı besler).
+    Varsayılan: yalnızca severity='user' (arka plan hataları gizli). Teknik detay ayrı alanda döner."""
+    where = ["1=1"]
+    params: list = []
+    if not (include_background and str(include_background).lower() in ("1", "true", "yes")):
+        where.append("(severity IS NULL OR severity = 'user')")
+    if date_from:
+        where.append("created_at >= ?"); params.append(date_from)
+    if date_to:
+        where.append("created_at <= ?"); params.append(date_to)
+    if candidate_id is not None:
+        where.append("candidate_id = ?"); params.append(candidate_id)
+    if error_class:
+        where.append("error_class = ?"); params.append(error_class)
+    if resolved is not None and str(resolved) != "":
+        want = 1 if str(resolved).lower() in ("1", "true", "yes") else 0
+        where.append("resolved = ?"); params.append(want)
+    try:
+        lim = max(1, min(int(limit), 1000))
+    except Exception:
+        lim = 200
+    rows = db.execute(
+        f"SELECT * FROM error_logs WHERE {' AND '.join(where)} ORDER BY created_at DESC, id DESC LIMIT {lim}",
+        tuple(params)
+    ).fetchall()
+    crit = sorted(_CRITICAL_CLASSES)
+    crit_placeholders = ",".join("?" for _ in crit)
+    unresolved_critical = db.execute(
+        f"SELECT COUNT(*) AS n FROM error_logs WHERE resolved = 0 AND (severity IS NULL OR severity = 'user') "
+        f"AND error_class IN ({crit_placeholders})",
+        tuple(crit)
+    ).fetchone()["n"]
+    return {"logs": [dict(r) for r in rows], "unresolved_critical": unresolved_critical}
+
+@app.post("/api/admin/error-logs/{log_id}/resolve")
+def resolve_error_log(log_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
+    row = db.execute("SELECT id FROM error_logs WHERE id = ?", (log_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Hata kaydı bulunamadı")
+    db.execute(
+        "UPDATE error_logs SET resolved = 1, resolved_at = ?, resolved_by = ? WHERE id = ?",
+        (_now_ts(), (payload.get("username") or payload.get("email") or "admin"), log_id)
+    )
+    db.commit()
+    return {"message": "Hata kaydı çözüldü olarak işaretlendi", "id": log_id}
 
 # ---- CV Havuzu (bireysel/genel başvuranlar — org_id=NULL, kuruma özel değil) ----
 @app.get("/api/admin/cv-pool")
@@ -2259,6 +2675,7 @@ def invite_from_cv_pool(candidate_id: int, data: CvPoolInvite, payload=Depends(v
     else:
         db.execute(insert_sql, params)
         new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.execute("UPDATE candidates SET invite_expires_at = ? WHERE id = ?", (_invite_expiry(), new_id))
     db.commit()
     db.close()
 
@@ -2293,6 +2710,7 @@ def create_candidate(data: CandidateCreate, payload=Depends(verify_admin), db=De
     else:
         db.execute(insert_sql, params)
         candidate_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.execute("UPDATE candidates SET invite_expires_at = ? WHERE id = ?", (_invite_expiry(), candidate_id))
     db.commit()
     db.close()
 
@@ -2341,6 +2759,12 @@ def resend_invite(candidate_id: int, payload=Depends(verify_admin), db=Depends(d
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
     if not candidate:
         raise HTTPException(status_code=404, detail="Aday bulunamadı")
+    # Davet tekrar gönderildi: geçerlilik süresini bugünden itibaren yeniden uzat.
+    try:
+        db.execute("UPDATE candidates SET invite_expires_at = ? WHERE id = ?", (_invite_expiry(), candidate_id))
+        db.commit()
+    except Exception as e:
+        print(f"UYARI (resend_invite süre uzatma c={candidate_id}): {type(e).__name__}: {e}")
     db.close()  # yavaş e-posta gönderiminden önce bağlantıyı bilerek erken kapatıyoruz
 
     if not candidate["plain_password"]:
@@ -2563,6 +2987,7 @@ def create_new_attempt(candidate_id: int, data: NewAttemptRequest, payload=Depen
     else:
         db.execute(insert_sql, params)
         new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.execute("UPDATE candidates SET invite_expires_at = ? WHERE id = ?", (_invite_expiry(), new_id))
     db.commit()
     db.close()  # yavaş e-posta gönderiminden önce bağlantıyı bilerek erken kapat (create_candidate ile aynı)
 
@@ -2687,6 +3112,7 @@ async def general_apply(request: Request, db=Depends(db_dep)):
         INSERT INTO candidates (name, email, phone, education, university, department, experience_years, ai_note, position, username, password_hash, plain_password, invite_type, previous_candidate_id, cv_text, cv_filename, org_id, person_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'general', ?, ?, ?, NULL, ?)
     """, (name, normalize_email(email), phone, education, university, department, experience_years, ai_note, position, username, password_hash, password, previous_id, cv_text, cv_filename, person_id))
+    db.execute("UPDATE candidates SET invite_expires_at = ? WHERE username = ?", (_invite_expiry(), username))
     db.commit()
     db.close()  # yavaş e-posta gönderiminden önce bağlantıyı bilerek erken kapatıyoruz
 
@@ -2705,6 +3131,17 @@ def candidate_login(data: CandidateLogin, db=Depends(db_dep)):
         raise HTTPException(status_code=401, detail="Hatalı kullanıcı adı veya şifre")
     if candidate["status"] == "completed":
         raise HTTPException(status_code=400, detail="Mülakatınız tamamlanmış")
+
+    # Teşebbüs izleme (Mülakat Denemeleri ekranı): davet linki kaç kez açıldı / ilk-son giriş.
+    try:
+        db.execute(
+            "UPDATE candidates SET login_count = COALESCE(login_count, 0) + 1, "
+            "first_login_at = COALESCE(first_login_at, ?), last_login_at = ? WHERE id = ?",
+            (_now_ts(), _now_ts(), candidate["id"])
+        )
+        db.commit()
+    except Exception as e:
+        print(f"UYARI (candidate_login teşebbüs sayacı c={candidate['id']}): {type(e).__name__}: {e}")
 
     token = create_token({
         "role": "candidate", "candidate_id": candidate["id"],
@@ -2756,6 +3193,11 @@ def start_interview(payload=Depends(verify_token)):
         raise HTTPException(status_code=400, detail="Bu seviyedeki mülakatınız zaten tamamlanmış")
     if not existing:
         db.execute("INSERT INTO interviews (candidate_id, level, messages) VALUES (?, ?, '[]')", (candidate_id, level))
+        # Teşebbüs sayacı (Mülakat Denemeleri ekranı): yeni mülakat = bir başlatma.
+        db.execute(
+            "UPDATE candidates SET interview_start_count = COALESCE(interview_start_count, 0) + 1, last_start_at = ? WHERE id = ?",
+            (_now_ts(), candidate_id)
+        )
         db.commit()
     else:
         # Aday sayfayı yenilediyse aynı mülakatı tekrar başlatıp token yakma; mevcut ilk soruyu dön.
@@ -2785,7 +3227,10 @@ def start_interview(payload=Depends(verify_token)):
         return {"message": clean, "question_duration": duration, "total_duration_seconds": total_seconds, "intro_text": get_intro_text(payload["position"], level, candidate["interview_language"] or "tr")}
     except anthropic.APIError as e:
         print(f"HATA (Anthropic API - start_interview): {type(e).__name__}: {e}")
-        raise HTTPException(status_code=502, detail=f"Yapay zeka servisinde bir hata oluştu: {str(e)[:200]}")
+        err = ai_error_from_anthropic(e, "interview_start", {
+            "candidate_id": candidate_id, "candidate_name": payload.get("name"), "level": level,
+        }, severity="user")
+        raise ai_http_exception(err)
     except Exception as e:
         print(f"HATA (start_interview, beklenmeyen): {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Mülakat başlatılırken beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.")
@@ -2965,7 +3410,11 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         return {"message": clean, "completed": False, "question_duration": duration}
     except anthropic.APIError as e:
         print(f"HATA (Anthropic API - interview_chat): {type(e).__name__}: {e}")
-        raise HTTPException(status_code=502, detail=f"Yapay zeka servisinde bir hata oluştu: {str(e)[:200]}")
+        err = ai_error_from_anthropic(e, "interview_chat", {
+            "candidate_id": locals().get("effective_candidate_id"), "candidate_name": payload.get("name"),
+            "level": locals().get("level"),
+        }, severity="user")
+        raise ai_http_exception(err)
     except Exception as e:
         print(f"HATA (interview_chat, beklenmeyen): {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Cevap işlenirken beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.")
@@ -3187,19 +3636,17 @@ def analyze_frames(candidate_id: int, level: int) -> dict:
         content.append({"type": "image_url", "image_url": {"url": img, "detail": "low"}})
 
     try:
-        with httpx.Client(timeout=90) as client:
-            resp = client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                json={
-                    "model": MIMIC_ANALYSIS_MODEL,
-                    "messages": [{"role": "user", "content": content}],
-                    "max_tokens": 1200, "temperature": 0.2,
-                    "response_format": {"type": "json_object"},
-                },
-            )
-        if resp.status_code != 200:
-            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+        resp = openai_call(
+            "POST", "https://api.openai.com/v1/chat/completions",
+            json_body={
+                "model": MIMIC_ANALYSIS_MODEL,
+                "messages": [{"role": "user", "content": content}],
+                "max_tokens": 1200, "temperature": 0.2,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=90.0, step="mimic_analysis", severity="background", retry=False,
+            context={"candidate_id": candidate_id, "level": level},
+        )
         result = resp.json()
         record_openai_chat_usage(candidate_id, level, MIMIC_ANALYSIS_MODEL, "mimic_frame_analysis", result)
         parsed = json.loads(result["choices"][0]["message"]["content"])
@@ -3308,15 +3755,13 @@ Raporu YENİDEN YAZMA. Sadece şunları Türkçe, kısa ve madde madde ver:
 === MODALİTE KANITLARI ===
 {modality_block or 'Yok'}"""
     try:
-        with httpx.Client(timeout=60) as client:
-            resp = client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                json={"model": OPENAI_REVIEWER_MODEL, "messages": [{"role": "user", "content": prompt}],
-                      "max_tokens": 1000, "temperature": 0.1},
-            )
-        if resp.status_code != 200:
-            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+        resp = openai_call(
+            "POST", "https://api.openai.com/v1/chat/completions",
+            json_body={"model": OPENAI_REVIEWER_MODEL, "messages": [{"role": "user", "content": prompt}],
+                       "max_tokens": 1000, "temperature": 0.1},
+            timeout=60.0, step="report_reviewer", severity="background", retry=False,
+            context={"candidate_id": candidate_id, "level": level},
+        )
         result = resp.json()
         record_openai_chat_usage(candidate_id, level, OPENAI_REVIEWER_MODEL, "report_reviewer", result)
         return (result["choices"][0]["message"]["content"] or "").strip(), "ok", ""
@@ -3420,14 +3865,12 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
                 reply = exit_response.content[0].text
                 terminated_reason = terminated_reason or "Aday talebiyle erken sonlandırıldı"
         elif provider == "openai":
-            with httpx.Client(timeout=60) as client:
-                resp = client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                    json={"model": model or OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": primary_payload}], "max_tokens": 2600, "temperature": 0.1}
-                )
-            if resp.status_code != 200:
-                raise RuntimeError(f"OpenAI rapor üretimi HTTP {resp.status_code}: {resp.text[:400]}")
+            resp = openai_call(
+                "POST", "https://api.openai.com/v1/chat/completions",
+                json_body={"model": model or OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": primary_payload}], "max_tokens": 2600, "temperature": 0.1},
+                timeout=60.0, step="report_generation", severity="user", retry=True,
+                context={"candidate_id": candidate_id, "level": level},
+            )
             result = resp.json()
             record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "l2_report_generation_deferred", result)
             reply = result["choices"][0]["message"]["content"]
@@ -3458,6 +3901,14 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
 
         finalize_interview(candidate_id, reply, terminated_reason=terminated_reason, level=level)
         print(f"[PROCESSING_DONE] candidate_id={candidate_id} level={level}")
+    except AIError as e:
+        # openai_call zaten error_logs'a yazdı + kritik e-postayı tetikledi.
+        print(f"HATA (run_deferred_finish_job AIError c={candidate_id} L{level}): {e.error_class}")
+        _mark_finish_failed(candidate_id, level, f"AI hatası ({e.error_class})")
+    except anthropic.APIError as e:
+        ai_error_from_anthropic(e, "report_generation", {"candidate_id": candidate_id, "level": level}, severity="user")
+        print(f"HATA (run_deferred_finish_job anthropic c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        _mark_finish_failed(candidate_id, level, f"AI (Claude) hatası: {type(e).__name__}")
     except Exception as e:
         print(f"HATA (run_deferred_finish_job c={candidate_id} L{level}): {type(e).__name__}: {e}")
         _mark_finish_failed(candidate_id, level, f"{type(e).__name__}: {e}")
@@ -3751,23 +4202,24 @@ async def voice_transcribe(file: UploadFile = File(...), payload=Depends(verify_
         audio_bytes = await file.read()
         if len(audio_bytes) > 15_000_000:
             raise HTTPException(status_code=400, detail="Ses kaydı çok büyük")
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/audio/transcriptions",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                files={"file": (file.filename or "audio.webm", audio_bytes, file.content_type or "audio/webm")},
-                data={"model": "whisper-1", "language": lang}
-            )
-        if resp.status_code != 200:
-            print(f"HATA (OpenAI Whisper transkripsiyon): {resp.status_code} {resp.text[:300]}")
-            raise HTTPException(status_code=502, detail="Ses metne çevrilemedi (Whisper hatası).")
+        resp = await asyncio.to_thread(
+            openai_call, "POST", "https://api.openai.com/v1/audio/transcriptions",
+            files={"file": (file.filename or "audio.webm", audio_bytes, file.content_type or "audio/webm")},
+            data={"model": "whisper-1", "language": lang},
+            timeout=30.0, step="voice_transcribe", severity="user", retry=True,
+            context={"candidate_id": candidate_id},
+        )
         result = resp.json()
         return {"text": (result.get("text") or "").strip()}
+    except AIError as e:
+        raise ai_http_exception(e)
     except HTTPException:
         raise
     except Exception as e:
         print(f"HATA (voice_transcribe, beklenmeyen): {type(e).__name__}: {e}")
-        raise HTTPException(status_code=500, detail="Ses işlenirken beklenmeyen bir hata oluştu.")
+        raise HTTPException(status_code=500, detail={
+            "message": AI_ERROR_USER_MESSAGES["unknown"], "error_class": "unknown", "retryable": False,
+        })
 
 @app.post("/api/candidate/voice-speak")
 async def voice_speak(data: VoiceSpeakRequest, payload=Depends(verify_token)):
@@ -3780,21 +4232,22 @@ async def voice_speak(data: VoiceSpeakRequest, payload=Depends(verify_token)):
 
     voice = OPENAI_TTS_VOICE_BY_LANG.get(data.language or "tr", "alloy")
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/audio/speech",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                json={"model": "tts-1", "voice": voice, "input": data.text[:3000], "response_format": "mp3"}
-            )
-        if resp.status_code != 200:
-            print(f"HATA (OpenAI TTS): {resp.status_code} {resp.text[:300]}")
-            raise HTTPException(status_code=502, detail="Metin sese çevrilemedi (TTS hatası).")
+        resp = await asyncio.to_thread(
+            openai_call, "POST", "https://api.openai.com/v1/audio/speech",
+            json_body={"model": "tts-1", "voice": voice, "input": data.text[:3000], "response_format": "mp3"},
+            timeout=30.0, step="voice_speak", severity="user", retry=True,
+            context={"candidate_id": payload.get("candidate_id")},
+        )
         return StreamingResponse(io.BytesIO(resp.content), media_type="audio/mpeg")
+    except AIError as e:
+        raise ai_http_exception(e)
     except HTTPException:
         raise
     except Exception as e:
         print(f"HATA (voice_speak, beklenmeyen): {type(e).__name__}: {e}")
-        raise HTTPException(status_code=500, detail="Ses üretilirken beklenmeyen bir hata oluştu.")
+        raise HTTPException(status_code=500, detail={
+            "message": AI_ERROR_USER_MESSAGES["unknown"], "error_class": "unknown", "retryable": False,
+        })
 
 # ---- L2: OpenAI Realtime (canlı sesli mülakat) ----
 # GÖREV DOKÜMANI KURALI: L2'de Claude KESİNLİKLE kullanılmaz. Sadece OpenAI Realtime
@@ -3863,11 +4316,18 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "INSERT INTO interviews (candidate_id, level, messages, depth_tier) VALUES (?, ?, '[]', ?)",
             (candidate_id, candidate_level, depth_tier)
         )
+        # Teşebbüs sayacı: yeni oturum = bir başlatma denemesi (Mülakat Denemeleri ekranı).
+        db2.execute(
+            "UPDATE candidates SET interview_start_count = COALESCE(interview_start_count, 0) + 1, last_start_at = ? WHERE id = ?",
+            (_now_ts(), candidate_id)
+        )
         db2.commit()
     elif not existing_interview["completed_at"]:
         # Satır zaten var ama tamamlanmamış (örn. sayfa yenilendi, yeniden bağlanıldı) —
         # started_at'i EZME; ilk gerçek başlangıç zaten kayıtlı kalsın.
-        pass
+        # Yine de yeniden bağlanma denemesinin zamanını izle.
+        db2.execute("UPDATE candidates SET last_start_at = ? WHERE id = ?", (_now_ts(), candidate_id))
+        db2.commit()
     db2.close()
 
     pos_for_criteria = get_position(candidate["position"]) or {"criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
@@ -3948,16 +4408,13 @@ async def create_realtime_session(payload=Depends(verify_token)):
         }
     }
 
+    err_ctx = {"candidate_id": candidate_id, "candidate_name": candidate["name"], "level": candidate_level}
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/realtime/client_secrets",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                json=session_body
-            )
-        if resp.status_code != 200:
-            print(f"HATA (OpenAI Realtime session): {resp.status_code} {resp.text[:400]}")
-            raise HTTPException(status_code=502, detail="Sesli mülakat oturumu oluşturulamadı (OpenAI Realtime hatası).")
+        resp = await asyncio.to_thread(
+            openai_call, "POST", "https://api.openai.com/v1/realtime/client_secrets",
+            json_body=session_body, timeout=20.0, step="realtime_session",
+            context=err_ctx, severity="user", retry=True,
+        )
         result = resp.json()
         log_ai_provider(candidate_level, "openai", "realtime_session")
         return {
@@ -3973,11 +4430,15 @@ async def create_realtime_session(payload=Depends(verify_token)):
             # FAZ D: mimik kare örneklemesi bu planlanan süreye eşit dağıtılır (aralik = target_seconds/24).
             "target_seconds": depth_cfg["minutes"] * 60,
         }
+    except AIError as e:
+        raise ai_http_exception(e)
     except HTTPException:
         raise
     except Exception as e:
         print(f"HATA (create_realtime_session, beklenmeyen): {type(e).__name__}: {e}")
-        raise HTTPException(status_code=500, detail="Sesli mülakat oturumu başlatılırken beklenmeyen bir hata oluştu.")
+        raise HTTPException(status_code=500, detail={
+            "message": AI_ERROR_USER_MESSAGES["unknown"], "error_class": "unknown", "retryable": False,
+        })
 
 
 def build_l2_short_report(candidate_name: str, position_name: str, reason: str) -> str:
