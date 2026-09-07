@@ -1978,10 +1978,18 @@ def build_criteria_text(criteria: list) -> str:
         lines.append(f"- {c['name']} ({c['weight']} puan): {c.get('desc', '')}")
     return "\n".join(lines)
 
+def build_criteria_table_filled(criteria: list, evidence_header: str = "Kanıt ve Analiz") -> str:
+    """KALEM 4 — DETERMİNİSTİK kriter tablosu: satırlar pozisyondan gelir, model AYNEN doldurur.
+    Model satır ekleyemez/çıkaramaz/yeniden adlandıramaz. Payda (tavan) sabit."""
+    lines = [f"| Kriter | Puan | {evidence_header} |", "|--------|------|-----------------|"]
+    for c in criteria:
+        lines.append(f"| {c['name']} | __/{c['weight']}  (veya: Değerlendirilmedi — <tek cümle gerekçe>) | <kanıt → analiz → sonuç> |")
+    return "\n".join(lines)
+
 def build_criteria_table_template(criteria: list) -> str:
     lines = ["| Kriter | Puan | Değerlendirme |", "|--------|------|---------------|"]
     for c in criteria:
-        lines.append(f"| {c['name']} | XX/{c['weight']} | ... |")
+        lines.append(f"| {c['name']} | __/{c['weight']}  (veya: Değerlendirilmedi — <gerekçe>) | ... |")
     return "\n".join(lines)
 
 # ============ RAPOR GÖVDESİ — TEK KAYNAK (Faz C) ============
@@ -2012,7 +2020,7 @@ REPORT_BODY_SECTIONS = [
     ("puanlama_kapsami", {2, 3},  "**Puanlama Kapsamı:** (hangi kriterler değerlendirildi, hangileri değerlendirilmedi; normalize yöntemini kısa açıkla)"),
     ("_blank3",        {1, 2, 3}, ""),
     ("kriter_tablosu_l13", {1},   "{table_template}"),
-    ("kriter_tablosu_l2", {2, 3}, "| Kriter | Puan | Kanıt ve Analiz |\n|--------|------|-----------------|\n(her kriteri doldur; veri yoksa puan yerine “Değerlendirilmedi” yaz)"),
+    ("kriter_tablosu_l2", {2, 3}, "{criteria_table_filled}\n(YUKARIDAKİ TABLOYU AYNEN KULLAN: satır ekleme/çıkarma/yeniden adlandırma YOK. Her satırda ya `<puan>/<tavan>` ya `Değerlendirilmedi — <tek cümle gerekçe>`. Tavanı AŞMA.)"),
     ("_blank4",        {1, 2, 3}, ""),
     ("analitik_dusunme", {2, 3},  "**Analitik Düşünme ve Muhakeme:** (soruyu kavrama, problemi parçalama, neden-sonuç, alternatif kıyaslama, ölçüm/veri kullanımı; somut kanıtlarla)"),
     ("problem_cozme",  {2, 3},    "**Problem Çözme ve Karar Verme Yaklaşımı:** (izlediği yöntem, seçenekler, riskler, sonuç takibi)"),
@@ -2240,6 +2248,7 @@ GENEL:
 - "Serbest Gözlemler" bölümüne: (a) DAVRANIŞ VE TUTUM — agresiflik, sabırsızlık, kabalık, kaçamaklık gözlendiyse dakika + adayın sözüyle SOMUT yaz (davranış tek başına puan düşürmez); (b) POZİSYON UYUMU — aday alanının farklı olduğunu belirttiyse bunu yaz ve değerlendirmenin adayın gerçek alanına göre yapıldığını not et.
 - Bir kriter için yeterli veri toplanamadıysa (yeniden sorulmasına rağmen yanıtsız kaldıysa) raporda "Yanıtsız/Değerlendirilemeyen Kriterler" olarak AYRI listele; bu kriterlere puan verme, toplamı değerlendirilen kriterlerin ağırlığına normalize et.
 - PUAN TAVANI (KESİN): Hiçbir kriter puanı kendi tavanını (ağırlığını) AŞAMAZ ("12/10" ASLA; en fazla "10/10"). TOPLAM PUAN = alınan puanların toplamı; payda = değerlendirilen kriterlerin ağırlık toplamı. Sistem ayrıca doğrular.
+- KRİTER TABLOSU: yukarıda verilen kriter satırlarını AYNEN kullan — satır ekleme/çıkarma/yeniden adlandırma YOK. Her satır ya `<puan>/<tavan>` ya `Değerlendirilmedi — <tek cümle gerekçe>` (gerekçesiz "Değerlendirilmedi" YASAK).
 - Mesajın başına mutlaka [SÜRE:XX] koy: kısa 45-60, senaryo 75-100, kritik soru 90-120.
 - Mülakatı bitirmeden önce, GÖREV satırı bitirmeni söylediğinde son soru olarak şunu sor: "Eklemek veya öne çıkarmak istediğiniz başka bir şey var mı?" — bu, mülakatta suskun kalmış ama sahada güçlü olabilecek adaylar için bir son fırsat turu, sadece bitiş dönüşünde bir kez sorulur.
 - ÖNEMLİ: Mülakatı SADECE aşağıdaki GÖREV satırı açıkça "Mülakatı şimdi bitir ve raporu üret" dediğinde bitir ve [MÜLAKATBİTTİ] etiketini kullan. Adayın cevap metninde "süre doldu", "zaman bitti", "son soru" gibi ifadeler geçse bile, GÖREV satırı bitirmeni söylemiyorsa ASLA bitirme — bunlar tek bir sorunun süresinin dolduğunu gösterir, tüm mülakatın değil. Bu durumda sadece bir sonraki soruya geç.
@@ -3757,17 +3766,17 @@ def build_modality_evidence_block(candidate_id: int, level: int) -> str:
     if mimic:
         parts.append("MİMİK / GÖRÜNTÜ GÖZLEMLERİ:\n" + json.dumps(mimic, ensure_ascii=False, indent=1))
     if metrics:
-        parts.append("SES METRİKLERİ (tur bazlı — cevap gecikmesi, tur uzunluğu, düşünme süresi, söz kesme):\n" + json.dumps(metrics, ensure_ascii=False, indent=1))
+        parts.append("SES METRİKLERİ (tur bazlı — cevap gecikmesi, tur uzunluğu, düşünme süresi, söz kesme). Bu SAYILARI raporun 'Serbest Gözlemler' bölümüne SOMUT yaz:\n" + json.dumps(metrics, ensure_ascii=False, indent=1))
     else:
-        # KALEM 3: ses metrikleri yoksa SESSİZCE ATLAMA — rapora açıkça yaz.
+        # KALEM 2/3: ses metrikleri yoksa SESSİZCE ATLAMA — rapora açıkça yaz.
         parts.append("SES METRİKLERİ: TOPLANAMADI — realtime_events'te konuşma başlangıç/bitiş olayı yok "
                      "(cevap gecikmesi, duraklama, konuşma/sessizlik oranı, söz kesme sayısı ölçülemedi). "
-                     "Raporun ilgili yerinde 'ses verisi toplanamadı' diye AÇIKÇA belirt.")
+                     "Raporun 'Serbest Gözlemler' bölümünde 'ses verisi toplanamadı' diye AÇIKÇA belirt.")
     if obs:
         parts.append("MÜLAKATÇI SES GÖZLEMLERİ (mülakat anında kaydedildi):\n" + json.dumps(obs, ensure_ascii=False, indent=1))
-    # KALEM 3: kamera karesi sayısı + zaman dağılımı (deterministik) her zaman eklenir.
+    # KALEM 1/3: kamera karesi kapsamı (İKİ set ayrı) — deterministik, her zaman eklenir.
     _cov = compute_modality_coverage(candidate_id, level)
-    parts.append("KAMERA KARESİ KAPSAMI (deterministik):\n" + json.dumps(_cov, ensure_ascii=False))
+    parts.append("KAMERA KARESİ KAPSAMI (deterministik — 'dogrulama'=panel/PDF galerisi, 'mimik'=yalnız AI):\n" + json.dumps(_cov, ensure_ascii=False))
     if not parts:
         return ""
     return ("=== MODALİTE KANITLARI (DESTEKLEYİCİ) ===\n"
@@ -3802,7 +3811,7 @@ def run_report_reviewer(candidate_id: int, level: int, transcript_text: str, dra
 Raporu YENİDEN YAZMA. Sadece şunları Türkçe, kısa ve madde madde ver:
 1. ABARTILI / KANITSIZ İDDİALAR: taslakta transkriptle desteklenmeyen veya aşırı iddialı cümleler (kısa alıntıyla).
 2. EKSİK KANIT: transkriptte olan ama taslağın atladığı önemli sinyaller.
-3. PUAN KALİBRASYONU: taslağın toplam puanı kanıtlara göre yüksek mi / düşük mü / uygun mu — tek cümle gerekçe.
+3. PUAN KALİBRASYONU: Taslaktaki "TOPLAM PUAN: N/100" ZATEN sistem tarafından NORMALİZE EDİLMİŞ değerdir (payda 100). Parantezdeki "(ham puan: A/B)" yalnızca değerlendirilen kriterlerin ham toplamıdır — B'yi 100 SANMA, kalibrasyonu %N üzerinden yap. N kanıtlara göre yüksek mi / düşük mü / uygun mu — tek cümle gerekçe.
 4. GÜVEN DÜZEYİ: (yüksek / orta / düşük) + kısa neden.
 
 İLKE: Kanıt yoksa ne lehte ne aleyhte varsayım yapma. Modalite kanıtları (mimik/ses) puanı DEĞİŞTİRMEZ; yalnızca destekleyici. Belirgin bir sorun yoksa yalnızca "Belirgin bir görüş ayrılığı yok." yaz.
@@ -3940,6 +3949,28 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         else:
             raise RuntimeError(f"Bilinmeyen pending_finish_provider: {provider!r}")
 
+        # ═══ KALEM 5 — puanlama doğrulaması DENETÇİDEN ÖNCE ═══
+        # Denetçi (run_report_reviewer) puan kalibrasyonunu değerlendiriyor; DÜZELTİLMİŞ raporu
+        # görmeli (ham "65/100" değil, normalize "%72/100  (ham puan: 65/90)"). finalize_interview
+        # aynı fonksiyonu tekrar çağırır ama _SCORE_FIXED_MARK guard'ıyla no-op olur.
+        try:
+            dbp = get_db()
+            _cprow = dbp.execute("SELECT position FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+            dbp.close()
+            _pcrit = ((get_position(_cprow["position"]) or {}).get("criteria") or []) if _cprow else []
+            if "---RAPOR---" in reply and _pcrit:
+                m_rb = re.search(r'---RAPOR---([\s\S]*?)(?:---RAPORSON---|---STANDARTCV---|\Z)', reply)
+                if m_rb:
+                    fb, fscore, fwarn = recompute_and_fix_score(m_rb.group(1), _pcrit, extract_score(reply))
+                    if fb != m_rb.group(1):
+                        reply = reply.replace(m_rb.group(1), fb, 1)
+                    if fwarn:
+                        record_system_decision(candidate_id, level, "puanlama_duzeltildi",
+                                               "Rapor sonrası sunucu puanlama doğrulaması (denetçiden önce) düzeltme yaptı.",
+                                               {"final_score": fscore}, warnings=fwarn)
+        except Exception as e:
+            print(f"UYARI (KALEM5 pre-review score fix c={candidate_id}): {type(e).__name__}: {e}")
+
         # FAZ D — MUHALİF DENETÇİ (ikinci model): raporu yeniden yazmaz; görüş ayrılıkları +
         # puan kalibrasyonu + güven düzeyi döner. Deterministik olarak rapora ayrı bölüm eklenir.
         # En iyi çaba: patlarsa rapor denetçisiz tamamlanır. Denetçi HER ZAMAN OpenAI (L2'de bile
@@ -4043,10 +4074,11 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         _crit = (_pos or {}).get("criteria") or []
         if report_match and _crit:
             _fixed_body, _final_score, _score_warnings = recompute_and_fix_score(report_match.group(1), _crit, score)
-            if _score_warnings:
+            if _fixed_body != report_match.group(1):
                 reply = reply.replace(report_match.group(1), _fixed_body, 1)
                 report_match = re.search(r'---RAPOR---([\s\S]*?)(?:---RAPORSON---|---STANDARTCV---|\Z)', reply)
-                score = _final_score
+            if _final_score is not None:
+                score = _final_score  # KALEM 5: denetçiden önce düzeltilmişse guard'la no-op, yine normalize skoru döner
     except Exception as e:
         print(f"UYARI (finalize_interview puanlama doğrulaması c={candidate_id}): {type(e).__name__}: {e}")
 
@@ -4759,18 +4791,20 @@ def record_system_decision(candidate_id: int, level: int, decision: str, reason:
         print(f"UYARI (record_system_decision c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
 # ═══ KALEM 1 — Whisper halüsinasyon filtresi (SUNUCU tarafı; frontend RealtimeInterview.js:isLikelyHallucination karşılığı) ═══
+# frontend RealtimeInterview.js:_HALLUCINATION_PHRASES ile AYNI liste tutulmalı.
 _HALLUCINATION_PHRASES = {
     "bye", "bye bye", "bye-bye", "goodbye", "good bye", "thank you", "thanks", "thank you.",
     "thank you very much", "thank you so much", "you", "you.", "mm-hmm", "mmhmm", "mm hmm",
     "mhm", "uh-huh", "okay", "ok", "o.k.", "switch", "switch.", "uh", "um", "hmm", "hm",
-    "yeah", "yep", "see you", "see you later", "thanks for watching", "please subscribe",
-    "amara.org", "altyazı m.k.", "i'm sorry", "sorry", "the end", "okay.", "so",
+    "yeah", "yep", "yes", "see you", "see you later", "thanks for watching", "please subscribe",
+    "amara.org", "altyazı m.k.", "i'm sorry", "sorry", "the end", "okay.", "so", "right",
 }
 
 def is_likely_hallucination(text: str, lang: str = "tr") -> bool:
-    """Sesli mülakatta sessizlik/gürültü anlarında transkripsiyon modelinin uydurduğu kısa
-    İngilizce dolgu ("thank you", "bye", "you", "switch"). TR oturumunda: bilinen kalıp,
-    <2 harf, ya da ASCII-only <=2 kelime & <=6 harf → halüsinasyon sayılır."""
+    """Sesli mülakatta sessizlik/gürültü anlarında transkripsiyon modelinin uydurduğu İngilizce
+    dolgu ("thank you", "bye", "you", "switch"). TR oturumunda: bilinen kalıp; <2 harf; ASCII-only
+    <=2 kelime & <=6 harf; VEYA cümle bilinen kalıpların TEKRARINDAN ibaretse ("thank you. thank
+    you.", "bye bye bye") — kelime sayısına bakılmaksızın → halüsinasyon."""
     raw = (text or "").strip()
     if not raw:
         return True
@@ -4787,6 +4821,20 @@ def is_likely_hallucination(text: str, lang: str = "tr") -> bool:
     ascii_only = re.fullmatch(r"[a-z0-9\s'.\-]+", norm) is not None
     if ascii_only and len(words) <= 2 and len(letters) <= 6:
         return True
+    # KALEM 3: cümle, bilinen halüsinasyon kalıplarının tekrarından ibaret mi?
+    # Noktalama ile parçalara ayır; her parça (boşluk normalize) bilinen bir kalıpsa → halüsinasyon.
+    if ascii_only:
+        chunks = [c.strip() for c in re.split(r"[.!?,;]+", norm) if c.strip()]
+        if chunks and all(re.sub(r"\s+", " ", c) in _HALLUCINATION_PHRASES for c in chunks):
+            return True
+        # Aynı kısa kalıbın ardışık tekrarı (nokta olmadan): "bye bye bye", "thank you thank you"
+        for ph in _HALLUCINATION_PHRASES:
+            if " " not in ph and len(ph) >= 2:
+                if re.fullmatch(rf"(?:{re.escape(ph)}\s*){{2,}}", norm):
+                    return True
+        for ph in ("thank you", "see you", "bye bye"):
+            if re.fullmatch(rf"(?:{re.escape(ph)}\s*){{2,}}", norm):
+                return True
     return False
 
 def filter_transcript_hallucinations(transcript_text: str, lang: str = "tr"):
@@ -4833,15 +4881,21 @@ def _name_score(crit_name: str, cell_name: str) -> float:
         jacc += 0.15
     return min(1.0, jacc)
 
+_SCORE_FIXED_MARK = "(ham puan:"
+
 def recompute_and_fix_score(report_body: str, position_criteria: list, model_score):
     """Sunucu tarafı puanlama doğrulaması:
       - hiçbir kriter puanı kendi tavanını (pozisyon ağırlığı) aşamaz → aşan tavana sabitlenir
       - skor = (alınan / DEĞERLENDİRİLEN kriterlerin tavanı) * 100 ile gerçekten normalize edilir
-      - rapordaki 'TOPLAM PUAN' satırı DB'deki score ile aynı sayı olur
-    Dönüş: (duzeltilmis_rapor, final_score, warnings[])"""
+      - 'TOPLAM PUAN' satırı NORMALİZE değeri gösterir; parantezde ham puan (extract_score bunu okur)
+      - "Değerlendirilmedi" gerekçesiz ise uyarı
+    Dönüş: (duzeltilmis_rapor, final_score, warnings[]). İdempotent: bir kez düzeltilmişse aynen döner."""
     warnings = []
     if not report_body or not position_criteria:
         return report_body, model_score, warnings
+    if _SCORE_FIXED_MARK in report_body:
+        # zaten doğrulanmış (KALEM 5: denetçiden önce bir kez uygulanıyor) — çift işleme yok
+        return report_body, extract_score(report_body), warnings
     lines = report_body.splitlines()
     _skip = {"kriter", "criterion", "puan", "score", "değerlendirme", "kanıt ve analiz", "kanit ve analiz"}
     # aday tablo satırları: >=2 '|', ilk hücre anlamlı (ayraç/başlık değil)
@@ -4861,37 +4915,63 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
     used = set()
     awarded_sum = 0
     evaluated_cap = 0
+    evaluated_names, skipped = [], []
     for c in position_criteria:
         cap = _safe_int(c.get("weight"))
         if cap <= 0:
             continue
+        cname = c.get("name", "")
         best, best_s = None, 0.0
         for r in rows:
             if r["line_idx"] in used:
                 continue
-            s = _name_score(c.get("name", ""), r["name"])
+            s = _name_score(cname, r["name"])
             if s > best_s:
                 best, best_s = r, s
         if best is None or best_s < 0.34:
-            warnings.append(f"'{c.get('name')}' kriteri rapor tablosunda bulunamadı — değerlendirilmemiş sayıldı.")
+            warnings.append(f"'{cname}' kriteri rapor tablosunda bulunamadı — değerlendirilmemiş sayıldı.")
+            skipped.append({"kriter": cname, "gerekce": "rapor tablosunda satır yok"})
             continue
         used.add(best["line_idx"])
         puan_cell = best["cell"]
-        if re.search(r"değerlendir[il]?me", puan_cell, re.IGNORECASE):
-            continue  # evaluated=False
-        mm = re.search(r"(\d+)\s*[/／]\s*(\d+)", puan_cell) or re.search(r"^\s*(\d+)\s*$", puan_cell)
+        cell_lc = puan_cell.lower()
+        # "değerlendir..." / "n/a" / "yok" → değerlendirilmemiş (KALEM 4: gerekçe zorunlu). Bu kontrol
+        # sayı aramadan ÖNCE — aksi halde "IFRS 16 sorusuna girilmedi" içindeki 16 puan sanılır.
+        _mm_frac = re.search(r"(?<![\d/／])(\d+)\s*[/／]\s*(\d+)(?![\d/／])", puan_cell)
+        _mm_lead = re.match(r"\s*[*_`]*\s*(\d+)\s*(?:puan|pts?|/\s*\d+)?\s*[*_`]*\s*$", puan_cell, re.IGNORECASE)
+        is_skip_marker = ("değerlendir" in cell_lc) or bool(re.search(r"\b(n/?a|yok)\b", cell_lc)) or puan_cell.strip() in ("-", "—", "", "–")
+        if is_skip_marker and not _mm_frac and not _mm_lead:
+            gm = re.search(r"değerlendir\w*\s*[—:\-–]\s*(.+)$", puan_cell, re.IGNORECASE)
+            reason = (gm.group(1).strip() if gm else "")
+            if not reason and "değerlendir" in cell_lc:
+                warnings.append(f"'{cname}' GEREKÇESİZ 'Değerlendirilmedi' işaretlendi.")
+            skipped.append({"kriter": cname, "gerekce": reason or "(gerekçe yazılmamış)"})
+            continue
+        mm = _mm_frac or _mm_lead
         if not mm:
-            continue  # sayı yok → değerlendirilmemiş
+            warnings.append(f"'{cname}' puan hücresi belirsiz (ne net sayı ne 'Değerlendirilmedi'): {puan_cell!r} — değerlendirilmemiş sayıldı.")
+            skipped.append({"kriter": cname, "gerekce": "puan hücresi belirsiz"})
+            continue
         awarded = _safe_int(mm.group(1))
+        written_cap = _safe_int(mm.group(2)) if (mm.re.groups >= 2 and mm.group(2)) else None
         if awarded > cap:
-            warnings.append(f"'{c.get('name')}' puanı {awarded} kendi tavanını ({cap}) aşıyordu → {cap}'e sabitlendi.")
+            warnings.append(f"'{cname}' puanı {awarded} kendi tavanını ({cap}) aşıyordu → {cap}'e sabitlendi.")
             awarded = cap
-            li = best["line_idx"]
-            lines[li] = re.sub(r"(\d+)\s*[/／]\s*\d+", f"{cap}/{cap}", lines[li], count=1) \
-                if "/" in puan_cell else lines[li].replace(puan_cell, f"{cap}/{cap}", 1)
+        elif written_cap is not None and written_cap != cap:
+            warnings.append(f"'{cname}' payda {written_cap} yazılmış, gerçek tavan {cap} → düzeltildi.")
+        # tablo hücresini HER ZAMAN gerçek tavanla yaz (payda tutarlı olsun)
+        li = best["line_idx"]
+        _cell_new = f"{awarded}/{cap}"
+        if "/" in puan_cell:
+            lines[li] = re.sub(r"\d+\s*[/／]\s*\d+", _cell_new, lines[li], count=1)
+        else:
+            lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {_cell_new} |", 1)
         awarded_sum += awarded
         evaluated_cap += cap
+        evaluated_names.append(cname)
 
+    if skipped:
+        warnings.append("Değerlendirilmeyen kriterler: " + "; ".join(f"{s['kriter']} ({s['gerekce']})" for s in skipped))
     if evaluated_cap <= 0:
         return "\n".join(lines), model_score, warnings
     normalized = max(0, min(100, round(awarded_sum / evaluated_cap * 100)))
@@ -4899,66 +4979,125 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
     body = "\n".join(lines)
     m_total = re.search(r"(\*\*\s*TOPLAM\s+PUAN\s*[:：]\s*)(\d+)\s*/\s*(\d+)(\s*\*\*)", body, re.IGNORECASE)
     model_total = _safe_int(m_total.group(2)) if m_total else _safe_int(model_score)
-    if warnings or (m_total and abs(model_total - normalized) > 1) or (m_total and _safe_int(m_total.group(3)) != evaluated_cap):
-        repl = f"\\g<1>{awarded_sum}/{evaluated_cap}\\g<4>  (sistem normalize: %{normalized})"
+    # TOPLAM PUAN satırı: NORMALİZE değeri /100 olarak (extract_score bunu okur) + parantezde ham.
+    new_total_line = f"**TOPLAM PUAN: {normalized}/100**  (ham puan: {awarded_sum}/{evaluated_cap}; değerlendirilen {len(evaluated_names)}/{len(position_criteria)} kriter)"
+    need_fix = bool(warnings) or (m_total and (abs(model_total - normalized) > 1 or _safe_int(m_total.group(3)) != 100))
+    if need_fix or not m_total:
         if m_total:
-            body = re.sub(r"(\*\*\s*TOPLAM\s+PUAN\s*[:：]\s*)(\d+)\s*/\s*(\d+)(\s*\*\*)", repl, body, count=1, flags=re.IGNORECASE)
+            body = re.sub(r"\*\*\s*TOPLAM\s+PUAN\s*[:：][^\n]*\*\*", new_total_line, body, count=1, flags=re.IGNORECASE)
         else:
-            body = f"**TOPLAM PUAN: {awarded_sum}/{evaluated_cap}**  (sistem normalize: %{normalized})\n\n" + body
-        warnings.append(f"Toplam puan yeniden hesaplandı: alınan {awarded_sum} / değerlendirilen tavan {evaluated_cap} → normalize %{normalized} "
-                        f"(model {model_total}/{total_weight} yazmıştı).")
+            body = new_total_line + "\n\n" + body
+        warnings.append(f"Toplam puan yeniden hesaplandı: ham {awarded_sum}/{evaluated_cap} → normalize %{normalized}/100 "
+                        f"(model {model_total}/{_safe_int(m_total.group(3)) if m_total else total_weight} yazmıştı).")
         return body, normalized, warnings
-    return body, _safe_int(model_score), warnings
+    return body, normalized, warnings
 
 # ═══ KALEM 3 — Modalite veri kapsamı (kamera kareleri + ses metrikleri) rapora deterministik yazılır ═══
+def _frame_distribution(minutes_list, total_minutes=None):
+    """Bir kare dakika listesinden dağılım + kümelenme bilgisi.
+    KÜMELENME: 3+ kare varsa VE (kapsam <= 2 dk  VEYA  kapsam bilinen mülakat süresinin %25'inden az)."""
+    d = {"n": len(minutes_list), "ilk_dk": None, "son_dk": None, "kapsam_dk": None, "kumelenme": False}
+    if not minutes_list:
+        return d
+    mn, mx = min(minutes_list), max(minutes_list)
+    span = mx - mn
+    d["ilk_dk"], d["son_dk"], d["kapsam_dk"] = round(mn, 1), round(mx, 1), round(span, 1)
+    if len(minutes_list) >= 3:
+        if span <= 2.0:
+            d["kumelenme"] = True
+        elif total_minutes and total_minutes > 0 and span < total_minutes * 0.25:
+            d["kumelenme"] = True
+    return d
+
 def compute_modality_coverage(candidate_id: int, level: int) -> dict:
-    """Kamera kareleri sayısı + zaman dağılımı + kümelenme uyarısı; ses metrikleri var mı."""
-    out = {"kare_sayisi": 0, "ilk_dk": None, "son_dk": None, "kapsam_dk": None,
-           "kumelenme_uyarisi": False, "ses_metrikleri_var": False}
+    """İKİ kare seti AYRI raporlanır — kaynak farkı bilinsin:
+      - dogrulama: reason<>'mimic_sample' (panel/PDF galerisinde görünen 4 kare; captured_at bazlı)
+      - mimik: reason='mimic_sample' (yalnız AI mimik analizi, panelde GÖSTERİLMEZ; elapsed_ms bazlı)
+    Ayrıca ses metriklerinin gerçekten var olup olmadığı + özet sayıları."""
+    out = {"dogrulama": _frame_distribution([]), "mimik": _frame_distribution([]),
+           "ses_metrikleri_var": False, "ses_ozet": None, "toplam_dk": None}
     try:
         db = get_db()
-        rows = db.execute(
-            "SELECT elapsed_ms FROM snapshots WHERE candidate_id=? AND reason='mimic_sample' ORDER BY COALESCE(elapsed_ms,0) ASC",
-            (candidate_id,)
-        ).fetchall()
-        vm = db.execute("SELECT voice_metrics_json, started_at FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+        iv = db.execute("SELECT voice_metrics_json, started_at, completed_at FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+        mimic_rows = db.execute("SELECT elapsed_ms FROM snapshots WHERE candidate_id=? AND reason='mimic_sample'", (candidate_id,)).fetchall()
+        verify_rows = db.execute("SELECT elapsed_ms, captured_at FROM snapshots WHERE candidate_id=? AND (reason IS NULL OR reason<>'mimic_sample') ORDER BY id ASC", (candidate_id,)).fetchall()
         db.close()
     except Exception as e:
         print(f"UYARI (compute_modality_coverage c={candidate_id}): {type(e).__name__}: {e}")
         return out
-    ms = [_safe_int(r["elapsed_ms"]) for r in rows if r["elapsed_ms"] is not None]
-    out["kare_sayisi"] = len(rows)
-    if ms:
-        out["ilk_dk"] = round(min(ms) / 60000, 1)
-        out["son_dk"] = round(max(ms) / 60000, 1)
-        span = (max(ms) - min(ms)) / 60000
-        out["kapsam_dk"] = round(span, 1)
-        # 3+ kare varsa ve hepsi 2 dk'lık dar bir pencereye sıkışmışsa → kümelenme
-        if len(ms) >= 3 and span <= 2.0:
-            out["kumelenme_uyarisi"] = True
+    started = _parse_iso(iv["started_at"]) if iv and iv["started_at"] else None
+    total_min = None
+    if started and iv and iv["completed_at"]:
+        _end = _parse_iso(iv["completed_at"])
+        if _end:
+            total_min = max(0.0, (_end - started).total_seconds() / 60)
+    out["toplam_dk"] = round(total_min, 1) if total_min else None
+
+    mimic_min = [_safe_int(r["elapsed_ms"]) / 60000 for r in mimic_rows if r["elapsed_ms"] is not None]
+    out["mimik"] = _frame_distribution(sorted(mimic_min), total_min)
+    out["mimik"]["n"] = len(mimic_rows)
+
+    v_min = []
+    for r in verify_rows:
+        if r["elapsed_ms"] is not None:
+            v_min.append(_safe_int(r["elapsed_ms"]) / 60000)
+        elif started:
+            ca = _parse_iso(r["captured_at"])
+            if ca:
+                v_min.append(max(0.0, (ca - started).total_seconds() / 60))
+    out["dogrulama"] = _frame_distribution(sorted(v_min), total_min)
+    out["dogrulama"]["n"] = len(verify_rows)
+
     try:
-        m = json.loads(vm["voice_metrics_json"]) if (vm and vm["voice_metrics_json"]) else {}
-        out["ses_metrikleri_var"] = bool(m) and _safe_int(m.get("tur_sayisi")) > 0
+        m = json.loads(iv["voice_metrics_json"]) if (iv and iv["voice_metrics_json"]) else {}
     except Exception:
-        pass
+        m = {}
+    if m and _safe_int(m.get("tur_sayisi")) > 0:
+        out["ses_metrikleri_var"] = True
+        out["ses_ozet"] = {
+            "tur_sayisi": m.get("tur_sayisi"),
+            "aday_konusma_toplam_sn": m.get("aday_konusma_toplam_sn"),
+            "ortalama_tur_uzunlugu_sn": m.get("ortalama_tur_uzunlugu_sn"),
+            "yanit_gecikmesi_ort_sn": m.get("yanit_gecikmesi_ort_sn"),
+            "ai_dusunme_suresi_ort_sn": m.get("ai_dusunme_suresi_ort_sn"),
+            "soz_kesme_sayisi": m.get("soz_kesme_sayisi"),
+            "guven": m.get("guven"),
+        }
     return out
 
 def build_modality_coverage_note(candidate_id: int, level: int) -> str:
-    """Rapor gövdesine EKLENEN deterministik blok — modelin atlayamayacağı gerçek kapsam bilgisi."""
+    """Rapor gövdesine EKLENEN deterministik blok — modelin atlayamayacağı gerçek kapsam bilgisi.
+    (KALEM 1: iki kare seti ayrı; KALEM 2: ses metrikleri VAR ise somut sayılarla, var olmayan
+     bir bölüme atıf YOK.)"""
     c = compute_modality_coverage(candidate_id, level)
     lines = ["", "**Modalite Veri Kapsamı (sistem — deterministik):**"]
-    if c["kare_sayisi"] == 0:
-        lines.append("- Kamera kareleri: hiç alınmadı.")
+
+    def _frame_line(label, d, extra=""):
+        if d["n"] == 0:
+            return f"- {label}: hiç alınmadı."
+        span = f" — mülakatın {d['ilk_dk']}.–{d['son_dk']}. dakikaları arası" if d["ilk_dk"] is not None else ""
+        warn = "  ⚠️ UYARI: kareler dar bir aralıkta toplanmış; oturumun büyük kısmı gözlemsiz." if d["kumelenme"] else ""
+        return f"- {label}: {d['n']} kare{span}.{extra}{warn}"
+
+    lines.append(_frame_line("Kamera doğrulama kareleri (panelde/PDF'te görünen)", c["dogrulama"]))
+    lines.append(_frame_line("Mimik analiz kareleri (yalnız AI analizi, panelde gösterilmez)", c["mimik"]))
+
+    if c["ses_metrikleri_var"] and c["ses_ozet"]:
+        s = c["ses_ozet"]
+        def _n(x, unit=""):
+            return f"{x}{unit}" if x is not None else "—"
+        lines.append(
+            "- Ses metrikleri (tur bazlı): "
+            f"tur sayısı {_n(s['tur_sayisi'])}, "
+            f"aday konuşma toplam {_n(s['aday_konusma_toplam_sn'],' sn')}, "
+            f"ort. tur uzunluğu {_n(s['ortalama_tur_uzunlugu_sn'],' sn')}, "
+            f"yanıt gecikmesi ort. {_n(s['yanit_gecikmesi_ort_sn'],' sn')}, "
+            f"AI düşünme süresi ort. {_n(s['ai_dusunme_suresi_ort_sn'],' sn')}, "
+            f"söz kesme {_n(s['soz_kesme_sayisi'])} (güven: {_n(s['guven'])})."
+        )
     else:
-        span_txt = ""
-        if c["ilk_dk"] is not None:
-            span_txt = f" — mülakatın {c['ilk_dk']}.–{c['son_dk']}. dakikaları arası"
-        warn = "  ⚠️ UYARI: kareler dar bir aralıkta kümelenmiş; oturumun büyük kısmı gözlemsiz." if c["kumelenme_uyarisi"] else ""
-        lines.append(f"- Kamera kareleri: {c['kare_sayisi']} kare{span_txt}.{warn}")
-    if c["ses_metrikleri_var"]:
-        lines.append("- Ses metrikleri: toplandı (tur bazlı; ayrıntı MODALİTE KANITLARI bloğunda).")
-    else:
-        lines.append("- Ses metrikleri: TOPLANAMADI — realtime_events'te konuşma başlangıç/bitiş olayı yok; yanıt gecikmesi / duraklama / söz kesme ölçülemedi.")
+        lines.append("- Ses metrikleri: TOPLANAMADI — realtime_events'te konuşma başlangıç/bitiş olayı yok; "
+                     "yanıt gecikmesi / duraklama / konuşma-sessizlik oranı / söz kesme ölçülemedi.")
     return "\n".join(lines)
 
 def build_l2_report_prompt(candidate, candidate_level: int, transcript: str,
@@ -4989,6 +5128,7 @@ def build_l2_report_prompt(candidate, candidate_level: int, transcript: str,
         "candidate_name": candidate["name"], "position_name": candidate["position"],
         "date_str": datetime.now().strftime('%d.%m.%Y'), "total_weight": total_weight,
         "ai_note_report_field": ai_note_report_field,
+        "criteria_table_filled": build_criteria_table_filled(pos["criteria"]),
     })
     return f"""Aşağıda bir sesli iş mülakatının transkripti, aday CV'si, pozisyon kriterleri ve derinlik bilgisi vardır. İnsan kaynakları yöneticisinin karar vermesine yardım edecek, adaya özgü ve ayrıntılı bir değerlendirme raporu üret.
 
@@ -5013,6 +5153,7 @@ TEMEL KURALLAR:
 - Aynı kalıp cümleleri her bölümde tekrar etme. Rapor bu adaya özgü olmalı; somut proje, karar, örnek ve ifadeleri kullan.
 - Sorulmayan veya yeterli veri oluşmayan kriterlere otomatik 0 verme. “Değerlendirilmedi / yeterli kanıt oluşmadı” yaz. Toplam puanı yalnızca gerçekten değerlendirilen kriterlerin ağırlıklarını 100'e normalize ederek hesapla ve raporda hangi kriterlerin değerlendirilmediğini belirt.
 - PUAN TAVANI (KESİN): Hiçbir kriter puanı kendi tavanını (ağırlığını) AŞAMAZ. "Uyum 12/10" gibi bir şey ASLA yazma; en fazla "10/10". TOPLAM PUAN satırındaki payda = değerlendirilen kriterlerin ağırlık toplamı; TOPLAM PUAN = alınan puanların toplamı. Bunu doğru hesapla, sistem ayrıca doğrular.
+- KRİTER TABLOSU DETERMİNİSTİK: Rapordaki kriter tablosunun satırları YUKARIDA verilen tablonun BİREBİR AYNISI olacak — aynı kriter adları, aynı sıra, aynı tavanlar. Satır ekleme, çıkarma, birleştirme veya yeniden adlandırma YOK. Bir kriteri "Değerlendirilmedi" işaretliyorsan yanına TEK CÜMLE somut gerekçe yaz (gerekçesiz "Değerlendirilmedi" YASAK).
 - Aday bir konuda sorulup açıkça bilmediğini/uygulamadığını söylediyse bu “değerlendirildi fakat yetersiz” sayılabilir; hiç sorulmadıysa “değerlendirilmedi” sayılır.
 - Erken sonlandırma, davranış gözlemi veya pozisyon uyumsuzluğu notu verildiyse: raporda ilgili başlık altında SOMUT (dakika + transkriptteki söz) yaz; bunları TEK BAŞINA puan düşürme gerekçesi yapma.
 - Her puan için Kanıt → Analiz → Sonuç zinciri kur.
