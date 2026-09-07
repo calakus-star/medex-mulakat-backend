@@ -514,6 +514,10 @@ def init_db():
         ("candidates", "interview_start_count", "INTEGER DEFAULT 0"),
         ("candidates", "last_start_at", "TIMESTAMP" if USE_POSTGRES else "TEXT"),
         ("candidates", "invite_expires_at", "TIMESTAMP" if USE_POSTGRES else "TEXT"),
+        # BÖLÜM A/B/D: kapsama + kriter tekrar sayacı + sistem kararı gerekçesi
+        ("interviews", "criteria_coverage_json", "TEXT"),   # A4: modelin end_interview'da bildirdiği kriter kapsanma yüzdeleri
+        ("interviews", "criterion_attempts_json", "TEXT"),  # B2: kriter/konu başına yeniden-sorma sayacı (L1 metin akışı)
+        ("interviews", "system_decision_json", "TEXT"),     # D1: finalize kararı + gerekçe (rapor üretildi mi / neden / hangi koşul)
         ("candidates", "person_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("candidates", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("positions", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
@@ -1912,6 +1916,9 @@ Aday: {candidate_name}. Pozisyon: {position_name}. Derinlik: {depth_label}. Krit
 - Sabit soru sırası/sayısı yok; adayın cevabına göre yön belirle. Zayıf alanı derinleştir, güçlü alanda oyalanma.
 - Aday bir konuyu açtıysa oradan devam et; "listeye" dönmek için zorlama. Cevap yüzeyselse somut örnek/katkı/sonuç iste; doyurucuysa geç.
 - Aynı konuyu amaçsız tekrar etme; önceki cevaba uygun takip sorusu üret. Adayın ne söylediğini unutma.
+- Bir kriteri/konuyu EN FAZLA 2 kez yeniden sor. Aday hâlâ veremiyorsa "Bunu geçelim." de, o kriteri bırak, yeni bir kritere geç — o kriter raporda "yanıtsız" işaretlenir.
+- Aday "anlamadım" derse soruyu OLDUĞU GİBİ tekrarlama; SADELEŞTİR, örnekle, kısalt.
+- Aday cevap veremediği bir soruda 3. kez ISRAR ETME; sadeleştir ya da "Bunu geçelim." deyip devam et.
 - Hedef ~{lvl_cfg['minutes']} dakika bir yön göstergesidir; parasal eşik nedeniyle asla bitirme, yeterli kanıt oluşana kadar doğal sürdür.
 
 KRİTER KAPSAMA: Akış içinde mekanik kapı yok. Ama end_interview çağırmadan ÖNCE kontrol et: hiç dokunulmamış kriter varsa en az bir soru sor. Yine de sorulamayan kalırsa raporda "değerlendirilmedi" işaretlenir — uydurma değerlendirme yapma.
@@ -1927,6 +1934,13 @@ ADAYI OKU, UYUM SAĞLA:
 - Sabit açılış cümlesi yok. Adayın sesindeki tonu, hızı, tereddüdü oku; açılışı ve tempoyu ona göre ayarla.
 - Aday rahat ve netse kısa selamla konuya gir. Gergin/tereddütlüyse önce birkaç saniye sıcak bir rahatlatma yap, acele ettirme. Hızlı gitmek istiyorsa yavaşlatma; zorlanıyorsa yardım et; susarsa bekle.
 - Bir kavramı bilmiyorsa öğretme: en fazla terimin tek cümlelik anlamını söyle, soruyu bir kez sadeleştir; hâlâ bilmiyorsa "Anladım, bu konuyu geçelim." de.
+- Aday açıkça kendi mesleki alanının bu pozisyondan FARKLI olduğunu söylerse ısrar etme: alanını kısaca doğrula ve DEĞERLENDİRMEYİ ADAYIN GERÇEK ALANI için yürüt; bunu "pozisyon uyumsuzluğu" olarak nota geç.
+- Uzun sessizlik ya da anlamsız/kopuk girdi gelirse önce TEKNİK TEYİT iste: "Sesiniz bana net gelmiyor gibi, beni duyabiliyor musunuz?" — cevap gelince kaldığın yerden devam et.
+
+SÜRE VE AKIŞ BİLGİSİ (adaya kısaca haber ver):
+- Mülakatın yaklaşık yarısına gelindiğinde: "Yaklaşık yarısına geldik."
+- Son sorulara geçerken: "Son birkaç soruya geçiyoruz."
+- Kapanışa geçeceğini önceden söyle: "Birazdan mülakatı tamamlıyor olacağız."
 
 ADAYLA UYUM (kısıt yok):
 - Soruyu tekrar isterse tekrar et, gerekçe sorma. Açıklama/örnek/yeniden ifade isterse ver.
@@ -1935,7 +1949,7 @@ ADAYLA UYUM (kısıt yok):
 
 KESİNLİKLE YAPMA: adayla herhangi bir konuda (özellikle dil) tartışmak; kullandığı terimi düzeltmek; kural gerekçesiyle bir talebini reddetmek; zorlama çeviri; mekanik/tekrarlayan hitap.
 
-TEK SINIR: Yalnızca mülakatın amacı gerçekten zedeleniyorsa müdahale et (cevabı başkası veriyor; konu tamamen dışına çıkılıp dönülmüyor). O durumda da tartışma — nazikçe konuya dön; sonucu end_interview(reason='uygunsuz_davranis') ile bildir ve rapora somut gözlem olarak geçir.
+DAVRANIŞ — KESME YOK, GÖZLEM VAR: Aday agresif, sabırsız, kaba, alaycı, küfürlü veya kaçamak davransa BİLE mülakatı KESME. Bu davranışı note_voice_observation ile SOMUT kaydet (dakika + ne söylediği) ve nazikçe konuya dönerek devam et; rapordaki "Davranış ve Tutum Gözlemleri" bölümüne yansır. end_interview(reason='uygunsuz_davranis') SADECE gerçekten devam edilemez bir durumda çağrılır (cevabı sürekli başkası veriyor; aday tamamen iş birliğini kesti) — o durumda bile eldeki veriyle rapor üretilir.
 
 DİL: Mülakatın odağı değil. Pozisyon bir dil yeterliliği gerektiriyorsa değerlendirmeye girebilir; gerektirmiyorsa yalnızca gözlem verisidir. Hiçbir durumda kesme/çekişme sebebi değil.
 
@@ -1946,7 +1960,8 @@ KAPANIŞ PROTOKOLÜ ZORUNLUDUR:
 2) Adayın son cevabını dinle.
 3) Ardından kısa ve profesyonel biçimde teşekkür et: “Teşekkür ederim. Görüşmemiz burada tamamlandı. Katılımınız ve ayırdığınız zaman için teşekkür ederim.”
 4) Yalnızca bu kapanış cümlesi tamamen bittikten sonra end_interview(reason='tamamlandı', criteria_coverage={{...}}) çağır: {criteria_names}.
-- Aday açıkça bitirmek isterse end_interview(reason='aday_talebi'); tekrarlanan uygunsuz davranışta end_interview(reason='uygunsuz_davranis').
+- Aday AÇIKÇA bitirmek isterse (net sözlü talep: "bitirelim", "devam etmek istemiyorum") end_interview(reason='aday_talebi'). Sadece nezaketen sorulan "eklemek istediğiniz bir şey var mı" kapanış sorusuna "yok" demek bitirme talebi DEĞİLDİR — bu durumda reason='tamamlandı'.
+- Kapanışta modele criteria_coverage'ı MUTLAKA doldur (her kriter için 0-100): rapor yanıtsız kriterleri buradan tespit ediyor.
 
 SES GÖZLEMİ ARACI (note_voice_observation) — SIKI KULLANIM:
 - Bu aracı YALNIZCA adayın SESİNDE rapora değecek, BELİRGİN bir şey fark ettiğinde çağır: net tereddüt, akıcılık kaybı, tonda belirgin kayma, aşırı gerginlik veya aşırı güven.
@@ -2183,6 +2198,9 @@ DERİNLİK ({lvl_cfg["depth_label"]}): ~{lvl_cfg["minutes"]} dakika ve en az {lv
 - Aday bir konuyu açtıysa oradan devam et; "listeye" dönmek için zorlama.
 - Cevap yüzeyselse detay iste; doyurucuysa geç.
 - Her adayın CV'sindeki kendine özgü detaylara (proje, sertifika, teknoloji, sektör) göre soruları o adaya özel kur — farklı adaylara aynı soruyu aynı sırayla sorma.
+- Bir kriteri/konuyu EN FAZLA 2 kez yeniden sor. Yeniden sorduğun her mesajın EN BAŞINA `[YENIDEN]` etiketini koy (etiket adaya gösterilmez, sistem sayar). Aday hâlâ veremiyorsa "Bunu geçelim." de ve yeni bir kritere geç — o kriter raporda "yanıtsız" işaretlenir.
+- Aday "anlamadım" derse soruyu OLDUĞU GİBİ tekrarlama; SADELEŞTİR, örnekle, kısalt.
+- Aday cevap veremediği bir soruda 3. kez ISRAR ETME.
 
 KRİTER KAPSAMA: Akış sırasında mekanik kapı YOK — sırayı sen belirlersin. Ancak mülakatı BİTİRMEDEN ÖNCE kontrol et: hiç dokunulmamış bir kriter varsa en az bir soru sor. Bu kontrol kapanış anındadır, akışı bölmez. Yine de sorulamayan bir kriter kalırsa raporda "değerlendirilmedi" olarak işaretlenir — uydurma değerlendirme yapma.
 
@@ -2197,6 +2215,8 @@ ADAYI OKU, UYUM SAĞLA:
 - Sabit açılış şablonu yok. İlk yanıtındaki sinyallere göre aç; genelde kısa bir kendini tanıtma isteğiyle başla ama aday zaten rahat ve hazırsa doğrudan ilgili bir soruya da girebilirsin. Ağır teknik soruyla açma.
 - Aday gergin/dağınık/çok kısa yanıt veriyorsa önce kısa, sıcak bir rahatlatma; acele ettirme. Rahatsa gereksiz ısındırma yapma. Hızlı gitmek istiyorsa yavaşlatma; zorlanıyorsa acele ettirme; susarsa bekle, takılırsa yardım et.
 - Rahatlatmak = adayın gerçek seviyesini gösterebilmesi; mülakatı sulandırmak değil.
+- Aday açıkça kendi mesleki alanının bu pozisyondan FARKLI olduğunu söylerse ısrar etme: alanını kısaca doğrula ve DEĞERLENDİRMEYİ ADAYIN GERÇEK ALANI için yürüt; raporda "pozisyon uyumsuzluğu" olarak yaz.
+- Mülakatın yaklaşık yarısında ("Yaklaşık yarısına geldik") ve son sorulara geçerken ("Son birkaç soru") adaya kısaca haber ver. Kapanışa geçeceğini önceden söyle.
 
 ADAYLA UYUM (kısıt yok):
 - Soruyu tekrar isterse tekrar et, gerekçe sorma. Açıklama/örnek/yeniden ifade isterse ver.
@@ -2216,6 +2236,8 @@ Senin görevin (soru sorma, veri toplama, mülakatı tamamlama) hiçbir zaman ad
 
 GENEL:
 - Cevapları CV tutarlılığı, teknik seviye, deneyim, analitik düşünme ve dürüstlük açısından değerlendir. Tek seferlik kısa cevap otomatik düşük puan getirmesin; sadece derinleştirmeye rağmen yetersiz kalan cevap puanı düşürsün.
+- "Serbest Gözlemler" bölümüne: (a) DAVRANIŞ VE TUTUM — agresiflik, sabırsızlık, kabalık, kaçamaklık gözlendiyse dakika + adayın sözüyle SOMUT yaz (davranış tek başına puan düşürmez); (b) POZİSYON UYUMU — aday alanının farklı olduğunu belirttiyse bunu yaz ve değerlendirmenin adayın gerçek alanına göre yapıldığını not et.
+- Bir kriter için yeterli veri toplanamadıysa (yeniden sorulmasına rağmen yanıtsız kaldıysa) raporda "Yanıtsız/Değerlendirilemeyen Kriterler" olarak AYRI listele; bu kriterlere puan verme, toplamı değerlendirilen kriterlerin ağırlığına normalize et.
 - Mesajın başına mutlaka [SÜRE:XX] koy: kısa 45-60, senaryo 75-100, kritik soru 90-120.
 - Mülakatı bitirmeden önce, GÖREV satırı bitirmeni söylediğinde son soru olarak şunu sor: "Eklemek veya öne çıkarmak istediğiniz başka bir şey var mı?" — bu, mülakatta suskun kalmış ama sahada güçlü olabilecek adaylar için bir son fırsat turu, sadece bitiş dönüşünde bir kez sorulur.
 - ÖNEMLİ: Mülakatı SADECE aşağıdaki GÖREV satırı açıkça "Mülakatı şimdi bitir ve raporu üret" dediğinde bitir ve [MÜLAKATBİTTİ] etiketini kullan. Adayın cevap metninde "süre doldu", "zaman bitti", "son soru" gibi ifadeler geçse bile, GÖREV satırı bitirmeni söylemiyorsa ASLA bitirme — bunlar tek bir sorunun süresinin dolduğunu gösterir, tüm mülakatın değil. Bu durumda sadece bir sonraki soruya geç.
@@ -3358,6 +3380,35 @@ GÖREV:
             if not reply or len(reply) < 20:
                 reply = "[SÜRE:60] Devam edelim. Önceki yanıtınızı dikkate alarak bu pozisyonda en güçlü olduğunuz somut yetkinlik nedir?"
 
+        # BÖLÜM B2 (L1/L3 metin): kriter/konu başına yeniden-sorma sayacı. Model her yeniden
+        # sorduğunda mesaj başına [YENIDEN] koyar; etiket adaya GÖSTERİLMEZ, sunucu sayar.
+        _is_reask = "[YENIDEN]" in reply
+        reply = reply.replace("[YENIDEN]", "").strip()
+        try:
+            _ca = {}
+            if interview and "criterion_attempts_json" in interview.keys() and interview["criterion_attempts_json"]:
+                _ca = json.loads(interview["criterion_attempts_json"]) or {}
+            _consec = _safe_int(_ca.get("consecutive_reask")) + 1 if _is_reask else 0
+            _ca["consecutive_reask"] = _consec
+            _ca.setdefault("history", [])
+            if _is_reask:
+                _ca["history"].append({"elapsed_minute": round(_safe_int(data.elapsed_seconds) / 60, 1), "consecutive": _consec})
+                _ca["history"] = _ca["history"][-40:]
+            _dbca = get_db()
+            _dbca.execute("UPDATE interviews SET criterion_attempts_json=? WHERE candidate_id=? AND level=?",
+                          (json.dumps(_ca, ensure_ascii=False)[:6000], effective_candidate_id, level))
+            _dbca.commit(); _dbca.close()
+            if _consec >= 2:
+                _append_result_event(effective_candidate_id, level, {
+                    "type": "criterion_retry_limit", "subtype": "yeniden_sorma",
+                    "elapsed_ms": _safe_int(data.elapsed_seconds) * 1000,
+                    "elapsed_minute": round(_safe_int(data.elapsed_seconds) / 60, 1),
+                    "description": f"Bir kriter/konu {_consec} kez yeniden soruldu; model bu turdan sonra kriteri bırakıp geçmeli (raporda 'yanıtsız').",
+                    "weight": "gözlem", "source": "system",
+                })
+        except Exception as e:
+            print(f"UYARI (B2 kriter tekrar sayacı c={effective_candidate_id}): {type(e).__name__}: {e}")
+
         messages.append({"role": "assistant", "content": reply, "ts": _now_ts()})
 
         db = get_db()
@@ -3395,7 +3446,7 @@ GÖREV:
 
 GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir teknik arıza bildirimi de olabilir). Mülakatı şimdi bitir ve mevcut bilgilere göre raporu üret. Adayı ikna etmeye çalışma, sadece elindeki bilgiyle adil bir değerlendirme yap; eksik kalan kısımları düşük puan nedeni yapma, sadece "yeterli veri toplanamadı" notu düş. "Sonuç Gerekçesi" bölümüne: mülakatın erken bittiğini, adayın talebiyle sonlandığını ve hangi kriterlerin veri yetersizliğinden değerlendirilemediğini somut yaz. [MÜLAKATBİTTİ] etiketini kullan."""
             _set_result_meta(effective_candidate_id, level, partial=1,
-                             completion_pct=min(95, round(len(real_answers) / max(1, lvl_cfg["min_q"]) * 100)),
+                             completion_pct=min(100, round(len(real_answers) / max(1, lvl_cfg["min_q"]) * 100)),
                              result_reason="Aday mülakatı kendi isteğiyle erken sonlandırdı.")
             _mark_finish_pending(effective_candidate_id, level, provider="claude", model="claude-sonnet-4-6",
                                   system=system, payload=finish_payload,
@@ -3964,15 +4015,16 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     score = extract_score(reply)
     recommendation = normalize_recommendation(score, rec_match.group(1) if rec_match else None)
 
-    # İŞ KURALI: Toplam not %20'nin altındaysa kesin aday hükmü verme.
-    # Bu durumda sonuç, düşük puanlı bir "Reddet" değil; güvenilir değerlendirme için
-    # yeterli veriye ulaşılamadığı şeklinde kaydedilir.
-    score_below_evaluation_threshold = score is not None and score < 20
-    if score_below_evaluation_threshold:
-        recommendation = "Değerlendirilemedi"
-        # BÖLÜM 3.4: yeterli veri toplanamadı → kısmi işareti + gerekçe
-        _set_result_meta(candidate_id, level, partial=1,
-                         result_reason="Toplam değerlendirme puanı %20 eşiğinin altında kaldı; güvenilir bir işe alım/ret hükmü için yeterli veri toplanamadı.")
+    # BÖLÜM A2 (adım 3): Bu noktaya gelindiyse veri yeterliydi ve rapor üretildi (yetersiz veri
+    # zaten upstream'de "Değerlendirilemedi"ye ayrılıyor — assess_data_sufficiency / A1). Dolayısıyla
+    # burada gelen DÜŞÜK puan artık "veri yok" değil, gerçek bir başarısızlıktır → sonuç RED.
+    # normalize_recommendation zaten s<40 için "Reddet" döndürür; <20'de raporu OLDUĞU GİBİ bas,
+    # sahte "DEĞERLENDİRİLEMEDİ" metniyle DEĞİŞTİRME. (Kapsama eşiği ≠ puan eşiği.)
+    score_below_reject_threshold = score is not None and score < 20
+    if score_below_reject_threshold:
+        recommendation = "Reddet"
+        _set_result_meta(candidate_id, level,
+                         result_reason=f"Toplam değerlendirme puanı ({score}/100) %20 eşiğinin çok altında; aday kriterlerde yeterli yetkinlik gösteremedi. Sonuç: Reddet.")
 
     db = get_db()
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
@@ -3980,17 +4032,6 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     report = report_match.group(1).strip() if report_match else ""
     if not report or len(strip_markdown(report)) < 60:
         report = build_fallback_report(dict(candidate) if candidate else {}, messages, score, recommendation, "AI rapor bloğu eksik/bozuk geldi")
-    if score_below_evaluation_threshold:
-        report = f"""Aday: {candidate['name'] if candidate else '-'}
-Pozisyon: {candidate['position'] if candidate else '-'}
-Tarih: {datetime.now().strftime('%d.%m.%Y')}
-
-SONUÇ: DEĞERLENDİRİLEMEDİ
-
-Bu mülakat sonucunda aday hakkında güvenilir ve gerçekçi bir değerlendirme oluşturabilecek yeterli veriye ulaşılamamıştır. Toplam not %20 değerlendirme eşiğinin altında kaldığı için sistem kesin bir işe alım veya ret kararı üretmemiştir. Adayın söylemediği hiçbir bilgi varsayılmamış, uydurma değerlendirme yapılmamıştır.
-
-Mevcut transkript ve aday yanıtları yönetici incelemesine sunulmalıdır.
-""".strip()
 
     if not standard_cv:
         standard_cv = f"AD SOYAD: {candidate['name'] if candidate else '-'}\nPOZİSYON: {candidate['position'] if candidate else '-'}\nMÜLAKAT NOTU: Standart CV özeti AI tarafından üretilemedi; adayın yüklediği CV ve yanıtları ayrıca incelenmelidir."
@@ -4098,9 +4139,10 @@ def report_violation(data: ViolationReport, background_tasks: BackgroundTasks, p
         report = (f"Aday: {candidate['name']}\nPozisyon: {candidate['position']}\n\nSONUÇ: DEĞERLENDİRİLEMEDİ\n\n"
                   f"{result_reason} Adayın söylemediği hiçbir bilgi eklenmemiştir.")
         try:
+            _rv_minutes = max(1, get_effective_level_config(candidate_level, candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart")["minutes"])
             finalize_incomplete_interview(data.candidate_id, report, terminated_reason=terminated_reason,
                                           level=candidate_level, result_reason=result_reason,
-                                          completion_pct=min(90, round(_safe_int(data.elapsed_seconds) / 60 / 20 * 100)))
+                                          completion_pct=min(100, round(_safe_int(data.elapsed_seconds) / 60 / _rv_minutes * 100)))
         except Exception as e:
             print(f"HATA (report_violation sesli finalize c={data.candidate_id}): {type(e).__name__}: {e}")
         return {
@@ -4260,7 +4302,8 @@ class RealtimeReportRequest(BaseModel):
     transcript: str
     duration_seconds: int = 0
     answered_count: int = 0
-    end_reason: str = "tamamlandı"  # tamamlandı | aday_talebi | baglanti_koptu
+    end_reason: str = "tamamlandı"  # tamamlandı | aday_talebi | baglanti_koptu | uygunsuz_davranis
+    criteria_coverage: Optional[dict] = None  # A4: modelin end_interview'da bildirdiği {kriter_adı: 0-100} kapsanma yüzdeleri
     realtime_usage: Optional[dict] = None  # Frontend'in response.done eventlerinden topladığı token/audio usage özeti
     events: Optional[List[dict]] = None  # Faz D1: son heartbeat'ten bu yana biriken ham Realtime olayları (bkz. record_realtime_events)
 
@@ -4556,6 +4599,152 @@ def finalize_incomplete_interview(candidate_id: int, report: str, terminated_rea
     return {"message": "Mülakat tamamlandı. Yeterli veri oluşmadığı için puanlama yapılmadı.", "completed": True, "score": None, "recommendation": "Değerlendirilemedi"}
 
 
+# ═══ BÖLÜM A/B/C/D — Sesli rapor kararı: veri yeterliliği + end_reason doğrulama + kapsama + karar kaydı ═══
+
+# Açık bitirme niyeti kalıpları (interview_chat GÖREV satırındaki örnek listeyle aynı kaynak).
+_EXIT_INTENT_RE = re.compile(
+    r"(bitir(elim|ebilir\s*miy[ıi]z|mek\s+istiyorum)|sonland[ıi]r|burada\s+b[ıi]rak|devam\s+etmek\s+istemiyorum|"
+    r"görüşmek\s+istemiyorum|art[ıi]k\s+devam\s+etme|mülakat[ıi]\s+(kesel|b[ıi]rak)|"
+    r"[İi]K\s*(ile|['’]?yle)?\s+(görüş|konuş)|yönetim(le|e)\s+(ilet|görüş|konuş)|şikayet\s+ede|"
+    r"vazge[çc]|çıkmak\s+istiyorum|katılmak\s+istemiyorum|iptal\s+ed)",
+    re.IGNORECASE,
+)
+
+def _candidate_lines_tail(transcript: str, max_chars: int = 1400) -> str:
+    """Transkriptin sonundaki ADAY satırlarını döndürür ('[mm:ss] Aday: ...' veya 'Aday: ...')."""
+    lines = [l for l in (transcript or "").splitlines() if re.search(r"(^|\])\s*Aday\s*:", l)]
+    return ("\n".join(lines[-8:]))[-max_chars:]
+
+def validate_end_reason(raw_reason: str, transcript: str):
+    """A5: frontend'den gelen end_reason körü körüne kabul edilmez. 'aday_talebi' geldiyse ama
+    transkriptin son aday sözlerinde açık bitirme niyeti YOKSA 'tamamlandı'ya düşürülür.
+    Dönüş: (effective_reason, downgraded_bool)."""
+    raw = (raw_reason or "tamamlandı").strip()
+    if raw != "aday_talebi":
+        return raw, False
+    if _EXIT_INTENT_RE.search(_candidate_lines_tail(transcript)):
+        return "aday_talebi", False
+    return "tamamlandı", True
+
+def assess_data_sufficiency(answered_count, min_q, criteria_coverage, criteria, coverage_floor: int = 40) -> dict:
+    """A1: rapor üretilecek kadar veri toplandı mı? answered_count ile criteria_coverage BİRLİKTE.
+    Yeterli: (>= min_q aday cevabı) VEYA (kriterlerin en az yarısı coverage_floor üstünde);
+    her koşulda en az MIN_L2_ANSWERED_COUNT gerçek cevap şart."""
+    ac = _safe_int(answered_count)
+    mq = max(1, _safe_int(min_q))
+    names = [c.get("name") for c in (criteria or []) if c.get("name")]
+    covered = 0
+    if isinstance(criteria_coverage, dict) and names:
+        for n in names:
+            try:
+                if float(criteria_coverage.get(n, 0) or 0) >= coverage_floor:
+                    covered += 1
+            except Exception:
+                pass
+    enough_answers = ac >= mq
+    enough_coverage = bool(names) and covered >= (len(names) + 1) // 2
+    hard_minimum = ac >= MIN_L2_ANSWERED_COUNT
+    return {
+        "sufficient": bool(hard_minimum and (enough_answers or enough_coverage)),
+        "answered_count": ac, "min_q": mq,
+        "criteria_covered": covered, "criteria_total": len(names),
+        "enough_answers": enough_answers, "enough_coverage": enough_coverage,
+        "hard_minimum_met": hard_minimum,
+    }
+
+def build_unanswered_criteria(criteria, criteria_coverage, threshold) -> list:
+    """B2/C: kapsanma eşiğinin altında kalan (yeterince sorulamamış/yanıtlanamamış) kriterler."""
+    if not isinstance(criteria_coverage, dict):
+        return []
+    out = []
+    for c in (criteria or []):
+        n = c.get("name")
+        try:
+            v = float(criteria_coverage.get(n, 0) or 0)
+        except Exception:
+            v = 0
+        if v < threshold:
+            out.append(f"{n} (~%{int(v)})")
+    return out
+
+def record_system_decision(candidate_id: int, level: int, decision: str, reason: str, meta=None) -> None:
+    """D1: sistemin rapor kararını + gerekçesini kaydeder (admin panelde 'neden rapor üretildi/üretilmedi')."""
+    try:
+        payload = {"decision": decision, "reason": reason, "at": _now_ts(), "meta": meta or {}}
+        db = get_db()
+        db.execute("UPDATE interviews SET system_decision_json=? WHERE candidate_id=? AND level=?",
+                   (json.dumps(payload, ensure_ascii=False)[:6000], candidate_id, level))
+        db.commit(); db.close()
+    except Exception as e:
+        print(f"UYARI (record_system_decision c={candidate_id} L{level}): {type(e).__name__}: {e}")
+
+def build_l2_report_prompt(candidate, candidate_level: int, transcript: str,
+                           criteria_coverage=None, extra_notes: str = "") -> str:
+    """L2/L3 sesli rapor promptu — hem create_l2_report hem /regenerate-report kullanır."""
+    pos = get_position(candidate["position"]) or {"category": "Genel", "criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
+    criteria_text = build_criteria_text(pos["criteria"])
+    total_weight = sum(c["weight"] for c in pos["criteria"])
+    report_lang = LANGUAGE_NAMES.get(candidate["report_language"] or "tr", "Türkçe")
+    cv_for_report = candidate["cv_text"][:7000] if candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20 else "CV yüklenmemiş; sadece transkripte göre değerlendir."
+    ai_note_section = ""
+    ai_note_report_field = ""
+    if candidate["ai_note"] and candidate["ai_note"].strip():
+        ai_note_section = f"\n\nADAY ÖZEL AI NOTU (bu mülakatta bu konuya öncelik verilmiş olmalı, transkriptte nasıl ele alındığını değerlendir):\n{candidate['ai_note'].strip()[:1200]}"
+        ai_note_report_field = "\n**AI Notuna Uyum:** (bu adaya özel notun transkriptte nasıl ele alındığını somut olarak yaz: hangi soru/turlarda test edildi, sonucu ne oldu)"
+    depth_tier = (candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart") or "standart"
+    coverage_threshold = get_depth_tier_config(depth_tier)["coverage_threshold"]
+    coverage_block = ""
+    if isinstance(criteria_coverage, dict) and criteria_coverage:
+        coverage_block = "\n\nMÜLAKATÇININ BİLDİRDİĞİ KRİTER KAPSANMA (0-100, destekleyici — puanı bağlamaz):\n" + \
+            "\n".join(f"- {k}: ~%{int(float(v or 0))}" for k, v in criteria_coverage.items() if str(v) != "")
+    unanswered = build_unanswered_criteria(pos["criteria"], criteria_coverage, coverage_threshold)
+    unanswered_block = ""
+    if unanswered:
+        unanswered_block = ("\n\nYANITSIZ / YETERSİZ KAPSANMIŞ KRİTERLER (raporda 'Yanıtsız Kriterler' başlığı altında ayrı "
+                            "listele; bunlara puan verme, 'değerlendirilemedi' işaretle):\n- " + "\n- ".join(unanswered))
+    report_body_l2 = build_report_body(candidate_level, {
+        "candidate_name": candidate["name"], "position_name": candidate["position"],
+        "date_str": datetime.now().strftime('%d.%m.%Y'), "total_weight": total_weight,
+        "ai_note_report_field": ai_note_report_field,
+    })
+    return f"""Aşağıda bir sesli iş mülakatının transkripti, aday CV'si, pozisyon kriterleri ve derinlik bilgisi vardır. İnsan kaynakları yöneticisinin karar vermesine yardım edecek, adaya özgü ve ayrıntılı bir değerlendirme raporu üret.
+
+Aday: {candidate['name']}
+Pozisyon: {candidate['position']}
+Mülakat seviyesi: Level {candidate_level}
+Derinlik: {depth_tier}
+Kriterler ({total_weight} puan):
+{criteria_text}
+
+ADAYIN CV'Sİ:
+{cv_for_report}{ai_note_section}{coverage_block}{unanswered_block}{extra_notes}
+
+TRANSKRİPT:
+{(transcript or '')[:30000]}
+
+TEMEL KURALLAR:
+- Rapor {report_lang} dilinde yazılacak.
+- Yalnızca adayın gerçekten söylediği sözler mülakat kanıtıdır. Mülakatçının açıklamalarını adaya mal etme.
+- CV bilgisi ile mülakat kanıtını ayır: “CV'de belirtilmiştir” ve “mülakatta doğrulanmıştır/doğrulanamamıştır” ifadelerini açık kullan.
+- Adayın söylemediği deneyim, beceri, sonuç, motivasyon veya kişilik özelliği uydurma.
+- Aynı kalıp cümleleri her bölümde tekrar etme. Rapor bu adaya özgü olmalı; somut proje, karar, örnek ve ifadeleri kullan.
+- Sorulmayan veya yeterli veri oluşmayan kriterlere otomatik 0 verme. “Değerlendirilmedi / yeterli kanıt oluşmadı” yaz. Toplam puanı yalnızca gerçekten değerlendirilen kriterlerin ağırlıklarını 100'e normalize ederek hesapla ve raporda hangi kriterlerin değerlendirilmediğini belirt.
+- Aday bir konuda sorulup açıkça bilmediğini/uygulamadığını söylediyse bu “değerlendirildi fakat yetersiz” sayılabilir; hiç sorulmadıysa “değerlendirilmedi” sayılır.
+- Erken sonlandırma, davranış gözlemi veya pozisyon uyumsuzluğu notu verildiyse: raporda ilgili başlık altında SOMUT (dakika + transkriptteki söz) yaz; bunları TEK BAŞINA puan düşürme gerekçesi yapma.
+- Her puan için Kanıt → Analiz → Sonuç zinciri kur.
+- Analitik düşünme, kavrama, muhakeme, neden-sonuç kurma, problem çözme, düşünce esnekliği, öğrenme çevikliği ve belirsizlikte karar verme hakkında yalnızca transkriptte gözlenebilen sinyalleri yaz. IQ, zekâ puanı, psikiyatrik tanı, yalan tespiti veya kesin kişilik teşhisi yapma.
+- Görüşme kalitesi veya teknik kesinti değerlendirmeyi etkilediyse bunu ayrıca belirt; adayı bunun için cezalandırma.
+- En az üç anlamlı aday cevabı yoksa [DEĞERLENDİRİLEMEDİ] üret.
+- Derinlik “derin” ise rapor daha kapsamlı, daha fazla çapraz kanıtlı ve daha ayrıntılı olmalı; standart rapor da kesinlikle yüzeysel olmamalı.
+
+TAM FORMAT:
+[MÜLAKATBİTTİ]
+---RAPOR---
+{report_body_l2}
+
+Çıktı mutlaka [MÜLAKATBİTTİ] ve ---RAPOR--- bloklarıyla başlasın."""
+
+
 @app.post("/api/realtime/report")
 async def create_l2_report(data: RealtimeReportRequest, background_tasks: BackgroundTasks, payload=Depends(verify_token)):
     if payload.get("role") != "candidate":
@@ -4607,128 +4796,99 @@ async def create_l2_report(data: RealtimeReportRequest, background_tasks: Backgr
     db.commit()
     db.close()
 
-    below_minimum = data.duration_seconds < MIN_L2_DURATION_SECONDS and data.answered_count < MIN_L2_ANSWERED_COUNT
-    # BÖLÜM 3.4: ~tamamlanma oranı — cevaplanan tur / seviye min. konu sayısı
     _l2_cfg = get_effective_level_config(candidate_level, candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart")
-    _completion_pct = min(95, round(_safe_int(data.answered_count) / max(1, _l2_cfg["min_q"]) * 100))
+    pos_for_suff = get_position(candidate["position"]) or {"criteria": [{"name": "Genel Yetkinlik", "weight": 100}]}
+    _coverage = data.criteria_coverage if isinstance(data.criteria_coverage, dict) and data.criteria_coverage else None
 
-    if data.end_reason in ("aday_talebi", "baglanti_koptu", "uygunsuz_davranis"):
-        # BÖLÜM 3.2/3.3: teknik başarısızlık ile davranış/talep ayrımı — spesifik gerekçe + olay kaydı
-        if data.end_reason == "uygunsuz_davranis":
-            reason_text = "Mülakat, profesyonel görüşme kurallarına uyulmadığı için sonlandırılmıştır; yeterli değerlendirme verisi oluşmamıştır."
-            terminated_reason = "Uygunsuz davranış nedeniyle sonlandırıldı"
-            technical_error_ref = None
-            _append_result_event(effective_candidate_id, candidate_level, {
-                "type": "violation", "subtype": "uygunsuz_davranis",
-                "elapsed_ms": _safe_int(data.duration_seconds) * 1000,
-                "elapsed_minute": round(_safe_int(data.duration_seconds) / 60, 1),
-                "description": "Mülakatçı, görüşme kurallarına aykırı / uygunsuz davranış nedeniyle mülakatı sonlandırdı",
-                "snapshot_id": _nearest_snapshot_id(effective_candidate_id, _safe_int(data.duration_seconds) * 1000),
-                "weight": "sonlandırma", "source": "ai",
-            }, skip_if_any=True)
-        elif data.end_reason == "baglanti_koptu":
-            reason_text = "Sesli görüşme bağlantısı koptuğu için mülakat tamamlanamamıştır."
-            terminated_reason = "Bağlantı koptu (teknik)"
-            technical_error_ref = f"realtime_connection_lost @ {_now_ts()}"
-            _append_result_event(effective_candidate_id, candidate_level, {
-                "type": "technical_failure", "subtype": "baglanti_koptu",
-                "elapsed_ms": _safe_int(data.duration_seconds) * 1000,
-                "elapsed_minute": round(_safe_int(data.duration_seconds) / 60, 1),
-                "description": "Sesli görüşme (WebRTC) bağlantısı koptu; mülakat süre dolmadan sonlandı",
-                "weight": "sonlandırma", "source": "system",
-            }, skip_if_any=True)
-        else:  # aday_talebi
-            reason_text = "Aday mülakatı kendi isteğiyle sonlandırdığı için değerlendirme tamamlanamamıştır."
-            terminated_reason = "Aday talebiyle erken sonlandırıldı"
-            technical_error_ref = None
-            _append_result_event(effective_candidate_id, candidate_level, {
-                "type": "termination", "subtype": "aday_talebi",
-                "elapsed_ms": _safe_int(data.duration_seconds) * 1000,
-                "elapsed_minute": round(_safe_int(data.duration_seconds) / 60, 1),
-                "description": "Aday mülakatı kendi isteğiyle sonlandırdı",
-                "weight": "sonlandırma", "source": "candidate",
-            }, skip_if_any=True)
+    # A4: modelin bildirdiği kriter kapsanma yüzdelerini sakla (rapor + admin panel için).
+    if _coverage:
+        try:
+            db = get_db()
+            db.execute("UPDATE interviews SET criteria_coverage_json=? WHERE candidate_id=? AND level=?",
+                       (json.dumps(_coverage, ensure_ascii=False)[:4000], effective_candidate_id, candidate_level))
+            db.commit(); db.close()
+        except Exception as e:
+            print(f"UYARI (criteria_coverage kaydı c={effective_candidate_id}): {type(e).__name__}: {e}")
+
+    # A5: end_reason'ı transkriptle doğrula — 'aday_talebi' ama açık niyet yoksa 'tamamlandı'ya düşür.
+    effective_end_reason, downgraded = validate_end_reason(data.end_reason, data.transcript)
+    if downgraded:
+        record_realtime_events(effective_candidate_id, candidate_level, [{
+            "type": "end_reason_downgraded",
+            "data": {"raw": data.end_reason, "effective": effective_end_reason,
+                     "reason": "transkriptin son aday sözlerinde açık bitirme niyeti bulunamadı"},
+            "elapsed_ms": _safe_int(data.duration_seconds) * 1000,
+        }])
+        print(f"[END_REASON_DOWNGRADE] c={effective_candidate_id} '{data.end_reason}' -> '{effective_end_reason}'")
+
+    # A3: sahte %95 tavanı YOK — gerçek oran (0-100'e sabitlenir).
+    _completion_pct = min(100, round(_safe_int(data.answered_count) / max(1, _l2_cfg["min_q"]) * 100))
+    # A1: veri yeterliliği — answered_count + criteria_coverage BİRLİKTE.
+    suff = assess_data_sufficiency(data.answered_count, _l2_cfg["min_q"], _coverage, pos_for_suff.get("criteria") or [])
+
+    # end_reason -> insana yönelik etiket + YAPILANDIRILMIŞ OLAY (C2 dar kapsam: bu bir 'kesme' değil, not).
+    _reason_meta = {
+        "aday_talebi":       ("Aday mülakatı normal kapanıştan önce sonlandırma talebinde bulundu", "termination", "candidate"),
+        "baglanti_koptu":    ("Sesli görüşme bağlantısı koptu; mülakat süre dolmadan sonlandı", "technical_failure", "system"),
+        "uygunsuz_davranis": ("Mülakatçı görüşmeyi davranış/tutum nedeniyle erken kapattı (gözlem — otomatik puan düşürmez)", "behavior_note", "ai"),
+    }
+    if effective_end_reason in _reason_meta:
+        _desc, _etype, _src = _reason_meta[effective_end_reason]
+        _append_result_event(effective_candidate_id, candidate_level, {
+            "type": _etype, "subtype": effective_end_reason,
+            "elapsed_ms": _safe_int(data.duration_seconds) * 1000,
+            "elapsed_minute": round(_safe_int(data.duration_seconds) / 60, 1),
+            "description": _desc,
+            "snapshot_id": _nearest_snapshot_id(effective_candidate_id, _safe_int(data.duration_seconds) * 1000),
+            "weight": "erken sonlandırma" if effective_end_reason != "tamamlandı" else "normal",
+            "source": _src,
+        })
+
+    # ═══ A2 SIRALAMA — (1) veri yeterli mi? değilse "Değerlendirilemedi" ═══
+    if not suff["sufficient"]:
+        reason_text = {
+            "aday_talebi": "Aday mülakatı kendi isteğiyle erken sonlandırdı ve güvenilir bir değerlendirme için yeterli veri oluşmadı",
+            "baglanti_koptu": "Sesli görüşme bağlantısı koptu ve yeterli değerlendirme verisi oluşmadı",
+            "uygunsuz_davranis": "Görüşme davranış/tutum nedeniyle erken kapandı ve yeterli değerlendirme verisi oluşmadı",
+            "tamamlandı": "Mülakat tamamlandı ancak güvenilir bir değerlendirme için yeterli aday yanıtı oluşmadı",
+        }.get(effective_end_reason, "Yeterli değerlendirme verisi oluşmadı")
+        reason_text += "; bu nedenle değerlendirme tamamlanamamıştır."
+        terminated_reason = _reason_meta.get(effective_end_reason, ("Yetersiz veri", None, None))[0]
+        technical_error_ref = f"realtime_connection_lost @ {_now_ts()}" if effective_end_reason == "baglanti_koptu" else None
+        record_system_decision(effective_candidate_id, candidate_level, "rapor_uretilmedi_yetersiz_veri", reason_text,
+                               {**suff, "end_reason": effective_end_reason, "raw_end_reason": data.end_reason,
+                                "downgraded": downgraded, "completion_pct": _completion_pct})
         log_ai_provider(candidate_level, "openai", "report_skipped_insufficient_data")
-        report = f"Aday: {candidate['name']}\nPozisyon: {candidate['position']}\n\nSONUÇ: DEĞERLENDİRİLEMEDİ\n\n{reason_text} Adayın söylemediği hiçbir bilgi eklenmemiş ve otomatik ret kararı verilmemiştir.\n\nBu mülakatın ~%{_completion_pct} bölümü tamamlanmıştır."
+        report = (f"Aday: {candidate['name']}\nPozisyon: {candidate['position']}\n\nSONUÇ: DEĞERLENDİRİLEMEDİ\n\n"
+                  f"{reason_text} Adayın söylemediği hiçbir bilgi eklenmemiş ve otomatik ret kararı verilmemiştir.\n\n"
+                  f"Bu mülakatın ~%{_completion_pct} bölümü tamamlanmıştır (cevaplanan tur: {suff['answered_count']} / hedef {suff['min_q']}).")
         return finalize_incomplete_interview(effective_candidate_id, report, terminated_reason=terminated_reason, level=candidate_level,
                                              technical_error_ref=technical_error_ref, completion_pct=_completion_pct, result_reason=reason_text)
 
+    # ═══ (2) veri yeterli → rapor + skor üret. (3) skor < 20 kontrolü finalize_interview'de (A2 adım 3). ═══
     if not OPENAI_API_KEY:
         log_ai_provider(candidate_level, "openai", "report_missing_api_key_fallback")
         reply = build_l2_short_report(candidate["name"], candidate["position"], "OPENAI_API_KEY tanımlı olmadığı için yedek rapor oluşturuldu. Transkript kaydedildi; yönetici transkripti ayrıca incelemelidir.")
         return finalize_interview(effective_candidate_id, reply, terminated_reason=None, level=candidate_level)
 
-    pos = get_position(candidate["position"]) or {"category": "Genel", "criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
-    criteria_text = build_criteria_text(pos["criteria"])
-    table_template = build_criteria_table_template(pos["criteria"])
-    total_weight = sum(c["weight"] for c in pos["criteria"])
-    report_lang = LANGUAGE_NAMES.get(candidate["report_language"] or "tr", "Türkçe")
-    # BUG FIX: bu prompt daha önce sadece transkripti görüyordu, adayın CV'sini hiç görmüyordu —
-    # "CV ↔ pozisyon uyumu" ve "CV Tutarlılığı" alanları bu yüzden L1/L3'e göre çok daha zayıf
-    # kalıyordu (model kıyaslayacak CV metnine erişemiyordu). L1/L3'teki gibi CV burada da veriliyor.
-    cv_for_report = candidate["cv_text"][:7000] if candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20 else "CV yüklenmemiş; sadece transkripte göre değerlendir."
-    # BUG FIX: ai_note (adminin adaya özel bağlayıcı talimatı) daha önce bu rapor promptuna
-    # hiç verilmiyordu — bu yüzden L2 raporlarında L1/L3'te var olan "AI Notuna Uyum" alanı
-    # hiç üretilemiyordu (model notun ne olduğunu bilmiyordu). Artık veriliyor.
-    ai_note_section = ""
-    ai_note_report_field = ""
-    if candidate["ai_note"] and candidate["ai_note"].strip():
-        ai_note_section = f"\n\nADAY ÖZEL AI NOTU (bu mülakatta bu konuya öncelik verilmiş olmalı, transkriptte nasıl ele alındığını değerlendir):\n{candidate['ai_note'].strip()[:1200]}"
-        ai_note_report_field = "\n**AI Notuna Uyum:** (bu adaya özel notun transkriptte nasıl ele alındığını somut olarak yaz: hangi soru/turlarda test edildi, sonucu ne oldu)"
+    early_note = ""
+    if effective_end_reason != "tamamlandı":
+        early_note = "\n\n" + {
+            "aday_talebi": ("ERKEN SONLANDIRMA (aday talebi): Aday normal kapanıştan önce mülakatı sonlandırdı. Raporu ELDEKİ "
+                            "veriyle üret; eksik kalan kriterleri 'değerlendirilemedi' işaretle, bunu TEK BAŞINA puan düşürme "
+                            "gerekçesi YAPMA. 'Sonuç Gerekçesi' bölümüne erken sonlandırmayı dakika + söz olarak somut yaz."),
+            "baglanti_koptu": ("ERKEN SONLANDIRMA (teknik): Sesli bağlantı koptu. Raporu ELDEKİ veriyle üret; teknik kesintiyi "
+                               "belirt, adayı bunun için cezalandırma."),
+            "uygunsuz_davranis": ("DAVRANIŞ GÖZLEMİ: Mülakatçı görüşmeyi davranış/tutum nedeniyle erken kapattı. Raporda "
+                                  "'Davranış ve Tutum Gözlemleri' başlığı altında SOMUT (dakika + transkriptteki söz) yaz. "
+                                  "Davranış puanı otomatik düşürmez; yalnızca yeterince kapsanamayan kriterler 'değerlendirilemedi' sayılır."),
+        }.get(effective_end_reason, "")
 
-    # Faz C: TAM FORMAT gövdesi REPORT_BODY_SECTIONS'tan deriveniyor (bkz. build_criteria_table_template
-    # üstündeki tanım main.py'de) — L1/L3 ile aynı kaynak.
-    # FAZ D1: level artık candidate_level (eskiden sabit 2). REPORT_BODY_SECTIONS'ta eskiden {2} olan
-    # her satır {2,3} yapıldı — böylece Level 3, Level 2'nin bugüne kadar aldığı zengin gövdeyi
-    # (Yönetici Özeti, Puanlama Kapsamı, Analitik Düşünme vb. dahil) artık kendi seviyesi için de alıyor.
-    # Bu, L3'ün BUGÜNKÜ çıktısını (Faz C'den beri sabit-2 üzerinden zaten hep L2 gövdesi almıştı)
-    # birebir korur — davranış değişikliği yok, sadece süzme mekanizması artık doğru alanı okuyor.
-    report_body_l2 = build_report_body(candidate_level, {
-        "candidate_name": candidate["name"], "position_name": candidate["position"],
-        "date_str": datetime.now().strftime('%d.%m.%Y'), "total_weight": total_weight,
-        "ai_note_report_field": ai_note_report_field,
-    })
-
-    report_prompt = f"""Aşağıda bir sesli iş mülakatının transkripti, aday CV'si, pozisyon kriterleri ve derinlik bilgisi vardır. İnsan kaynakları yöneticisinin karar vermesine yardım edecek, adaya özgü ve ayrıntılı bir değerlendirme raporu üret.
-
-Aday: {candidate['name']}
-Pozisyon: {candidate['position']}
-Mülakat seviyesi: Level {candidate_level}
-Derinlik: {(candidate['depth_tier'] if 'depth_tier' in candidate.keys() else 'standart') or 'standart'}
-Kriterler ({total_weight} puan):
-{criteria_text}
-
-ADAYIN CV'Sİ:
-{cv_for_report}{ai_note_section}
-
-TRANSKRİPT:
-{data.transcript[:30000]}
-
-TEMEL KURALLAR:
-- Rapor {report_lang} dilinde yazılacak.
-- Yalnızca adayın gerçekten söylediği sözler mülakat kanıtıdır. Mülakatçının açıklamalarını adaya mal etme.
-- CV bilgisi ile mülakat kanıtını ayır: “CV'de belirtilmiştir” ve “mülakatta doğrulanmıştır/doğrulanamamıştır” ifadelerini açık kullan.
-- Adayın söylemediği deneyim, beceri, sonuç, motivasyon veya kişilik özelliği uydurma.
-- Aynı kalıp cümleleri her bölümde tekrar etme. Rapor bu adaya özgü olmalı; somut proje, karar, örnek ve ifadeleri kullan.
-- Sorulmayan veya yeterli veri oluşmayan kriterlere otomatik 0 verme. “Değerlendirilmedi / yeterli kanıt oluşmadı” yaz. Toplam puanı yalnızca gerçekten değerlendirilen kriterlerin ağırlıklarını 100'e normalize ederek hesapla ve raporda hangi kriterlerin değerlendirilmediğini belirt.
-- Aday bir konuda sorulup açıkça bilmediğini/uygulamadığını söylediyse bu “değerlendirildi fakat yetersiz” sayılabilir; hiç sorulmadıysa “değerlendirilmedi” sayılır.
-- Her puan için Kanıt → Analiz → Sonuç zinciri kur.
-- Analitik düşünme, kavrama, muhakeme, neden-sonuç kurma, problem çözme, düşünce esnekliği, öğrenme çevikliği ve belirsizlikte karar verme hakkında yalnızca transkriptte gözlenebilen sinyalleri yaz. IQ, zekâ puanı, psikiyatrik tanı, yalan tespiti veya kesin kişilik teşhisi yapma.
-- Görüşme kalitesi veya teknik kesinti değerlendirmeyi etkilediyse bunu ayrıca belirt; adayı bunun için cezalandırma.
-- En az üç anlamlı aday cevabı yoksa [DEĞERLENDİRİLEMEDİ] üret.
-- Derinlik “derin” ise rapor daha kapsamlı, daha fazla çapraz kanıtlı ve daha ayrıntılı olmalı; standart rapor da kesinlikle yüzeysel olmamalı.
-
-TAM FORMAT:
-[MÜLAKATBİTTİ]
----RAPOR---
-{report_body_l2}
-
-Çıktı mutlaka [MÜLAKATBİTTİ] ve ---RAPOR--- bloklarıyla başlasın."""
-
-    # KAPANIŞ İŞLEMİNİ ARKA PLANA ALMA: GPT-4o çağrısı (2600 token) burada YAPILMAZ — gönderilecek
-    # tam promptu (report_prompt) aynen DB'ye yazıp arka planda çalıştırıyoruz. Aday bekleme süresi
-    # DB yazımı kadar; rapor üretimi/parse/e-posta arkada olur. interview_chat'teki should_finish
-    # ile aynı mekanizma (run_deferred_finish_job), sadece provider="openai".
+    report_prompt = build_l2_report_prompt(candidate, candidate_level, data.transcript, criteria_coverage=_coverage, extra_notes=early_note)
+    record_system_decision(effective_candidate_id, candidate_level, "rapor_uretiliyor",
+                           "Veri yeterli (assess_data_sufficiency); normal rapor yolu.",
+                           {**suff, "end_reason": effective_end_reason, "raw_end_reason": data.end_reason,
+                            "downgraded": downgraded, "completion_pct": _completion_pct})
     _mark_finish_pending(effective_candidate_id, candidate_level, provider="openai", model=OPENAI_REPORT_MODEL,
                           system=None, payload=report_prompt, terminated_reason=None, reason="l2_normal")
     background_tasks.add_task(run_deferred_finish_job, effective_candidate_id, candidate_level)
@@ -5165,7 +5325,104 @@ def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depend
         result["result_events"] = []
     _rr = (result.get("result_reason") or "").strip()
     result["result_reason_missing"] = _rr.startswith("[EKSİK")
+
+    # ═══ BÖLÜM D1 — tam oturum kaydı (admin görünür, ham) ═══
+    def _loadj(col):
+        try:
+            v = interview[col] if col in interview.keys() else None
+            return json.loads(v) if v else None
+        except Exception:
+            return None
+    result["criteria_coverage"] = _loadj("criteria_coverage_json")
+    result["criterion_attempts"] = _loadj("criterion_attempts_json")     # B2 (L1 metin)
+    result["system_decision"] = _loadj("system_decision_json")           # A1/A5: neden rapor üretildi/üretilmedi
+    try:
+        ev_rows = db.execute(
+            "SELECT event_type, event_data, elapsed_ms, created_at FROM realtime_events WHERE candidate_id=? AND level=? ORDER BY id ASC",
+            (candidate_id, level)
+        ).fetchall()
+    except Exception:
+        ev_rows = []
+    rt_events = []
+    for r in ev_rows:
+        try:
+            d = json.loads(r["event_data"]) if r["event_data"] else {}
+        except Exception:
+            d = {}
+        rt_events.append({"type": r["event_type"], "data": d, "elapsed_ms": r["elapsed_ms"], "created_at": r["created_at"]})
+    result["realtime_events"] = rt_events
+    # Türetilmiş alt-listeler (admin panelde ayrı bölümler)
+    result["filtered_transcriptions"] = [e for e in rt_events if e["type"] == "transcription_filtered"]           # B1
+    result["tool_calls"] = [e for e in rt_events if e["type"] in ("end_interview", "note_voice_observation", "tool_call")]
+    result["connection_events"] = [e for e in rt_events if e["type"] in (
+        "session.created", "end_reason_downgraded", "conversation.item.truncated",
+        "input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped")]
+    try:
+        snap_rows = db.execute(
+            "SELECT id, elapsed_ms, reason, captured_at FROM snapshots WHERE candidate_id=? AND (reason IS NULL OR reason<>'mimic_sample') ORDER BY COALESCE(elapsed_ms,0) ASC, id ASC",
+            (candidate_id,)
+        ).fetchall()
+        result["camera_frames"] = [{"id": r["id"], "elapsed_ms": r["elapsed_ms"], "reason": r["reason"], "captured_at": r["captured_at"]} for r in snap_rows]
+    except Exception:
+        result["camera_frames"] = []
     return result
+
+@app.post("/api/admin/interviews/{candidate_id}/regenerate-report")
+def regenerate_report(candidate_id: int, background_tasks: BackgroundTasks, level: Optional[int] = None, payload=Depends(verify_admin), db=Depends(db_dep)):
+    """A6: KAYITLI transkriptten raporu yeniden üretir. Yeni sesli oturum AÇMAZ, adaya dokunmaz.
+    Faz D katmanları (mimik/ses metrikleri) build_modality_evidence_block üzerinden zaten dahil
+    edilir (run_deferred_finish_job içinde). İdempotent değildir — her çağrı yeni rapor üretir."""
+    scoped_org_id = get_org_id_for_admin(db, payload)
+    cand = db.execute("SELECT * FROM candidates WHERE id=? AND org_id=?", (candidate_id, scoped_org_id)).fetchone()
+    if not cand:
+        raise HTTPException(status_code=404, detail="Aday bulunamadı")
+    if level is None:
+        level = cand["level"] or 1
+    interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+    if not interview:
+        raise HTTPException(status_code=404, detail="Bu seviye için mülakat kaydı yok")
+
+    tview = build_transcript_view(interview["messages"] if "messages" in interview.keys() else "[]", level,
+                                  interview["started_at"] if "started_at" in interview.keys() else None)
+    transcript_text = transcript_to_text(tview)
+    if not transcript_text or len(transcript_text.strip()) < 40:
+        raise HTTPException(status_code=400, detail="Kayıtlı transkript yok veya rapor üretmek için çok kısa")
+
+    try:
+        _cov = json.loads(interview["criteria_coverage_json"]) if ("criteria_coverage_json" in interview.keys() and interview["criteria_coverage_json"]) else None
+    except Exception:
+        _cov = None
+
+    # Voice akışı (L2 her zaman, L3 sesli) → OpenAI; saf metin L1 → Claude.
+    use_openai_voice = (level == 2) or (level == 3)
+    if use_openai_voice:
+        if not OPENAI_API_KEY:
+            raise HTTPException(status_code=503, detail="OPENAI_API_KEY tanımlı değil")
+        prompt = build_l2_report_prompt(cand, level, transcript_text, criteria_coverage=_cov,
+                                        extra_notes="\n\nNOT: Bu rapor, yönetici talebiyle kayıtlı transkriptten YENİDEN üretiliyor.")
+        prov, mdl, system = "openai", OPENAI_REPORT_MODEL, None
+    else:
+        if not ANTHROPIC_API_KEY:
+            raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY tanımlı değil")
+        system = get_system_prompt(cand["position"], cand["name"], cand["cv_text"], cand["ai_note"],
+                                   cand["education"], cand["university"], cand["department"], cand["experience_years"],
+                                   level, cand["interview_language"] or "tr", cand["report_language"] or "tr",
+                                   (cand["depth_tier"] if "depth_tier" in cand.keys() else "standart") or "standart")
+        prompt = (f"GÖREV: Aşağıdaki tam transkriptten mülakatı bitir ve raporu üret (yönetici talebiyle YENİDEN üretim). "
+                  f"Elindeki veriyle adil değerlendir; sorulmamış kriterleri 'değerlendirilemedi' işaretle. [MÜLAKATBİTTİ] etiketini kullan.\n\n"
+                  f"=== TAM TRANSKRİPT ===\n{transcript_text[:24000]}")
+        prov, mdl = "claude", "claude-sonnet-4-6"
+
+    # completed_at'i sıfırla ki run_deferred_finish_job idempotency guard'ına takılmasın.
+    db.execute("UPDATE interviews SET completed_at=NULL, score=NULL, recommendation=NULL WHERE candidate_id=? AND level=?", (candidate_id, level))
+    db.commit()
+    _mark_finish_pending(candidate_id, level, provider=prov, model=mdl, system=system, payload=prompt,
+                         terminated_reason=interview["terminated_reason"] if "terminated_reason" in interview.keys() else None,
+                         reason="admin_regenerate")
+    record_system_decision(candidate_id, level, "rapor_yeniden_uretiliyor",
+                           f"Yönetici ({payload.get('email') or 'admin'}) kayıtlı transkriptten yeniden üretim başlattı.", {"level": level})
+    background_tasks.add_task(run_deferred_finish_job, candidate_id, level)
+    return {"message": "Rapor yeniden üretiliyor; birkaç dakika içinde hazır olacak.", "processing": True}
 
 @app.get("/api/admin/interviews/{candidate_id}/transcript")
 def download_interview_transcript(candidate_id: int, level: Optional[int] = None, payload=Depends(verify_admin), db=Depends(db_dep)):
