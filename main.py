@@ -527,6 +527,7 @@ def init_db():
         ("interviews", "report_generated_at", "TIMESTAMP" if USE_POSTGRES else "TEXT"),  # ilk rapor üretiminin bittiği an
         ("interviews", "report_tech_note", "TEXT"),  # KALEM 5 — yalnız yönetici: token kesilmesi vb. teknik notlar (müşteri raporuna girmez)
         ("interviews", "reviewer_score_revision_json", "TEXT"),  # KALEM 9 — ikinci modelin tetiklediği kriter puan revizyonları
+        ("interviews", "reviewer_summary_tone", "TEXT"),  # denetçinin Yönetici Özeti sonuç tonu değerlendirmesi (OLUMLU/NOTR/OLUMSUZ)
         ("candidates", "person_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("candidates", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("positions", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
@@ -2144,7 +2145,7 @@ REPORT_BODY_SECTIONS = [
     ("kategori",       {1},       "**Kategori:** {category}"),
     ("tarih",          {1, 2, 3}, "**Tarih:** {date_str}"),
     ("_blank1",        {1, 2, 3}, ""),
-    ("yonetici_ozeti", {2, 3},    "**Yönetici Özeti:** (adayın genel profili, pozisyona uyumu, en güçlü 2-3 sinyal, en önemli 2-3 risk ve karar önerisi; genel kalıp değil, bu adaya özgü)"),
+    ("yonetici_ozeti", {2, 3},    "**Yönetici Özeti:** (adayın genel profili, pozisyona uyumu, en güçlü 2-3 sinyal, en önemli 2-3 risk ve karar önerisi; genel kalıp değil, bu adaya özgü. SON cümle bir KARAR/SONUÇ cümlesi olmalı ve verdiğin Öneri ile AYNI YÖNDE olmalı: Öneri 'Reddet' ise burada 'değerlendirmeye alınabilir / potansiyeli var / uygun' gibi olumlu sonuç ifadesi KULLANMA.)"),
     ("_blank2",        {2, 3},    ""),
     ("toplam_puan",    {1, 2, 3}, "**TOPLAM PUAN: XX/{total_weight}**"),
     ("puanlama_kapsami", {2, 3},  "**Puanlama Kapsamı:** (hangi kriterler değerlendirildi, hangileri değerlendirilmedi; normalize yöntemini kısa açıkla)"),
@@ -2174,7 +2175,7 @@ REPORT_BODY_SECTIONS = [
     ("genel_kani_l13", {1},       "**Genel Kanı:** ...{note_report_field}"),
     ("genel_kani_l2",  {2, 3},    "**Genel Kanı:** (kanıtların dengeli sentezi){ai_note_report_field}"),
     ("oneri",          {1, 2, 3}, "**Öneri:** İşe Al / Değerlendirmeye Al / Reddet"),
-    ("oneri_gerekcesi", {2, 3},   "**Öneri Gerekçesi:** (tek paragraf, somut ve karar destekleyici; kararın PUAN 1'e dayandığını belirt)"),
+    ("oneri_gerekcesi", {2, 3},   "**Öneri Gerekçesi:** (tek paragraf, somut ve kararı DESTEKLEYEN yönde; kararın PUAN 1'e dayandığını belirt. Öneri 'Reddet' ise gerekçe de olumsuz sonuçlanmalı — 'yeterli potansiyele sahip / uygun' gibi kararla çelişen ifade YASAK.)"),
     ("_blank_p2a",     {1, 2, 3}, ""),
     ("puan2_baslik",   {1, 2, 3}, "---\n### PUAN 2 — KİŞİSEL VE BİLİŞSEL PROFİL (pozisyondan bağımsız, her aday için sabit)"),
     ("puan2_aciklama", {1, 2, 3}, "(Bu bölüm PUAN 1'den / pozisyon uygunluğundan AYRIDIR ve işe alım kararını TEK BAŞINA belirlemez. Her kriter için transkriptten SOMUT bir örnek ve [dk] dakika damgası ZORUNLU — dayanaksız çıkarım, kişilik teşhisi, IQ/zekâ yorumu YASAK. Eksik kriterde PUAN 1 ile AYNI ayrım: `Değerlendirilmedi (sorulmadı) — <gerekçe>` (paydayı etkilemez) vs `Yetersiz (soruldu, veri alınamadı) — <gerekçe>` (0 puan, paydada kalır).)"),
@@ -2388,6 +2389,7 @@ GENEL:
 - Bir kriter için yeterli veri toplanamadıysa (yeniden sorulmasına rağmen yanıtsız kaldıysa) raporda "Yanıtsız/Değerlendirilemeyen Kriterler" olarak AYRI listele; bu kriterlere puan verme, toplamı değerlendirilen kriterlerin ağırlığına normalize et.
 - PUAN TAVANI (KESİN): Hiçbir kriter puanı kendi tavanını (ağırlığını) AŞAMAZ ("12/10" ASLA; en fazla "10/10"). TOPLAM PUAN = alınan puanların toplamı; payda = değerlendirilen kriterlerin ağırlık toplamı. Sistem ayrıca doğrular.
 - ÇİFT PUANLAMA (KESİN): Rapor İKİ ayrı puan içerir. **PUAN 1 = TOPLAM PUAN** — yukarıdaki POZİSYON kriterleri; işe alım önerisi (İşe Al / Değerlendirmeye Al / Reddet) YALNIZCA buna göre verilir. **PUAN 2 = PROFİL PUANI** — pozisyondan bağımsız, her adayda aynı olan kişisel/bilişsel profil kriterleri; her satır transkriptten somut örnek + [dk] ile. İki tabloyu ve iki puanı KARIŞTIRMA; profil kriterlerini pozisyon tablosuna, pozisyon kriterlerini profil tablosuna YAZMA.
+- ÖNERİ ↔ METİN TUTARLILIĞI (KESİN): PUAN 1 (TOPLAM PUAN, 100 üzerinden normalize) şu eşiklere göre öneriyi belirler: **<40 → Reddet · 40–79 → Değerlendirmeye Al · ≥80 → İşe Al**. Verdiğin Öneri, TOPLAM PUAN'ının bu eşikteki karşılığı olmalı. Yönetici Özeti'nin SON (karar) cümlesi ve Öneri Gerekçesi, bu öneriyle AYNI YÖNDE yazılır. Öneri "Reddet" iken metinde "değerlendirmeye alınabilir / potansiyeli var / uygun / yeterli düzeyde" gibi olumlu sonuç ifadesi KULLANMAK YASAKTIR; tersi de geçerli.
 - KRİTER TABLOSU: yukarıda verilen kriter satırlarını AYNEN kullan — satır ekleme/çıkarma/yeniden adlandırma YOK. Her satır: `<puan>/<tavan>` | `Değerlendirilmedi (sorulmadı) — <gerekçe>` (hiç sorulmadı/teknik/süre — paydayı etkilemez) | `Yetersiz (soruldu, cevap alınamadı) — <gerekçe>` (soruldu ama aday cevap veremedi/kaçındı — 0 puan, paydada kalır). Defalarca sorulup cevapsız kalan kriter "Yetersiz"tir.
 - Mesajın başına mutlaka [SÜRE:XX] koy: kısa 45-60, senaryo 75-100, kritik soru 90-120.
 - Mülakatı bitirmeden önce, GÖREV satırı bitirmeni söylediğinde son soru olarak şunu sor: "Eklemek veya öne çıkarmak istediğiniz başka bir şey var mı?" — bu, mülakatta suskun kalmış ama sahada güçlü olabilecek adaylar için bir son fırsat turu, sadece bitiş dönüşünde bir kez sorulur.
@@ -3991,48 +3993,100 @@ Mevcut veri rapor için sınırlıdır. Nihai karar için adaydan daha kapsamlı
 # ═══ KALEM 3 — rapor içi çelişki temizliği (öneri tek kaynak, geri alınmış kayıtlar, prefix idempotent) ═══
 _REGEN_FIX_PREFIX = "[Rapor yeniden üretiminde düzeltildi]"
 
-_REC_KEYWORDS = {
-    "Reddet": (r"redded|reddi|olumsuz|uygun\s+değil|elenmes|işe\s+al[ıi]nmamas",),
-    "Değerlendirmeye Al": (r"değerlendirmeye\s+al|değerlendirilmes|ikinci\s+(bir\s+)?görüşme|havuzda\s+tut|beklemeye\s+al",),
-    "İşe Al": (r"işe\s+al[ıi]nmas|işe\s+al[ıi]n|teklif\s+(ver|yap)|olumlu\s+öneril|kadroya",),
-}
+# NOT (bu tur): önceki "_REC_KEYWORDS ile öneri↔gerekçe çelişki tespiti" KALDIRILDI — model her
+# raporda başka kelime seçtiği için yapısal olarak çözmüyordu. Gerekçe artık KOŞULSUZ deterministik
+# üretiliyor (bkz. _recommendation_rationale + sync_recommendation_line).
 
-def _recommendation_rationale(recommendation: str, score_position, score_profile) -> str:
-    """KALEM 6 — öneri gerekçesi TEK KAYNAK: karardan + PUAN 1'den türetilir."""
-    sp = "" if score_position is None else f" (PUAN 1 = {score_position}/100)"
+def _recommendation_rationale(recommendation: str, score_position, score_profile, veto_reason=None) -> str:
+    """KALEM 1 (bu tur) — öneri gerekçesi TEK KAYNAK: karardan + PUAN 1 + PUAN 2 (+ varsa veto)."""
+    sp = "" if score_position is None else f"PUAN 1 = {score_position}/100"
+    pp = "" if score_profile is None else f", PUAN 2 = {score_profile}/100"
+    scores = f" ({sp}{pp})" if sp else ""
+    if veto_reason:
+        return (f"Karar: Reddet. Kurumsal ortamda çalışmaya engel olacak düzeyde ciddi bir profil bulgusu "
+                f"(profil vetosu) tespit edilmiştir: {veto_reason}. Bu, PUAN 1'den bağımsız bir veto nedenidir.")
     if recommendation == "Reddet":
-        return (f"Pozisyon uygunluğu puanı{sp} yetersiz; aday pozisyon kriterlerinin çoğunda gereken "
-                f"yetkinlik düzeyini gösteremedi. Karar PUAN 1'e dayanmaktadır.")
+        return (f"Karar: Reddet. Pozisyon uygunluğu puanı{scores} yetersiz; aday pozisyon kriterlerinin "
+                f"çoğunda gereken yetkinlik düzeyini gösteremedi. Karar PUAN 1'e dayanmaktadır.")
     if recommendation == "İşe Al":
-        return (f"Pozisyon uygunluğu puanı{sp} güçlü; aday pozisyon kriterlerinin çoğunda net yetkinlik "
-                f"gösterdi. Karar PUAN 1'e dayanmaktadır.")
+        return (f"Karar: İşe Al. Pozisyon uygunluğu puanı{scores} güçlü; aday pozisyon kriterlerinin "
+                f"çoğunda net yetkinlik gösterdi. Karar PUAN 1'e dayanmaktadır.")
     if recommendation == "Değerlendirilemedi":
-        return "Güvenilir bir değerlendirme için yeterli veri oluşmadığından öneri verilememiştir."
-    return (f"Pozisyon uygunluğu puanı{sp} orta düzeyde; aday bazı kriterlerde yeterli, bazılarında sınırlı. "
-            f"İkinci bir görüşme veya ek kontrolle netleştirilmesi önerilir. Karar PUAN 1'e dayanmaktadır.")
+        return "Karar: Değerlendirilemedi. Güvenilir bir değerlendirme için yeterli veri oluşmadığından öneri verilememiştir."
+    return (f"Karar: Değerlendirmeye Al. Pozisyon uygunluğu puanı{scores} orta düzeyde; aday bazı "
+            f"kriterlerde yeterli, bazılarında sınırlı kaldı. İkinci bir görüşme veya ek kontrolle "
+            f"netleştirilmesi önerilir. Karar PUAN 1'e dayanmaktadır.")
 
-def sync_recommendation_line(report: str, recommendation: str, score_position=None, score_profile=None) -> str:
-    """KALEM 3 + 6 — TEK KAYNAK: '**Öneri:** <değer>' satırı DB recommendation ile aynı yapılır;
-    ayrıca '**Öneri Gerekçesi:**' cümlesi öneriyle çelişiyorsa (kelime bazlı) deterministik
-    gerekçeyle değiştirilir. Çelişmiyorsa modelin metnine dokunulmaz."""
+def _summary_conclusion_sentence(recommendation: str, score_position) -> str:
+    """KALEM 2 (bu tur) — Yönetici Özeti KARAR cümlesi: deterministik, öneriyle her zaman aynı yönde."""
+    sp = "" if score_position is None else f" (PUAN 1 = {score_position}/100)"
+    return {
+        "Reddet": f"Sistem sonucu: Aday bu pozisyon için uygun görülmemektedir{sp}. Öneri: Reddet.",
+        "İşe Al": f"Sistem sonucu: Aday bu pozisyon için uygun görülmektedir{sp}. Öneri: İşe Al.",
+        "Değerlendirilemedi": "Sistem sonucu: Güvenilir bir değerlendirme için yeterli veri oluşmamıştır. Öneri: Değerlendirilemedi.",
+    }.get(recommendation,
+          f"Sistem sonucu: Aday sınırda görülmektedir{sp}; ikinci bir değerlendirme önerilir. Öneri: Değerlendirmeye Al.")
+
+# _POSITIVE_TONE / _NEGATIVE_TONE: yalnızca DENETÇİ TONU ('OLUMLU'/'OLUMSUZ') alınamadığında,
+# Yönetici Özeti sonuç cümlesinin öneriyle YÖN uyumsuzluğunu son çare olarak yakalamak için.
+def _summary_conclusion_conflicts(tone: Optional[str], recommendation: str) -> bool:
+    t = (tone or "").upper()
+    if t == "OLUMLU" and recommendation == "Reddet":
+        return True
+    if t == "OLUMSUZ" and recommendation in ("İşe Al",):
+        return True
+    return False
+
+def _rewrite_summary_conclusion(report: str, recommendation: str, score_position, replace_last: bool) -> str:
+    """Yönetici Özeti paragrafına deterministik karar cümlesi işler.
+    replace_last=True  → paragrafın son (karar) cümlesini SİLİP yerine koyar (denetçi tonu çelişkili).
+    replace_last=False → modelin cümlesine dokunmadan sonuna EKLER (ton bilinmiyor)."""
+    m = re.search(r"(\*{0,2}\s*Yönetici Özeti\s*\*{0,2}\s*:\s*)([\s\S]*?)(?=\n\s*\n|\n\s*\*{0,2}[A-ZÇĞİÖŞÜ][^\n:]{2,40}\s*\*{0,2}\s*:|\Z)",
+                  report, flags=re.IGNORECASE)
+    if not m:
+        return report
+    para = m.group(2).rstrip()
+    new_sent = _summary_conclusion_sentence(recommendation, score_position)
+    if "Sistem sonucu:" in para:
+        return report
+    sents = re.split(r"(?<=[.!?])\s+", para)
+    last = sents[-1].strip() if sents else ""
+    decision_like = re.search(r"genel olarak|sonuç olarak|özetle|değerlendirmeye al|değerlendirilebil|öneril|uygun|potansiyel|karar", last, re.IGNORECASE)
+    if replace_last and decision_like and len(sents) > 1:
+        para_new = " ".join(sents[:-1]).rstrip() + " " + new_sent
+    else:
+        para_new = para.rstrip() + " " + new_sent
+    return report[:m.start(2)] + para_new + report[m.end(2):]
+
+def sync_recommendation_line(report: str, recommendation: str, score_position=None, score_profile=None,
+                             veto_reason=None, summary_tone=None) -> str:
+    """KALEM 1+2 (bu tur) — TEK KAYNAK, KOŞULSUZ:
+      - '**Öneri:** <değer>' satırı DB recommendation ile aynı yapılır.
+      - '**Öneri Gerekçesi:**' cümlesi HER ZAMAN _recommendation_rationale ile değiştirilir;
+        modelin cümlesi ' Model notu: <...>' olarak korunur (bilgi kaybı yok).
+      - Yönetici Özeti sonuç cümlesi öneriyle çelişiyorsa (denetçi tonu, yoksa son çare kelime
+        kontrolü) deterministik karar cümlesiyle değiştirilir.
+    Kelime listesiyle 'çelişki tespiti' KALDIRILDI — yapısal olarak çözmüyordu."""
     if not report or not recommendation:
         return report
     out = re.sub(r"(\**\s*Öneri\s*:\s*\**\s*)(İşe Al|Değerlendirmeye Al|Reddet|Değerlendirilemedi)\b[^\n]*",
                  lambda m: f"{m.group(1)}{recommendation}", report, count=1, flags=re.IGNORECASE)
-    # Öneri Gerekçesi satırı: önerinin TERSİNİ söylüyorsa değiştir
+    _det = _recommendation_rationale(recommendation, score_position, score_profile, veto_reason)
     def _rat_repl(m):
-        body = m.group(2)
-        low = body.lower()
-        contradicts = any(
-            rec != recommendation and any(re.search(p, low) for p in pats)
-            for rec, pats in _REC_KEYWORDS.items()
-        )
-        aligns = any(re.search(p, low) for p in _REC_KEYWORDS.get(recommendation, ()))
-        if contradicts and not aligns:
-            return f"{m.group(1)}{_recommendation_rationale(recommendation, score_position, score_profile)}"
-        return m.group(0)
-    out = re.sub(r"(\**\s*Öneri\s+Gerekçesi\s*:\s*\**\s*)([^\n]*)",
-                 _rat_repl, out, count=1, flags=re.IGNORECASE)
+        orig = (m.group(2) or "").strip()
+        if orig.startswith(_det[:40]):   # idempotent: zaten deterministik yazılmış
+            return m.group(0)
+        model_note = f" Model notu: {orig}" if orig and "Model notu:" not in orig else ""
+        return f"{m.group(1)}{_det}{model_note}"
+    out = re.sub(r"(\**\s*Öneri\s+Gerekçesi\s*:\s*\**\s*)([^\n]*)", _rat_repl, out, count=1, flags=re.IGNORECASE)
+    # Yönetici Özeti sonuç cümlesi:
+    #  - denetçi tonu ÇELİŞKİLİ (OLUMLU↔Reddet / OLUMSUZ↔İşe Al) → modelin son cümlesini DEĞİŞTİR
+    #  - ton alınamadı (denetçi atlandı/patladı) → modelin cümlesine dokunma, sonuna deterministik ekle
+    #  - ton uyumlu → hiç dokunma
+    if _summary_conclusion_conflicts(summary_tone, recommendation):
+        out = _rewrite_summary_conclusion(out, recommendation, score_position, replace_last=True)
+    elif summary_tone is None:
+        out = _rewrite_summary_conclusion(out, recommendation, score_position, replace_last=False)
     return out
 
 def sync_report_date_line(report: str, date_str: str) -> str:
@@ -4488,8 +4542,13 @@ Raporu YENİDEN YAZMA. Sadece şunları Türkçe, kısa ve madde madde ver:
 2. EKSİK KANIT: transkriptte olan ama taslağın atladığı önemli sinyaller.
 3. PUAN KALİBRASYONU: Taslaktaki toplam puan kanıtlara göre yüksek mi / düşük mü / uygun mu — tek cümle gerekçe. (Kriter puanları sunucu tarafından tavana göre normalize edilir; sen yalnız kanıt-puan tutarlılığına bak.)
 4. GÜVEN DÜZEYİ: (yüksek / orta / düşük) + kısa neden.
+5. PUANI FAZLA DÜŞÜK KRİTER(LER): Bir kriterin puanı transkriptteki kanıta göre olması gerekenden DÜŞÜKSE adını yaz. (Sistem yükseltme YAPMAZ; yalnız rapora not düşer.)
 
-İLKE: Kanıt yoksa ne lehte ne aleyhte varsayım yapma. Modalite kanıtları (mimik/ses) puanı DEĞİŞTİRMEZ; yalnızca destekleyici. Belirgin bir sorun yoksa yalnızca "Belirgin bir görüş ayrılığı yok." yaz.
+Yanıtının EN SONUNA, ayrı satırlarda, TAM OLARAK bu iki etiketi ekle (otomatik ayrıştırılacak):
+OZET_TON: <Taslağın "Yönetici Özeti" bölümünün KARAR/SONUÇ cümlesinin genel tonu — yalnız şu üçünden biri: OLUMLU | NOTR | OLUMSUZ>
+DUSUK_PUAN: <5. maddedeki kriter adları, virgülle; yoksa: yok>
+
+İLKE: Kanıt yoksa ne lehte ne aleyhte varsayım yapma. Modalite kanıtları (mimik/ses) puanı DEĞİŞTİRMEZ; yalnızca destekleyici. Belirgin bir sorun yoksa "Belirgin bir görüş ayrılığı yok." yaz (etiketleri yine ekle).
 
 === TRANSKRİPT ===
 {(transcript_text or '')[:20000]}
@@ -4514,13 +4573,37 @@ Raporu YENİDEN YAZMA. Sadece şunları Türkçe, kısa ve madde madde ver:
         print(f"UYARI (run_report_reviewer c={candidate_id} L{level}): {type(e).__name__}: {e}")
         return "", "failed", f"{type(e).__name__}: {e}"
 
-def _insert_report_section(reply: str, section_body: str) -> str:
+def parse_reviewer_meta(notes: str) -> dict:
+    """Denetçi çıktısının sonundaki 'OZET_TON:' / 'DUSUK_PUAN:' etiketlerini ayrıştırır.
+    Dönüş: {'ozet_ton': 'OLUMLU'|'NOTR'|'OLUMSUZ'|None, 'dusuk_puan': [kriter adları]}."""
+    out = {"ozet_ton": None, "dusuk_puan": []}
+    if not notes:
+        return out
+    mt = re.search(r"OZET_TON\s*:\s*(OLUMLU|NOTR|NÖTR|OLUMSUZ)", notes, re.IGNORECASE)
+    if mt:
+        v = mt.group(1).upper().replace("NÖTR", "NOTR")
+        out["ozet_ton"] = v
+    md = re.search(r"DUSUK_PUAN\s*:\s*([^\n]+)", notes, re.IGNORECASE)
+    if md:
+        raw = md.group(1).strip()
+        if raw.lower() not in ("yok", "-", "none", "hiçbiri", "hicbiri", ""):
+            out["dusuk_puan"] = [s.strip() for s in re.split(r"[,;/]| ve ", raw) if s.strip() and len(s.strip()) > 2][:4]
+    return out
+
+def strip_reviewer_meta_tags(notes: str) -> str:
+    """Rapora eklenirken 'OZET_TON:' / 'DUSUK_PUAN:' etiket satırları görünmesin (iç kullanım)."""
+    if not notes:
+        return notes
+    return re.sub(r"\n?^[ \t]*(OZET_TON|DUSUK_PUAN)\s*:[^\n]*$", "", notes, flags=re.IGNORECASE | re.MULTILINE).strip()
+
+def _insert_report_section(reply: str, section_body: str, pre_note: str = "") -> str:
     """Denetçi çıktısını rapora DETERMİNİSTİK olarak ekler: '---RAPORSON---' varsa hemen öncesine,
     yoksa '---STANDARTCV---' öncesine, o da yoksa sona. finalize_interview'in ---RAPOR--- gövde
-    regex'i bu bölümü rapor içinde yakalar."""
+    regex'i bu bölümü rapor içinde yakalar. pre_note verilirse bölümün başına eklenir."""
     if not section_body:
         return reply
-    block = f"\n\n**İkinci Model Değerlendirmesi / Görüş Ayrılıkları:**\n{section_body}\n"
+    _pn = (pre_note.strip() + "\n\n") if pre_note else ""
+    block = f"\n\n**İkinci Model Değerlendirmesi / Görüş Ayrılıkları:**\n{_pn}{section_body}\n"
     if "---RAPORSON---" in reply:
         return reply.replace("---RAPORSON---", block + "\n---RAPORSON---", 1)
     if "---STANDARTCV---" in reply:
@@ -4717,30 +4800,54 @@ def apply_reviewer_score_revision(region_body: str, flagged_names: list):
         revisions.append({"kriter": match, "eski": f"{old_a}/{cap}", "yeni": f"{new_a}/{cap}"})
     return "\n".join(lines), revisions
 
+# Değer yargısı içeren cümleyi tanıma: kriter adı + değerlendirici sözcük birlikte geçmeli.
+_VALUE_JUDGMENT_RE = re.compile(
+    r"yeterli|yetersiz|güçlü|zayıf|başar[ıi]l[ıi]|iyi\b|kötü|olumlu|olumsuz|net\b|belirsiz|"
+    r"gelişme(?:li| gerek)|geliştirmeli|potansiyel|hakim|hâkim|deneyimli|donan[ıi]ml[ıi]|"
+    r"eksik|sınırlı|üst düzey|vasat|orta düzey|kanıtl", re.IGNORECASE)
+# Anotasyon yapılmayacak bölümler (başlık bazlı): burada kriterle ilgili DEĞER YARGISI yok.
+_ANNOTATE_BLOCK_HEADINGS = (
+    "puanlama kapsamı", "kriter eksiklik", "değerlendirilemeyen", "yanıtsız", "yanitsiz",
+    "takip mülakatında", "modalite veri kapsamı", "sistem alan karşılaştırması", "kriter tablo",
+    "değerlendirilemeyen alanlar", "dil gözlemi", "sonuç gerekçesi", "ikinci model",
+)
+
 def annotate_revised_criteria_prose(report: str, revisions: list) -> str:
-    """KALEM 5 (2. tur) — revize edilen kriterlere değinen RAPOR METNİ cümlelerine denetçi notu
-    ekler + Yönetici Özeti'ne uyarı satırı. Tablo ile düz metin çelişmesin."""
+    """KALEM 4 (bu tur) — revize edilen kriter HAKKINDA DEĞER YARGISI içeren cümlelere işaret
+    ekler (başlık/kapsam/liste/kriter-adı-sıralama satırları HARİÇ), rapor başına EN FAZLA 2.
+    Ayrıca Yönetici Özeti'ne bir kez tutarlılık uyarısı."""
     if not report or not revisions:
         return report
     names = [r.get("kriter") for r in revisions if r.get("kriter")]
     if not names:
         return report
+    names_n = [_norm_name(n) for n in names]
     note = " [İkinci model: bu değerlendirme kanıtla desteklenmiyor — ilgili kriter puanı düşürüldü.]"
     lines = report.splitlines()
+    cur_heading = ""
     hit = 0
     for i, ln in enumerate(lines):
-        if ln.lstrip().startswith("|") or ln.strip().endswith(":") or not ln.strip():
+        s = ln.strip()
+        hm = re.match(r"\*{0,2}\s*([^*:|]{2,50}?)\s*\*{0,2}\s*:\s*$", s) or re.match(r"\*{0,2}\s*([^*:|]{2,50}?)\s*\*{0,2}\s*:\s+\S", s)
+        if hm:
+            cur_heading = _norm_name(hm.group(1))
+        if hit >= 2:
+            break
+        if not s or s.startswith("|") or s.endswith(":") or note in ln:
             continue
-        if note in ln:
+        if any(b in cur_heading for b in _ANNOTATE_BLOCK_HEADINGS):
             continue
         low = _norm_name(ln)
-        if any(_norm_name(n) in low or any(len(w) >= 5 and w in low for w in _norm_name(n).split()) for n in names):
-            lines[i] = ln.rstrip() + note
-            hit += 1
-            if hit >= 4:
-                break
+        # kriter adı geçiyor mu (tam ad veya >=5 harfli ayırt edici kelime)
+        mentions = any(nn in low or any(len(w) >= 5 and w in low for w in nn.split()) for nn in names_n)
+        if not mentions:
+            continue
+        # kriterin sadece SAYILDIĞI (değer yargısı olmayan) satır mı? → değer yargısı sözcüğü şart
+        if not _VALUE_JUDGMENT_RE.search(ln):
+            continue
+        lines[i] = ln.rstrip() + note
+        hit += 1
     report = "\n".join(lines)
-    # Yönetici Özeti tutarlılık uyarısı
     summ = ", ".join(names)
     warn = (f"\n\n[İkinci model revizyonu: {summ} kriter(ler)inde kanıt–puan tutarsızlığı tespit edildi; "
             f"ilgili puanlar düşürüldü. Bu bölümdeki olumlu ifadeler bu çerçevede okunmalıdır.]")
@@ -4905,6 +5012,8 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             review_notes, rv_status, rv_err = "", "failed", f"{type(e).__name__}: {e}"
             print(f"UYARI (denetçi c={candidate_id} L{level}): {type(e).__name__}: {e}")
         _set_reviewer_status(candidate_id, level, rv_status, rv_err)
+        _rmeta = parse_reviewer_meta(review_notes)
+        review_notes_clean = strip_reviewer_meta_tags(review_notes)
 
         # ═══ KALEM 9(c) + KALEM 4 — denetçinin "kanıtsız" dediği kriterlerin puanı deterministik düşürülür.
         # Çapraz eşleşme YOK: pozisyon maddesi yalnız PUAN 1 tablosunda, profil maddesi yalnız PUAN 2
@@ -4963,17 +5072,40 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         except Exception as e:
             print(f"UYARI (puanlama doğrulaması c={candidate_id}): {type(e).__name__}: {e}")
 
-        if _revisions:
+        # KALEM 6 (bu tur) — denetçi bir kriterin puanını FAZLA DÜŞÜK bulduysa: yükseltme YAPMA,
+        # ama tespit kaybolmasın — denetçi bölümüne deterministik not eklenir. Çapraz eşleşme önlenir.
+        _low_flags = []
+        try:
+            if _rmeta["dusuk_puan"] and _pcrit:
+                _lc = reviewer_flagged_criteria("KANITSIZ: " + ", ".join(_rmeta["dusuk_puan"]),
+                                                [c.get("name") for c in _pcrit if c.get("name")],
+                                                [pc["name"] for pc in PROFILE_CRITERIA])
+                _low_flags = _lc["position"] + _lc["profile"]
+                if _low_flags:
+                    review_notes_clean = (review_notes_clean.rstrip()
+                        + "\n\nDüşük bulunan puanlar (yükseltme sistemce UYGULANMADI): "
+                        + "; ".join(f"{n} — ikinci model bu kriterin puanını kanıta göre düşük buldu"
+                                    for n in _low_flags) + ".")
+                    record_system_decision(candidate_id, level, "denetci_dusuk_puan_tespiti",
+                                           f"İkinci model şu kriter(ler)in puanını düşük buldu (yükseltme kapsam dışı): {', '.join(_low_flags)}", {})
+        except Exception as e:
+            print(f"UYARI (KALEM6 düşük puan notu c={candidate_id}): {type(e).__name__}: {e}")
+
+        if _revisions or _rmeta["ozet_ton"]:
             try:
                 _dbr = get_db()
-                _dbr.execute("UPDATE interviews SET reviewer_score_revision_json=? WHERE candidate_id=? AND level=?",
-                             (json.dumps(_revisions, ensure_ascii=False)[:4000], candidate_id, level))
+                _dbr.execute("UPDATE interviews SET reviewer_score_revision_json=COALESCE(?, reviewer_score_revision_json), "
+                             "reviewer_summary_tone=? WHERE candidate_id=? AND level=?",
+                             (json.dumps(_revisions, ensure_ascii=False)[:4000] if _revisions else None,
+                              _rmeta["ozet_ton"], candidate_id, level))
                 _dbr.commit(); _dbr.close()
             except Exception as e:
-                print(f"UYARI (revizyon kaydı c={candidate_id}): {type(e).__name__}: {e}")
+                print(f"UYARI (revizyon/ton kaydı c={candidate_id}): {type(e).__name__}: {e}")
 
-        # denetçi notlarını rapora ekle (puana etkisi zaten yukarıda uygulandı)
-        reply = _insert_report_section(reply, review_notes)
+        # denetçi notlarını rapora ekle — başına "revizyon öncesi puanlar" uyarısı (KALEM 5, bu tur).
+        reply = _insert_report_section(
+            reply, review_notes_clean,
+            pre_note="Not: Aşağıdaki değerlendirme, sunucu puanlama doğrulaması ve olası revizyon UYGULANMADAN önceki taslak puanlar üzerinden yapılmıştır; bölümde geçen sayısal puanlar rapordaki nihai değerlerden farklı olabilir.")
 
         finalize_interview(candidate_id, reply, terminated_reason=terminated_reason, level=level, regen=regen)
         print(f"[PROCESSING_DONE] candidate_id={candidate_id} level={level} regen={regen}")
@@ -5128,7 +5260,7 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
 
     db = get_db()
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-    _iv_dates = db.execute("SELECT started_at, interview_ended_at, messages, reviewer_score_revision_json FROM interviews WHERE candidate_id=? AND level=?",
+    _iv_dates = db.execute("SELECT started_at, interview_ended_at, messages, reviewer_score_revision_json, reviewer_summary_tone FROM interviews WHERE candidate_id=? AND level=?",
                            (candidate_id, level)).fetchone()
     messages = get_interview_messages(db, candidate_id, level)
     try:
@@ -5180,8 +5312,10 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     if _revs:
         report = annotate_revised_criteria_prose(report, _revs)
 
-    # KALEM 3 + 6 — başlık kartı ile metin AYNI öneriyi göstersin; öneri gerekçesi de öneriyle hizalı.
-    report = sync_recommendation_line(report, recommendation, score_position, score_profile)
+    # KALEM 1+2 (öneri gerekçesi tek kaynak + Yönetici Özeti sonuç cümlesi hizalı) + KALEM 3 (öneri satırı).
+    _summary_tone = (_iv_dates["reviewer_summary_tone"] if (_iv_dates and "reviewer_summary_tone" in _iv_dates.keys()) else None)
+    report = sync_recommendation_line(report, recommendation, score_position, score_profile,
+                                     veto_reason=_veto_reason, summary_tone=_summary_tone)
     # KALEM 4 — rapor metnindeki "Tarih:" satırı mülakatın GERÇEK tarihi olsun (üretim tarihi değil).
     try:
         _iv_date_str = (_parse_iso(_iv_dates["started_at"]).strftime("%d.%m.%Y")
@@ -6453,6 +6587,7 @@ TEMEL KURALLAR:
 - Toplam puanı yalnızca (değerlendirilen + aday-kaynaklı Yetersiz) kriterlerin ağırlığına göre normalize et. "Sorulmadı" olanları hesaba KATMA. Raporda iki listeyi AYRI göster.
 - PUAN TAVANI (KESİN): Hiçbir kriter puanı kendi tavanını (ağırlığını) AŞAMAZ. "Uyum 12/10" gibi bir şey ASLA yazma; en fazla "10/10". TOPLAM PUAN = alınan puanların toplamı. Bunu doğru hesapla, sistem ayrıca doğrular.
 - ÇİFT PUANLAMA (KESİN): Rapor İKİ ayrı puan içerir. PUAN 1 = "TOPLAM PUAN" → yukarıdaki POZİSYON kriterleri; işe alım önerisi (İşe Al / Değerlendirmeye Al / Reddet) ve %20 eşiği YALNIZCA buna göredir. PUAN 2 = "PROFİL PUANI" → pozisyondan bağımsız sabit kişisel/bilişsel profil kriterleri; her satır transkriptten SOMUT örnek + [dk] ile, dayanaksız çıkarım yok. İki tabloyu ve iki puanı KARIŞTIRMA. Profil bölümündeki "[VETO: …]" etiketini SADECE kurumsal ortamda çalışmaya engel ciddi bulguda (saldırganlık, hakaret, işbirliğine tam kapalılık, sürdürülen açık düşmanlık) yaz; sıradan düşüklük veto sebebi değildir.
+- ÖNERİ ↔ METİN TUTARLILIĞI (KESİN): PUAN 1'in 100 üzerinden normalize değeri öneriyi belirler: **<40 → Reddet · 40–79 → Değerlendirmeye Al · ≥80 → İşe Al**. Verdiğin Öneri bu eşikteki karşılık olmalı. Yönetici Özeti'nin SON (karar) cümlesi ve Öneri Gerekçesi öneriyle AYNI YÖNDE yazılır — Öneri "Reddet" iken "değerlendirmeye alınabilir / potansiyeli var / uygun / yeterli düzeyde" gibi olumlu sonuç ifadesi YASAK; tersi de.
 - KRİTER TABLOSU DETERMİNİSTİK: Rapordaki kriter tablosunun satırları YUKARIDA verilen tablonun BİREBİR AYNISI olacak — aynı kriter adları, aynı sıra, aynı tavanlar. Satır ekleme, çıkarma, birleştirme veya yeniden adlandırma YOK. Gerekçesiz eksik-işaretleme YASAK.
 - Erken sonlandırma, davranış gözlemi veya pozisyon uyumsuzluğu notu verildiyse: raporda ilgili başlık altında SOMUT (dakika + transkriptteki söz) yaz; bunları TEK BAŞINA puan düşürme gerekçesi yapma.
 - Her puan için Kanıt → Analiz → Sonuç zinciri kur.
