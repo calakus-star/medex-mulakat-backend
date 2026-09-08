@@ -2170,12 +2170,12 @@ REPORT_BODY_SECTIONS = [
     ("takip_sorulari", {2, 3},    "**Takip Mülakatında Sorulması Önerilen Sorular:** (3-6 adet, bu adaya özgü)"),
     ("dil_gozlemi",    {1, 2, 3}, "**Dil Gözlemi:** (adayın dil tercihi; Türkçe/ilgili dile hâkimiyetine dair somut gözlem; varsa hangi konuda/noktada dil değiştirdiği. Pozisyon bir dil yeterliliği gerektiriyorsa bunun değerlendirmeye etkisini açıkla; gerektirmiyorsa yalnızca bilgi amaçlı gözlem olarak yaz. Gözlem yoksa \"Belirtilecek bir dil gözlemi yok\".)"),
     ("serbest_l13",    {1},       "**Serbest Gözlemler:** ... (kriter dışı sinyaller; yoksa \"Belirtilecek bir gözlem yok\" yaz)"),
-    ("serbest_l2",     {2, 3},    "**Serbest Gözlemler:** (kriter dışı ama işle ilgili anlamlı sinyaller; yoksa neden veri oluşmadığını yaz)"),
+    ("serbest_l2",     {2, 3},    "**Serbest Gözlemler:** (kriter dışı ama işle ilgili NİTELİKSEL gözlemler — duruş, mimik, davranış, tutum. Ses metriği SAYILARINI (konuşma süresi, tur uzunluğu, yanıt gecikmesi vb.) BURADA TEKRARLAMA; o sayılar sistem tarafından ayrı 'Modalite Veri Kapsamı' bloğunda veriliyor. Niteliksel bir gözlem yoksa \"Belirtilecek bir gözlem yok\" yaz.)"),
     ("sonuc_gerekcesi", {1, 2, 3}, "**Sonuç Gerekçesi:** (Mülakat ihlal, teknik sebep veya erken bitişle sonuçlandıysa: NE olduğu, mülakatın KAÇINCI DAKİKASINDA olduğu, DAYANAĞI (transkriptteki ilgili söz / kamera karesi) ve sonuca ETKİSİ açıkça yazılır. \"İhlal tespit edildi\", \"uygunsuz davranış\" gibi genel ifade YASAK — somut olay yaz. Aşağıdaki MODALİTE/OLAY KANITLARI bloğundaki kayıtları esas al. Sorun yoksa \"Mülakat normal tamamlandı, olumsuz bir gözlem yok\".)"),
     ("genel_kani_l13", {1},       "**Genel Kanı:** ...{note_report_field}"),
     ("genel_kani_l2",  {2, 3},    "**Genel Kanı:** (kanıtların dengeli sentezi){ai_note_report_field}"),
     ("oneri",          {1, 2, 3}, "**Öneri:** İşe Al / Değerlendirmeye Al / Reddet"),
-    ("oneri_gerekcesi", {2, 3},   "**Öneri Gerekçesi:** (tek paragraf, somut ve kararı DESTEKLEYEN yönde; kararın PUAN 1'e dayandığını belirt. Öneri 'Reddet' ise gerekçe de olumsuz sonuçlanmalı — 'yeterli potansiyele sahip / uygun' gibi kararla çelişen ifade YASAK.)"),
+    ("oneri_gerekcesi", {2, 3},   "**Öneri Gerekçesi:** (tek paragraf, 'Öneri:' satırının HEMEN ALTINDA — araya tablo/başka bölüm KOYMA. Somut ve kararı DESTEKLEYEN yönde; kararın PUAN 1'e dayandığını belirt. Öneri 'Reddet' ise gerekçe de olumsuz sonuçlanmalı — 'yeterli potansiyele sahip / uygun' gibi kararla çelişen ifade YASAK. Rapordaki nihai puan sistemce normalize edildiği için gerekçede sayısal puan TEKRARLAMA.)"),
     ("_blank_p2a",     {1, 2, 3}, ""),
     ("puan2_baslik",   {1, 2, 3}, "---\n### PUAN 2 — KİŞİSEL VE BİLİŞSEL PROFİL (pozisyondan bağımsız, her aday için sabit)"),
     ("puan2_aciklama", {1, 2, 3}, "(Bu bölüm PUAN 1'den / pozisyon uygunluğundan AYRIDIR ve işe alım kararını TEK BAŞINA belirlemez. Her kriter için transkriptten SOMUT bir örnek ve [dk] dakika damgası ZORUNLU — dayanaksız çıkarım, kişilik teşhisi, IQ/zekâ yorumu YASAK. Eksik kriterde PUAN 1 ile AYNI ayrım: `Değerlendirilmedi (sorulmadı) — <gerekçe>` (paydayı etkilemez) vs `Yetersiz (soruldu, veri alınamadı) — <gerekçe>` (0 puan, paydada kalır).)"),
@@ -2391,6 +2391,7 @@ GENEL:
 - ÇİFT PUANLAMA (KESİN): Rapor İKİ ayrı puan içerir. **PUAN 1 = TOPLAM PUAN** — yukarıdaki POZİSYON kriterleri; işe alım önerisi (İşe Al / Değerlendirmeye Al / Reddet) YALNIZCA buna göre verilir. **PUAN 2 = PROFİL PUANI** — pozisyondan bağımsız, her adayda aynı olan kişisel/bilişsel profil kriterleri; her satır transkriptten somut örnek + [dk] ile. İki tabloyu ve iki puanı KARIŞTIRMA; profil kriterlerini pozisyon tablosuna, pozisyon kriterlerini profil tablosuna YAZMA.
 - ÖNERİ ↔ METİN TUTARLILIĞI (KESİN): PUAN 1 (TOPLAM PUAN, 100 üzerinden normalize) şu eşiklere göre öneriyi belirler: **<40 → Reddet · 40–79 → Değerlendirmeye Al · ≥80 → İşe Al**. Verdiğin Öneri, TOPLAM PUAN'ının bu eşikteki karşılığı olmalı. Yönetici Özeti'nin SON (karar) cümlesi ve Öneri Gerekçesi, bu öneriyle AYNI YÖNDE yazılır. Öneri "Reddet" iken metinde "değerlendirmeye alınabilir / potansiyeli var / uygun / yeterli düzeyde" gibi olumlu sonuç ifadesi KULLANMAK YASAKTIR; tersi de geçerli.
 - KRİTER TABLOSU: yukarıda verilen kriter satırlarını AYNEN kullan — satır ekleme/çıkarma/yeniden adlandırma YOK. Her satır: `<puan>/<tavan>` | `Değerlendirilmedi (sorulmadı) — <gerekçe>` (hiç sorulmadı/teknik/süre — paydayı etkilemez) | `Yetersiz (soruldu, cevap alınamadı) — <gerekçe>` (soruldu ama aday cevap veremedi/kaçındı — 0 puan, paydada kalır). Defalarca sorulup cevapsız kalan kriter "Yetersiz"tir.
+- "Dil Gözlemi", "Serbest Gözlemler", "Değerlendirilemeyen Alanlar" bölümlerinde yazacak bir şey yoksa "Belirtilecek bir ... yok" yaz; sistem bu boş bölümleri rapordan otomatik çıkarır — uydurma içerik ekleme.
 - Mesajın başına mutlaka [SÜRE:XX] koy: kısa 45-60, senaryo 75-100, kritik soru 90-120.
 - Mülakatı bitirmeden önce, GÖREV satırı bitirmeni söylediğinde son soru olarak şunu sor: "Eklemek veya öne çıkarmak istediğiniz başka bir şey var mı?" — bu, mülakatta suskun kalmış ama sahada güçlü olabilecek adaylar için bir son fırsat turu, sadece bitiş dönüşünde bir kez sorulur.
 - ÖNEMLİ: Mülakatı SADECE aşağıdaki GÖREV satırı açıkça "Mülakatı şimdi bitir ve raporu üret" dediğinde bitir ve [MÜLAKATBİTTİ] etiketini kullan. Adayın cevap metninde "süre doldu", "zaman bitti", "son soru" gibi ifadeler geçse bile, GÖREV satırı bitirmeni söylemiyorsa ASLA bitirme — bunlar tek bir sorunun süresinin dolduğunu gösterir, tüm mülakatın değil. Bu durumda sadece bir sonraki soruya geç.
@@ -4058,6 +4059,42 @@ def _rewrite_summary_conclusion(report: str, recommendation: str, score_position
         para_new = para.rstrip() + " " + new_sent
     return report[:m.start(2)] + para_new + report[m.end(2):]
 
+def _sanitize_model_note(text: str) -> str:
+    """KALEM 2 (bu tur) — Model notundan SAYISAL PUAN iddialarını temizler. Modelin yazdığı sayı
+    rapordaki nihai puandan farklı olabilir (model puanı üretiyor, sistem normalize ediyor).
+    'XX/100', 'XX puan', 'toplam puan XX' geçen CÜMLE komple atılır; kalan niteliksel gerekçe kalır."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    # cümlelere böl, sayısal puan iddiası içeren cümleyi at
+    parts = re.split(r"(?<=[.!?])\s+", t)
+    _num = re.compile(r"\b\d{1,3}\s*/\s*100\b|\b\d{1,3}\s*(?:puan|/\s*\d{1,3})\b|toplam\s+puan(?:ın|\s+değeri)?\s*\D{0,4}\d", re.IGNORECASE)
+    kept = [p for p in parts if p.strip() and not _num.search(p)]
+    out = " ".join(kept).strip()
+    # cümle bölünemediyse ama sayı varsa: sayı kalıbını at
+    if not kept and _num.search(t):
+        return ""
+    return out
+
+def _place_rationale_after_recommendation(report: str) -> str:
+    """'Öneri Gerekçesi:' satırı 'Öneri:' satırının hemen ardında değilse taşır. Yalnız bu iki
+    yapısal satırın komşuluğunu düzeltir — başka içerik taşımaz."""
+    lines = report.split("\n")
+    oi = next((i for i, l in enumerate(lines) if re.match(r"\s*\**\s*Öneri\s*:\s*", l, re.IGNORECASE)
+               and not re.match(r"\s*\**\s*Öneri\s+Gerekçesi", l, re.IGNORECASE)), None)
+    gi = next((i for i, l in enumerate(lines) if re.match(r"\s*\**\s*Öneri\s+Gerekçesi\s*:", l, re.IGNORECASE)), None)
+    if oi is None or gi is None:
+        return report
+    # gi zaten oi'den hemen sonra (arada yalnız boş satır) ise dokunma
+    between = [l for l in lines[oi + 1:gi] if l.strip()]
+    if not between:
+        return report
+    gline = lines.pop(gi)
+    oi = next((i for i, l in enumerate(lines) if re.match(r"\s*\**\s*Öneri\s*:\s*", l, re.IGNORECASE)
+               and not re.match(r"\s*\**\s*Öneri\s+Gerekçesi", l, re.IGNORECASE)), None)
+    lines.insert(oi + 1, gline)
+    return "\n".join(lines)
+
 def sync_recommendation_line(report: str, recommendation: str, score_position=None, score_profile=None,
                              veto_reason=None, summary_tone=None) -> str:
     """KALEM 1+2 (bu tur) — TEK KAYNAK, KOŞULSUZ:
@@ -4073,12 +4110,15 @@ def sync_recommendation_line(report: str, recommendation: str, score_position=No
                  lambda m: f"{m.group(1)}{recommendation}", report, count=1, flags=re.IGNORECASE)
     _det = _recommendation_rationale(recommendation, score_position, score_profile, veto_reason)
     def _rat_repl(m):
-        orig = (m.group(2) or "").strip()
+        orig = _sanitize_model_note(m.group(2) or "")
         if orig.startswith(_det[:40]):   # idempotent: zaten deterministik yazılmış
             return m.group(0)
         model_note = f" Model notu: {orig}" if orig and "Model notu:" not in orig else ""
         return f"{m.group(1)}{_det}{model_note}"
     out = re.sub(r"(\**\s*Öneri\s+Gerekçesi\s*:\s*\**\s*)([^\n]*)", _rat_repl, out, count=1, flags=re.IGNORECASE)
+    # KALEM 1 (bu tur) — Öneri Gerekçesi satırı "Öneri:" satırının HEMEN ardında olmalı; model
+    # araya başka bölüm (kriter tablosu vb.) koyduysa deterministik olarak yeniden konumlandır.
+    out = _place_rationale_after_recommendation(out)
     # Yönetici Özeti sonuç cümlesi:
     #  - denetçi tonu ÇELİŞKİLİ (OLUMLU↔Reddet / OLUMSUZ↔İşe Al) → modelin son cümlesini DEĞİŞTİR
     #  - ton alınamadı (denetçi atlandı/patladı) → modelin cümlesine dokunma, sonuna deterministik ekle
@@ -4142,6 +4182,48 @@ def strip_report_system_lines(text: str) -> str:
             continue
         kept.append(ln)
     return "\n".join(kept)
+
+# KALEM 5 (bu tur) — içeriği "belirtilecek bir şey yok" olan opsiyonel bölümler rapordan
+# TAMAMEN çıkarılır (deterministik, model çağrısı yok). Yalnız şu başlıklar için:
+_EMPTYABLE_SECTIONS = ("dil gözlemi", "serbest gözlemler", "değerlendirilemeyen alanlar")
+_EMPTY_CONTENT_RE = re.compile(
+    r"belirtilecek\s+bir\s+.{0,20}?\s*yok|belirtilecek\s+bir\s+şey\s+yok|"
+    r"(?:kayda\s+değer|not\s+edilecek|söylenecek|eklenecek)\s+bir\s+.{0,20}?\s*yok|"
+    r"gözlem\s+yok|herhangi\s+bir\s+.{0,30}?\s*(?:yok|bulunmamaktadır|gözlenmemiştir)\.?\s*$",
+    re.IGNORECASE)
+
+def strip_empty_report_sections(text: str) -> str:
+    """'**Dil Gözlemi:** Belirtilecek bir dil gözlemi yok.' gibi içeriği boş olan opsiyonel
+    bölümleri (başlık + gövde) siler. Başlık bir sonraki '**...:**' başlığına ya da boş satıra
+    kadar olan bloktur."""
+    if not text:
+        return text
+    lines = text.split("\n")
+    out, i, n = [], 0, len(lines)
+    _head = re.compile(r"^\s*\**\s*([A-Za-zÇĞİÖŞÜçğıöşü /↔–-]{3,45}?)\s*\**\s*:\s*(.*)$")
+    while i < n:
+        hm = _head.match(lines[i])
+        if hm and _norm_name(hm.group(1)) in _EMPTYABLE_SECTIONS:
+            # bu bölümün gövdesini topla
+            body = [hm.group(2).strip()] if hm.group(2).strip() else []
+            j = i + 1
+            while j < n:
+                if not lines[j].strip():
+                    break
+                if _head.match(lines[j]) and not lines[j].lstrip().startswith("-"):
+                    break
+                body.append(lines[j].strip())
+                j += 1
+            joined = " ".join(body).strip()
+            if not joined or _EMPTY_CONTENT_RE.search(joined):
+                # bölümü ve ardındaki tek boş satırı atla
+                i = j
+                if i < n and not lines[i].strip():
+                    i += 1
+                continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
 
 # ============ KAPANIŞ İŞLEMİNİ ARKA PLANA ALMA (rapor üretimi) ============
 # Tasarım: "yavaş" olan tek şey rapor üreten AI çağrısı (Claude L1/L3, GPT-4o L2). Bu çağrıya
@@ -4807,15 +4889,33 @@ _VALUE_JUDGMENT_RE = re.compile(
     r"eksik|sınırlı|üst düzey|vasat|orta düzey|kanıtl", re.IGNORECASE)
 # Anotasyon yapılmayacak bölümler (başlık bazlı): burada kriterle ilgili DEĞER YARGISI yok.
 _ANNOTATE_BLOCK_HEADINGS = (
+    "yönetici özeti", "yonetici ozeti",  # KALEM 4 (bu tur) — Özet için zaten ayrı uyarı satırı var
     "puanlama kapsamı", "kriter eksiklik", "değerlendirilemeyen", "yanıtsız", "yanitsiz",
     "takip mülakatında", "modalite veri kapsamı", "sistem alan karşılaştırması", "kriter tablo",
     "değerlendirilemeyen alanlar", "dil gözlemi", "sonuç gerekçesi", "ikinci model",
 )
 
+# KALEM 3 (bu tur) — kriter adı eşleşmesinde YOK SAYILAN kelimeler (bağlaçlar + kısa/genel sözcükler).
+_ANNOTATE_STOPWORDS = {"ve", "ile", "veya", "ya", "da", "de", "için", "bir",
+                       "karar", "yaklasim", "yaklasimi", "verme", "yonetim", "yonetimi"}
+
+def _criterion_fully_mentioned(crit_norm: str, line_norm: str) -> bool:
+    """KALEM 3 — kriter adının TAMI cümlede geçmeli. Tek kelime / genel sözcük eşleşmesi YETMEZ:
+    kriter adının anlamlı kelimelerinin (>=4 harf, bağlaç değil) HEPSİ satırda geçecek."""
+    if not crit_norm or not line_norm:
+        return False
+    if crit_norm in line_norm:
+        return True
+    meaningful = [w for w in crit_norm.split() if len(w) >= 4 and w not in _ANNOTATE_STOPWORDS]
+    if len(meaningful) < 1:
+        return False
+    return all(w in line_norm for w in meaningful)
+
 def annotate_revised_criteria_prose(report: str, revisions: list) -> str:
-    """KALEM 4 (bu tur) — revize edilen kriter HAKKINDA DEĞER YARGISI içeren cümlelere işaret
-    ekler (başlık/kapsam/liste/kriter-adı-sıralama satırları HARİÇ), rapor başına EN FAZLA 2.
-    Ayrıca Yönetici Özeti'ne bir kez tutarlılık uyarısı."""
+    """KALEM 3+4 (bu tur) — revize edilen kriter HAKKINDA DEĞER YARGISI içeren cümlelere işaret
+    ekler. Eşleşme SIKI: kriter adının tamı ya da tüm anlamlı kelimeleri satırda geçmeli
+    (tek genel kelime — 'karar', 'yeterli' — eşleşmesi yetmez). Başlık/kapsam/Yönetici Özeti
+    satırları HARİÇ. Rapor başına EN FAZLA 2. Eşleşme yoksa HİÇ işaret basılmaz."""
     if not report or not revisions:
         return report
     names = [r.get("kriter") for r in revisions if r.get("kriter")]
@@ -4828,7 +4928,8 @@ def annotate_revised_criteria_prose(report: str, revisions: list) -> str:
     hit = 0
     for i, ln in enumerate(lines):
         s = ln.strip()
-        hm = re.match(r"\*{0,2}\s*([^*:|]{2,50}?)\s*\*{0,2}\s*:\s*$", s) or re.match(r"\*{0,2}\s*([^*:|]{2,50}?)\s*\*{0,2}\s*:\s+\S", s)
+        # başlık: "**Ad:** ..." / "Ad: ..." / "**Ad:**" — iki nokta öncesi/sonrası ** olabilir
+        hm = re.match(r"\**\s*([A-Za-zÇĞİÖŞÜçğıöşü][^:|*\n]{1,58}?)\s*\**\s*:\s*\**\s*(.*)$", s)
         if hm:
             cur_heading = _norm_name(hm.group(1))
         if hit >= 2:
@@ -4838,9 +4939,7 @@ def annotate_revised_criteria_prose(report: str, revisions: list) -> str:
         if any(b in cur_heading for b in _ANNOTATE_BLOCK_HEADINGS):
             continue
         low = _norm_name(ln)
-        # kriter adı geçiyor mu (tam ad veya >=5 harfli ayırt edici kelime)
-        mentions = any(nn in low or any(len(w) >= 5 and w in low for w in nn.split()) for nn in names_n)
-        if not mentions:
+        if not any(_criterion_fully_mentioned(nn, low) for nn in names_n):
             continue
         # kriterin sadece SAYILDIĞI (değer yargısı olmayan) satır mı? → değer yargısı sözcüğü şart
         if not _VALUE_JUDGMENT_RE.search(ln):
@@ -5328,6 +5427,11 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     # token-kesilme teknik notu). Modele giden interviews.messages DEĞİŞMEZ.
     report = strip_report_system_lines(report)
     standard_cv = strip_report_system_lines(standard_cv)
+    # KALEM 5 (bu tur) — içeriği "belirtilecek bir şey yok" olan opsiyonel bölümleri tamamen kaldır.
+    try:
+        report = strip_empty_report_sections(report)
+    except Exception as e:
+        print(f"UYARI (finalize_interview boş bölüm temizliği c={candidate_id}): {type(e).__name__}: {e}")
     # KALEM 5 — token kesilmesi olduysa teknik notu YÖNETİCİYE ayır (müşteri raporuna girmez).
     _tech_note = STANDARD_CV_TRUNCATION_NOTE if _cv_truncated else None
 
@@ -6593,6 +6697,8 @@ TEMEL KURALLAR:
 - Her puan için Kanıt → Analiz → Sonuç zinciri kur.
 - Analitik düşünme, kavrama, muhakeme, neden-sonuç kurma, problem çözme, düşünce esnekliği, öğrenme çevikliği ve belirsizlikte karar verme hakkında yalnızca transkriptte gözlenebilen sinyalleri yaz. IQ, zekâ puanı, psikiyatrik tanı, yalan tespiti veya kesin kişilik teşhisi yapma.
 - Görüşme kalitesi veya teknik kesinti değerlendirmeyi etkilediyse bunu ayrıca belirt; adayı bunun için cezalandırma.
+- SES METRİĞİ SAYILARINI (konuşma süresi, tur sayısı/uzunluğu, yanıt gecikmesi, söz kesme vb.) rapor metnine TEKRAR YAZMA — bu sayılar sistem tarafından ayrı 'Modalite Veri Kapsamı' bloğunda deterministik olarak veriliyor. "Serbest Gözlemler" yalnız NİTELİKSEL gözlem taşır (duruş, mimik, davranış, tutum); niteliksel bir şey yoksa "Belirtilecek bir gözlem yok" yaz.
+- "Dil Gözlemi", "Serbest Gözlemler", "Değerlendirilemeyen Alanlar" bölümlerinde yazacak bir şey yoksa "Belirtilecek bir ... yok" yaz — sistem bu bölümü rapordan otomatik çıkarır, uydurma içerik ekleme.
 - En az üç anlamlı aday cevabı yoksa [DEĞERLENDİRİLEMEDİ] üret.
 - Derinlik “derin” ise rapor daha kapsamlı, daha fazla çapraz kanıtlı ve daha ayrıntılı olmalı; standart rapor da kesinlikle yüzeysel olmamalı.
 

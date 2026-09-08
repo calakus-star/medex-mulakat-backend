@@ -36,15 +36,22 @@ def _derive_end(row):
         d = app._parse_iso(row["interview_ended_at"])
         if d:
             return d, "interview_ended_at"
-    # transkript son [mm:ss]
+    # transkript son [mm:ss] (dakika 1-3 hane — _VOICE_LINE_RE ile aynı)
     msgs = row["messages"] or "[]"
     try:
         blob = "\n".join((m.get("content") or "") for m in json.loads(msgs) if isinstance(m, dict))
     except Exception:
         blob = msgs if isinstance(msgs, str) else ""
-    stamps = [int(a) * 60 + int(b) for a, b in re.findall(r"\[(\d{1,2}):(\d{2})\]", blob)]
+    stamps = [int(a) * 60 + int(b) for a, b in re.findall(r"\[(\d{1,3}):(\d{2})\]", blob)]
     if stamps:
         return started + timedelta(seconds=max(stamps) + 5), "transkript son damgası"
+    # realtime_events'teki en büyük elapsed_ms
+    try:
+        ev = row["_max_elapsed_ms"]
+    except Exception:
+        ev = None
+    if ev and int(ev) > 0:
+        return started + timedelta(milliseconds=int(ev) + 5000), "realtime_events son elapsed_ms"
     return None, "türetilemedi"
 
 
@@ -62,15 +69,17 @@ def main_run():
         print("--dry-run veya --apply verin."); sys.exit(2)
 
     db = app.get_db()
+    _base = ("SELECT i.candidate_id, i.level, i.started_at, i.completed_at, i.interview_ended_at, i.messages, "
+             "(SELECT MAX(e.elapsed_ms) FROM realtime_events e "
+             " WHERE e.candidate_id=i.candidate_id AND e.level=i.level) AS _max_elapsed_ms "
+             "FROM interviews i ")
     if args.candidate:
         rows = db.execute(
-            "SELECT candidate_id, level, started_at, completed_at, interview_ended_at, messages "
-            "FROM interviews WHERE candidate_id=?" + (" AND level=?" if args.level else ""),
+            _base + "WHERE i.candidate_id=?" + (" AND i.level=?" if args.level else ""),
             (args.candidate, args.level) if args.level else (args.candidate,)).fetchall()
     elif args.all:
         rows = db.execute(
-            "SELECT candidate_id, level, started_at, completed_at, interview_ended_at, messages "
-            "FROM interviews WHERE completed_at IS NOT NULL AND started_at IS NOT NULL").fetchall()
+            _base + "WHERE i.completed_at IS NOT NULL AND i.started_at IS NOT NULL").fetchall()
     else:
         print("--candidate ya da --all verin."); sys.exit(2)
 
