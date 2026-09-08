@@ -1288,6 +1288,16 @@ def _now_ts() -> str:
 
 _VOICE_LINE_RE = re.compile(r'^\s*\[(\d{1,3}):(\d{2})\]\s*(Aday|Mülakatçı|Adam)\s*:\s*(.*)$')
 
+# NOT: Python str.lower() Türkçe 'İ'yi 'i̇' (i + combining dot) yapar; bu yüzden 'SİSTEM' araması
+# .lower() ile GÜVENİLMEZ — ham metinde regex ile ara. TEK KAYNAK: transkript görünümü, rapor
+# temizliği ve ses metriği hepsi bunu kullanır (KALEM 5 + KALEM 2).
+_HALL_MARKER_RE = re.compile(r"\[\s*S[İIıi]STEM\s*:")
+
+def is_hallucination_marker_line(text: str) -> bool:
+    t = text or ""
+    return bool(_HALL_MARKER_RE.search(t)
+                and re.search(r"hal[üu]sinasyon|ADAY\s+CEVAB[İIıi]\s+SAYMA", t, re.IGNORECASE))
+
 def _parse_iso(value):
     try:
         return datetime.fromisoformat(str(value).split(".")[0].replace("T", " ").replace(" ", "T"))
@@ -1304,10 +1314,7 @@ def build_transcript_view(messages_raw, level: int, started_at=None, for_report:
         msgs = json.loads(messages_raw) if isinstance(messages_raw, str) else (messages_raw or [])
     except Exception:
         return []
-    def _is_system_line(txt: str) -> bool:
-        t = txt or ""
-        return bool(re.search(r"\[\s*S[İIıi]STEM\s*:", t)
-                    and re.search(r"hal[üu]sinasyon|ADAY\s+CEVAB[İIıi]\s+SAYMA", t, re.IGNORECASE))
+    _is_system_line = is_hallucination_marker_line
     anchor = _parse_iso(started_at) if started_at else None
     out = []
     for m in msgs:
@@ -3654,54 +3661,138 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         print(f"HATA (interview_chat, beklenmeyen): {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Cevap işlenirken beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.")
 
-# KALEM 2 — STANDARTCV alanları ("EĞİTİM/ÜNİVERSİTE/BÖLÜM/DENEYİM") "—" kalıyordu.
-# Sebep: model CV bloğuna varamayınca deterministik yedek devreye giriyor, o da yalnızca
-# candidates form alanlarına bakıyor; form alanları da boşsa "—" yazıyordu. Çözüm: form alanı
-# boşsa CV ham metninden + transkriptten sezgisel çıkarım (fallback zinciri).
-_EDU_LEVEL_RE = re.compile(
-    r"(ticaret\s+lisesi|meslek\s+lisesi|end[üu]stri\s+meslek\s+lisesi|anadolu\s+lisesi|düz\s+lise|lise)"
-    r"|(ön\s*lisans|önlisans)|(y[üu]ksek\s*lisans|master|mba|m\.?sc)|(doktora|ph\.?d)|(lisans|üniversite|fak[üu]ltesi?)",
-    re.IGNORECASE)
+# KALEM 1 (2. tur) — SEZGİSEL CV ÇIKARIMI SIKILAŞTIRILDI.
+# Önceki sürüm yapışık/parçalı CV metninden "Mart Üniversitesi" gibi UYDURMA değer üretiyordu.
+# Yeni kurallar:
+#  - Bir alan ancak kaynak metinde AÇIK ve BÜTÜN olarak geçiyorsa doldurulur.
+#  - Çıkarılan değer kaynakta birebir (boşluk-normalize) alt-string değilse REDDEDİLİR → "—".
+#  - Kaynak metin yapışık/okunamaz ise (cv_text_readability) o kaynaktan çıkarım YAPILMAZ.
+#  - Transkriptteki açık beyan, CV çıkarımından ÖNCELİKLİDİR.
+#  - "Boş bırakmak yanlış doldurmaktan iyidir."
+_EDU_PHRASES = [
+    ("endüstri meslek lisesi", "Endüstri Meslek Lisesi"), ("endustri meslek lisesi", "Endüstri Meslek Lisesi"),
+    ("ticaret meslek lisesi", "Ticaret Meslek Lisesi"),
+    ("ticaret lisesi", "Ticaret Lisesi"), ("meslek lisesi", "Meslek Lisesi"),
+    ("anadolu lisesi", "Anadolu Lisesi"), ("fen lisesi", "Fen Lisesi"),
+    ("imam hatip lisesi", "İmam Hatip Lisesi"), ("i̇mam hatip lisesi", "İmam Hatip Lisesi"),
+    ("açık öğretim lisesi", "Açık Öğretim Lisesi"), ("acik ogretim lisesi", "Açık Öğretim Lisesi"),
+    ("düz lise", "Düz Lise"),
+    ("yüksek lisans", "Yüksek Lisans"), ("yuksek lisans", "Yüksek Lisans"),
+    ("doktora", "Doktora"),
+    ("ön lisans", "Ön Lisans"), ("onlisans", "Ön Lisans"), ("önlisans", "Ön Lisans"),
+    ("lisans", "Lisans"),
+    ("lise", "Lise"),
+]
+
+def _norm_ws(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+def _cv_text_is_readable(t: str) -> bool:
+    """Yapışık/okunamaz metinden çıkarım yapma; boşluk oranı düşükse False."""
+    return bool((t or "").strip()) and cv_text_readability(t)["space_ratio"] >= 0.09
+
+def _verbatim_in(value: str, source: str) -> bool:
+    """value bir kaynakta BİREBİR (boşluk-normalize) alt-string olarak geçiyor mu?"""
+    if not value or not source:
+        return False
+    return _norm_ws(value) in _norm_ws(source)
 
 def _extract_experience_years(text: str):
-    """CV/transkript metninden yaklaşık deneyim yılı: '10 yıl', '10 yıla yakın', '2016'dan bu yana'."""
+    """Yaklaşık deneyim yılı: '10 yıl', '10 yıla yakın', '2016'dan bu yana'. Yalnız 1-50 arası."""
     t = text or ""
-    m = re.search(r"(\d{1,2})\s*(?:\+|yıl(?:a\s*yakın|dan\s*fazla)?|\s*yıllık)\s*(?:deneyim|tecr[üu]be|iş\s*deneyim)?", t, re.IGNORECASE)
-    if m:
+    m = re.search(r"(?<!\d)(\d{1,2})\s*(?:\+|yıl(?:a\s*yakın|l[ıi]k|dan\s*(?:fazla|beri))?|sene(?:lik)?)\s*(?:iş\s*)?(?:deneyim|tecr[üu]be)?", t, re.IGNORECASE)
+    if m and 1 <= _safe_int(m.group(1)) <= 50:
         return _safe_int(m.group(1))
-    m = re.search(r"(19|20)\d{2}\s*['’]?\s*(?:d[ae]n|ten|tan)\s*(?:bu\s*yana|beri|itibaren)", t, re.IGNORECASE)
+    m = re.search(r"((?:19|20)\d{2})\s*['’]?\s*(?:d[ae]n|ten|tan)\s*(?:bu\s*yana|beri|itibaren)", t, re.IGNORECASE)
     if m:
-        yr = _safe_int(m.group(0)[:4])
+        yr = _safe_int(m.group(1))
         if 1980 <= yr <= datetime.now().year:
             return max(1, datetime.now().year - yr)
     return None
 
-def _extract_education(text: str):
-    """CV/transkript metninden eğitim seviyesi ipucu (en yüksek eşleşen kalıp)."""
-    if not text:
+def _extract_education_from(text: str):
+    """Somut eğitim seviyesi kalıbı — kelime sınırlı, birebir. 'üniversite'/'fakülte' TEK BAŞINA
+    seviye SAYILMAZ (uydurma kaynağı)."""
+    low = _norm_ws(text)
+    if not low:
         return None
-    found = _EDU_LEVEL_RE.search(text)
-    return found.group(0).strip() if found else None
+    for needle, label in _EDU_PHRASES:
+        if re.search(r"(?<![\wçğıöşüİ])" + re.escape(needle) + r"(?![\wçğıöşü])", low):
+            return label
+    return None
 
 def extract_cv_fields_heuristic(cv_text: str = "", transcript: str = "") -> dict:
-    """Form alanları boşsa kullanılacak sezgisel çıkarım. Kesin değil — 'CV/mülakattan tahmin' notuyla."""
-    blob = " ".join(x for x in (cv_text or "", transcript or "") if x)
-    out = {"education": _extract_education(blob), "university": None, "department": None,
-           "experience_years": _extract_experience_years(blob)}
-    um = re.search(r"([A-ZÇĞİÖŞÜ][\wçğıöşüÇĞİÖŞÜ.]+(?:\s+[A-ZÇĞİÖŞÜ][\wçğıöşüÇĞİÖŞÜ.]+){0,3}\s+[ÜU]niversitesi)", blob)
-    if um:
-        out["university"] = um.group(1).strip()
-    dm = re.search(r"([A-ZÇĞİÖŞÜ][\wçğıöşüÇĞİÖŞÜ]+(?:\s+[A-ZÇĞİÖŞÜ]?[\wçğıöşüÇĞİÖŞÜ]+){0,3})\s+(?:Bölümü|B[öo]l[üu]m[üu]|Mühendisliği|Fakültesi)", blob)
-    if dm:
-        out["department"] = dm.group(0).strip()
+    """SIKI sezgisel çıkarım. Transkript öncelikli; yapışık CV'den çıkarım YOK; birebir doğrulama.
+    Dönüş: {education, university, department, experience_years, _cv_readable, _notes[]}."""
+    tr = transcript or ""
+    cv = cv_text or ""
+    cv_ok = _cv_text_is_readable(cv)
+    out = {"education": None, "university": None, "department": None, "experience_years": None,
+           "_cv_readable": cv_ok, "_notes": []}
+    if cv.strip() and not cv_ok:
+        out["_notes"].append("CV metni yapışık/okunamaz — CV'den alan çıkarımı yapılmadı.")
+    # sıralı kaynaklar: transkript ÖNCE, sonra (okunabilirse) CV
+    sources = [("transkript", tr)] + ([("CV", cv)] if cv_ok else [])
+
+    # eğitim
+    for sname, txt in sources:
+        edu = _extract_education_from(txt)
+        if edu and _verbatim_in_edu(edu, txt):
+            out["education"] = edu
+            if sname == "transkript":
+                out["_notes"].append(f"Eğitim '{edu}' adayın sözlü beyanından alındı (CV'ye göre öncelikli).")
+            break
+
+    # deneyim yılı
+    for sname, txt in sources:
+        y = _extract_experience_years(txt)
+        if y is not None:
+            out["experience_years"] = y
+            out["_notes"].append(f"Deneyim yılı ~{y} '{sname}' kaynağından.")
+            break
+
+    # üniversite / bölüm — YALNIZ okunabilir kaynaktan; 1-2 özel ad kelimesi + anahtar sözcük;
+    # nokta/virgül/rakam içeren aralık reddedilir; "boş bırakmak yanlış doldurmaktan iyidir".
+    _PROPER = re.compile(r"^[A-ZÇĞİÖŞÜ][a-zçğıöşü]{2,}$")
+    def _preceding_proper(txt, end_idx, maxn=2, block=("niversite",)):
+        toks = txt[:end_idx].rstrip().split()
+        got = []
+        for t in reversed(toks[-maxn:]):
+            if _PROPER.match(t) and not any(b in t.lower() for b in block):
+                got.insert(0, t)
+            else:
+                break
+        return got
+    for sname, txt in sources:
+        if out["university"] is None:
+            for kw in re.finditer(r"\b[ÜUü]niversitesi\b", txt):
+                pre = _preceding_proper(txt, kw.start(), maxn=2)
+                if pre:
+                    out["university"] = " ".join(pre) + " Üniversitesi"
+                    break
+        if out["department"] is None:
+            for kw in re.finditer(r"\b(Bölümü|Mühendisliği)\b", txt):
+                pre = _preceding_proper(txt, kw.start(), maxn=2)
+                if pre:
+                    out["department"] = " ".join(pre) + " " + kw.group(1)
+                    break
     return out
 
+def _verbatim_in_edu(label: str, source: str) -> bool:
+    """Eğitim etiketinin türetildiği kalıp kaynakta birebir mi? (label 'Ticaret Lisesi' → kaynakta
+    'ticaret lisesi' geçmeli). _EDU_PHRASES zaten kaynak metinde arandığı için bu ek güvence."""
+    low = _norm_ws(source)
+    for needle, lab in _EDU_PHRASES:
+        if lab == label and needle in low:
+            return True
+    return _norm_ws(label) in low
+
 def resolve_cv_fields(candidate: dict, transcript: str = "") -> dict:
-    """FALLBACK ZİNCİRİ: (1) candidates form alanı → (2) CV ham metni + transkript sezgisel çıkarım.
-    Dönüş her alan için (value, source) — source ∈ {'form','cv/mülakat tahmini',''}."""
+    """FALLBACK ZİNCİRİ: (1) candidates form alanı → (2) transkript açık beyanı → (3) okunabilir
+    CV metni. Dönüş her alan için (value, source); ayrıca '_notes' ve '_cv_readable'."""
     c = candidate or {}
     heur = extract_cv_fields_heuristic(c.get("cv_text") or "", transcript)
-    out = {}
+    out = {"_notes": list(heur.get("_notes") or []), "_cv_readable": heur.get("_cv_readable")}
     for k in ("education", "university", "department", "experience_years"):
         v = c.get(k)
         if v not in (None, "", 0):
@@ -3742,6 +3833,92 @@ def patch_standard_cv_blanks(standard_cv: str, candidate: dict, transcript: str 
         suffix = "  (form beyanı)" if src == "form" else "  (CV/mülakattan tahmin — doğrulanmalı)"
         lines[i] = re.sub(r":\s*.*$", f": {disp}{suffix}", ln)
     return "\n".join(lines)
+
+# ═══ KALEM 3 (2. tur) — ÇELİŞKİ TESPİTİ DETERMİNİSTİK ═══
+# Model "tutarlıdır" diyerek yanlış onay veriyordu. Artık kayıt formu / CV çıkarımı / transkript
+# beyanı üçlüsünde deneyim yılı, eğitim ve e-posta alanlarını KOD karşılaştırır; model yalnız
+# hazır listeyi yorumlar, tespiti kendisi yapmaz. CV okunamıyorsa "karşılaştırılamadı" denir.
+def compute_field_discrepancies(candidate: dict, transcript: str = "") -> dict:
+    c = candidate or {}
+    cv = c.get("cv_text") or ""
+    tr = transcript or ""
+    cv_ok = _cv_text_is_readable(cv)
+    rows = []
+
+    def _add(alan, kaynaklar, durum, note=""):
+        rows.append({"alan": alan, "kaynaklar": kaynaklar, "durum": durum, "not": note})
+
+    # --- deneyim yılı ---
+    form_exp = c.get("experience_years") if c.get("experience_years") not in (None, "", 0) else None
+    tr_exp = _extract_experience_years(tr)
+    cv_exp = _extract_experience_years(cv) if cv_ok else None
+    vals = {k: v for k, v in (("Kayıt formu", form_exp), ("Sözlü beyan", tr_exp), ("CV", cv_exp)) if v is not None}
+    if len(vals) >= 2:
+        if len(set(vals.values())) > 1:
+            _add("Deneyim yılı", {k: str(v) for k, v in vals.items()}, "çelişki",
+                 "kaynaklar farklı yıl söylüyor: " + " / ".join(f"{k} {v}" for k, v in vals.items()))
+        else:
+            _add("Deneyim yılı", {k: str(v) for k, v in vals.items()}, "tutarlı")
+    elif cv.strip() and not cv_ok and (form_exp is not None or tr_exp is not None):
+        _add("Deneyim yılı", {"CV": "okunamadı"}, "karşılaştırılamadı", "CV metni yapışık/okunamadı")
+
+    # --- e-posta ---
+    form_mail = (c.get("email") or "").strip().lower()
+    _MAIL = r"[a-z0-9][a-z0-9._%+\-]*@[a-z0-9.\-]+\.[a-z]{2,}"
+    cv_mails = set(re.findall(_MAIL, cv.lower())) if cv_ok else set()
+    tr_mails = set(re.findall(_MAIL, tr.lower()))
+    distinct = set()
+    if form_mail:
+        distinct.add(form_mail)
+    distinct |= cv_mails | tr_mails
+    if len(distinct) >= 2:
+        _add("E-posta", {"Kayıt formu": form_mail or "—",
+                         "CV": "; ".join(sorted(cv_mails)) or "—",
+                         "Sözlü/transkript": "; ".join(sorted(tr_mails)) or "—"},
+             "çelişki", "birden fazla farklı e-posta adresi: " + ", ".join(sorted(distinct)))
+    elif cv.strip() and not cv_ok and form_mail:
+        _add("E-posta", {"Kayıt formu": form_mail, "CV": "okunamadı"}, "karşılaştırılamadı", "CV metni yapışık/okunamadı")
+
+    # --- eğitim ---
+    form_edu = (c.get("education") or "").strip()
+    tr_edu = _extract_education_from(tr)
+    cv_edu = _extract_education_from(cv) if cv_ok else None
+    edu_vals = {k: v for k, v in (("Kayıt formu", form_edu or None), ("Sözlü beyan", tr_edu), ("CV", cv_edu)) if v}
+    if len(edu_vals) >= 2:
+        norm = {_norm_ws(v) for v in edu_vals.values()}
+        if len(norm) > 1:
+            _add("Eğitim", edu_vals, "çelişki", " / ".join(f"{k}: {v}" for k, v in edu_vals.items()))
+        else:
+            _add("Eğitim", edu_vals, "tutarlı")
+    elif cv.strip() and not cv_ok and (form_edu or tr_edu):
+        _add("Eğitim", {"CV": "okunamadı"}, "karşılaştırılamadı", "CV metni yapışık/okunamadı")
+
+    return {"rows": rows, "cv_readable": cv_ok,
+            "celiski_var": any(r["durum"] == "çelişki" for r in rows),
+            "karsilastirilamadi": any(r["durum"] == "karşılaştırılamadı" for r in rows)}
+
+def render_discrepancy_block(disc: dict, for_prompt: bool = True) -> str:
+    """compute_field_discrepancies çıktısını prompt'a / rapora hazır metne çevirir."""
+    rows = (disc or {}).get("rows") or []
+    if not rows:
+        if for_prompt:
+            return ("SİSTEM ALAN KARŞILAŞTIRMASI: Karşılaştırılabilir sayısal/kimlik alanı (deneyim yılı, "
+                    "eğitim, e-posta) bulunamadı. Bu alanlarda 'tutarlıdır' DEME; yalnız transkriptte "
+                    "açıkça geçen çelişkileri yaz, yoksa 'karşılaştırma için yeterli veri yok' de.")
+        return ""
+    lines = []
+    for r in rows:
+        src = "; ".join(f"{k}={v}" for k, v in (r.get("kaynaklar") or {}).items())
+        tag = {"çelişki": "⚠ ÇELİŞKİ", "tutarlı": "tutarlı", "karşılaştırılamadı": "karşılaştırılamadı"}.get(r["durum"], r["durum"])
+        lines.append(f"- {r['alan']}: {tag} — {src}" + (f" ({r['not']})" if r.get("not") else ""))
+    body = "\n".join(lines)
+    if for_prompt:
+        return ("SİSTEM ALAN KARŞILAŞTIRMASI (deterministik — HAZIR VERİ; tespiti sen yapma, YALNIZ yorumla):\n"
+                + body +
+                "\n→ 'Tutarlılık / Çelişki Analizi' bölümünde SADECE bu listeyi ve transkriptte açıkça görünen "
+                "başka çelişkileri yaz. Liste 'çelişki' diyorsa bunu çelişki olarak RAPORLA. 'karşılaştırılamadı' "
+                "diyen alan için 'tutarlıdır' DEME.")
+    return "**Sistem Alan Karşılaştırması (deterministik):**\n" + body
 
 def build_standard_cv_deterministic(candidate: dict, transcript: str = "") -> str:
     """KALEM 3 — model ---STANDARTCV--- bloğuna varamadan kesildiyse (token sınırı),
@@ -3814,14 +3991,49 @@ Mevcut veri rapor için sınırlıdır. Nihai karar için adaydan daha kapsamlı
 # ═══ KALEM 3 — rapor içi çelişki temizliği (öneri tek kaynak, geri alınmış kayıtlar, prefix idempotent) ═══
 _REGEN_FIX_PREFIX = "[Rapor yeniden üretiminde düzeltildi]"
 
-def sync_recommendation_line(report: str, recommendation: str) -> str:
-    """Rapor gövdesindeki '**Öneri:** <değer>' satırını TEK KAYNAK (DB recommendation) ile
-    aynı yapar. Başlık kartı ile metin farklı öneri göstermesin. 'Öneri Gerekçesi:' satırına
-    dokunmaz (oradan sonra ':' değil ' Gerekçesi' gelir)."""
+_REC_KEYWORDS = {
+    "Reddet": (r"redded|reddi|olumsuz|uygun\s+değil|elenmes|işe\s+al[ıi]nmamas",),
+    "Değerlendirmeye Al": (r"değerlendirmeye\s+al|değerlendirilmes|ikinci\s+(bir\s+)?görüşme|havuzda\s+tut|beklemeye\s+al",),
+    "İşe Al": (r"işe\s+al[ıi]nmas|işe\s+al[ıi]n|teklif\s+(ver|yap)|olumlu\s+öneril|kadroya",),
+}
+
+def _recommendation_rationale(recommendation: str, score_position, score_profile) -> str:
+    """KALEM 6 — öneri gerekçesi TEK KAYNAK: karardan + PUAN 1'den türetilir."""
+    sp = "" if score_position is None else f" (PUAN 1 = {score_position}/100)"
+    if recommendation == "Reddet":
+        return (f"Pozisyon uygunluğu puanı{sp} yetersiz; aday pozisyon kriterlerinin çoğunda gereken "
+                f"yetkinlik düzeyini gösteremedi. Karar PUAN 1'e dayanmaktadır.")
+    if recommendation == "İşe Al":
+        return (f"Pozisyon uygunluğu puanı{sp} güçlü; aday pozisyon kriterlerinin çoğunda net yetkinlik "
+                f"gösterdi. Karar PUAN 1'e dayanmaktadır.")
+    if recommendation == "Değerlendirilemedi":
+        return "Güvenilir bir değerlendirme için yeterli veri oluşmadığından öneri verilememiştir."
+    return (f"Pozisyon uygunluğu puanı{sp} orta düzeyde; aday bazı kriterlerde yeterli, bazılarında sınırlı. "
+            f"İkinci bir görüşme veya ek kontrolle netleştirilmesi önerilir. Karar PUAN 1'e dayanmaktadır.")
+
+def sync_recommendation_line(report: str, recommendation: str, score_position=None, score_profile=None) -> str:
+    """KALEM 3 + 6 — TEK KAYNAK: '**Öneri:** <değer>' satırı DB recommendation ile aynı yapılır;
+    ayrıca '**Öneri Gerekçesi:**' cümlesi öneriyle çelişiyorsa (kelime bazlı) deterministik
+    gerekçeyle değiştirilir. Çelişmiyorsa modelin metnine dokunulmaz."""
     if not report or not recommendation:
         return report
-    return re.sub(r"(\**\s*Öneri\s*:\s*\**\s*)(İşe Al|Değerlendirmeye Al|Reddet|Değerlendirilemedi)\b[^\n]*",
-                  lambda m: f"{m.group(1)}{recommendation}", report, count=1, flags=re.IGNORECASE)
+    out = re.sub(r"(\**\s*Öneri\s*:\s*\**\s*)(İşe Al|Değerlendirmeye Al|Reddet|Değerlendirilemedi)\b[^\n]*",
+                 lambda m: f"{m.group(1)}{recommendation}", report, count=1, flags=re.IGNORECASE)
+    # Öneri Gerekçesi satırı: önerinin TERSİNİ söylüyorsa değiştir
+    def _rat_repl(m):
+        body = m.group(2)
+        low = body.lower()
+        contradicts = any(
+            rec != recommendation and any(re.search(p, low) for p in pats)
+            for rec, pats in _REC_KEYWORDS.items()
+        )
+        aligns = any(re.search(p, low) for p in _REC_KEYWORDS.get(recommendation, ()))
+        if contradicts and not aligns:
+            return f"{m.group(1)}{_recommendation_rationale(recommendation, score_position, score_profile)}"
+        return m.group(0)
+    out = re.sub(r"(\**\s*Öneri\s+Gerekçesi\s*:\s*\**\s*)([^\n]*)",
+                 _rat_repl, out, count=1, flags=re.IGNORECASE)
+    return out
 
 def sync_report_date_line(report: str, date_str: str) -> str:
     """Rapor metnindeki '**Tarih:** ...' satırını mülakatın GERÇEK tarihine sabitler (üretim
@@ -3870,9 +4082,7 @@ def strip_report_system_lines(text: str) -> str:
         return text
     kept = []
     for ln in text.splitlines():
-        # NOT: Python .lower() Türkçe 'İ'yi 'i̇' (i + combining dot) yapar — bu yüzden 'SİSTEM'
-        # kontrolü .lower() ile GÜVENİLMEZ; regex ile ham satırda ara.
-        if re.search(r"\[\s*S[İIıi]STEM\s*:", ln) and re.search(r"hal[üu]sinasyon|ADAY\s+CEVAB[İIıi]\s+SAYMA", ln, re.IGNORECASE):
+        if is_hallucination_marker_line(ln):
             continue
         if re.match(r"\s*\**\s*M[ÜU]LAKAT\s+NOTU\s*:", ln, re.IGNORECASE) and re.search(r"token\s+s[ıi]n[ıi]r|token\s+limit", ln, re.IGNORECASE):
             continue
@@ -3930,35 +4140,69 @@ def _store_interview_json(candidate_id: int, level: int, column: str, value) -> 
 
 _VOICE_CONF_UNANSWERED_RATIO = 0.30   # KALEM 7 — cevapsız tur oranı bu eşiği aşarsa güven otomatik "dusuk"
 
-def _unanswered_turn_windows(candidate_id: int, level: int) -> list:
-    """KALEM 7 — adayın cevabı BOŞ veya halüsinasyon işaretli turların yaklaşık [mm:ss] anları
-    (ms). Kayıtlı transkriptteki '[SİSTEM: ... halüsinasyon]' işaretli / boş Aday satırlarından."""
+def _unanswered_turn_windows(candidate_id: int, level: int) -> dict:
+    """KALEM 2/7 — {"windows": [ms...], "count": int}. Cevabı BOŞ / halüsinasyon işaretli turlar.
+    İKİ KAYNAK (birleşik, ~2sn içinde tekilleştirilir):
+      1) realtime_events: transcription_filtered / transcription_filtered_server (canlı + sunucu filtresi)
+      2) HAM interviews.messages: '[mm:ss] Aday: [SİSTEM: ... halüsinasyon]' / boş Aday satırları
+    NOT: HAM messages okunur — rapor görünümü temizliği (build_transcript_view for_report) bunu
+    ETKİLEMEZ; iki düzeltme birbirini iptal etmesin."""
+    out = []
+    # --- kaynak 1: realtime_events ---
     try:
         db = get_db()
-        row = db.execute("SELECT messages FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
-        db.close()
-    except Exception:
-        return []
-    if not row or not row["messages"]:
-        return []
-    try:
-        msgs = json.loads(row["messages"])
-        blob = "\n".join((m.get("content") or "") for m in msgs if isinstance(m, dict))
-    except Exception:
-        blob = row["messages"] if isinstance(row["messages"], str) else ""
-    out = []
+        try:
+            ev_rows = db.execute(
+                "SELECT event_data, elapsed_ms FROM realtime_events WHERE candidate_id=? AND level=? "
+                "AND event_type IN ('transcription_filtered','transcription_filtered_server') ORDER BY id ASC",
+                (candidate_id, level)).fetchall()
+            row = db.execute("SELECT messages FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"UYARI (_unanswered_turn_windows c={candidate_id}): {type(e).__name__}: {e}")
+        return {"windows": [], "count": 0}
+    ev_count = len(ev_rows or [])
+    for r in ev_rows or []:
+        ms = _safe_int(r["elapsed_ms"])
+        if ms <= 0:
+            try:
+                d = json.loads(r["event_data"] or "{}")
+                mm = re.match(r"(\d{1,3}):(\d{2})", str(d.get("ts") or ""))
+                if mm:
+                    ms = (int(mm.group(1)) * 60 + int(mm.group(2))) * 1000
+            except Exception:
+                ms = 0
+        if ms > 0:
+            out.append(ms)
+    # --- kaynak 2: ham messages'taki işaretli/boş Aday satırları ---
+    blob = ""
+    if row and row["messages"]:
+        try:
+            msgs = json.loads(row["messages"])
+            blob = "\n".join((m.get("content") or "") for m in msgs if isinstance(m, dict))
+        except Exception:
+            blob = row["messages"] if isinstance(row["messages"], str) else ""
+    msg_bad = 0
     for line in blob.splitlines():
         m = _VOICE_LINE_RE.match(line.strip())
-        if not m:
+        if not m or not m.group(3).startswith("Ada"):
             continue
-        if not m.group(3).startswith("Ada"):
-            continue
+        raw = line.strip()
         spoken = (m.group(4) or "").strip()
-        low = spoken.lower()
-        bad = (not spoken) or ("[sistem:" in low and ("halüsinasyon" in low or "halusinasyon" in low)) or is_likely_hallucination(spoken, "tr")
-        if bad:
+        quoted = re.search(r'"([^"]*)"\s*$', spoken)
+        core = quoted.group(1).strip() if quoted else spoken
+        if (not core) or is_hallucination_marker_line(raw) or is_likely_hallucination(core, "tr"):
+            msg_bad += 1
             out.append((int(m.group(1)) * 60 + int(m.group(2))) * 1000)
-    return out
+    # zaman penceresi listesi (2sn tekilleştirilmiş) + gerçek cevapsız tur SAYISI ayrı döner
+    out.sort()
+    windows = []
+    for ms in out:
+        if not windows or abs(ms - windows[-1]) > 2000:
+            windows.append(ms)
+    count = max(len(windows), ev_count, msg_bad)
+    return {"windows": windows, "count": count}
 
 def compute_voice_metrics(candidate_id: int, level: int) -> dict:
     """realtime_events satırlarından TUR BAZLI ses metrikleri üretir. semantic_vad turu bütün
@@ -3980,7 +4224,9 @@ def compute_voice_metrics(candidate_id: int, level: int) -> dict:
     evs = [(r["event_type"], _safe_int(r["elapsed_ms"])) for r in rows if r["event_type"]]
     if not evs:
         return {}
-    bad_windows = _unanswered_turn_windows(candidate_id, level)
+    _bad = _unanswered_turn_windows(candidate_id, level)
+    bad_windows = _bad.get("windows", [])
+    unanswered_turns = _bad.get("count", len(bad_windows))
     def _near_bad(ms, tol=9000):
         return any(abs(ms - b) <= tol for b in bad_windows)
 
@@ -4000,7 +4246,6 @@ def compute_voice_metrics(candidate_id: int, level: int) -> dict:
     talk_ms = sum(max(0, b - a) for a, b in turns)
     turn_count = len(turns)
     total_turn_count = len(all_turns)
-    unanswered_turns = len(bad_windows)
     considered_denom = max(total_turn_count, turn_count + unanswered_turns)
 
     answer_latencies = []
@@ -4350,34 +4595,106 @@ def splice_profile_region(reply: str, new_profile_text: str) -> str:
         return reply
     return reply[:m.start()] + "\n\n---\n" + new_profile_text + "\n\n" + reply[m.end():]
 
-def reviewer_flagged_criteria(review_notes: str, criterion_names: list) -> list:
-    """Denetçi çıktısının 'ABARTILI / KANITSIZ İDDİALAR' maddesinde adı geçen kriterler."""
-    if not review_notes or not criterion_names:
-        return []
+_REVIEWER_MAX_REVISIONS_PER_TABLE = 2   # KALEM 4 — bir raporda tablo başına en fazla kaç kriter revize edilir
+
+def _match_strength(flag_norm: str, crit_norm: str) -> int:
+    """0=eşleşmez, 1=zayıf (alt-string), 2=güçlü (tam / tüm kelime kapsaması)."""
+    if not flag_norm or not crit_norm:
+        return 0
+    if flag_norm == crit_norm:
+        return 2
+    fw, cw = set(flag_norm.split()), set(crit_norm.split())
+    if fw and (fw <= cw or cw <= fw) and min(len(fw), len(cw)) >= 1 and abs(len(fw) - len(cw)) <= 1:
+        # "iletisim" ⊆ "iletisim ve ifade netligi" → tek kelime, çok kısa fark yok → zayıf sayılır
+        if len(fw) == 1 and len(cw) > 2:
+            return 1
+        return 2
+    if len(flag_norm) >= 6 and (flag_norm in crit_norm or crit_norm in flag_norm):
+        return 1
+    return 0
+
+def reviewer_flagged_criteria(review_notes: str, position_names: list, profile_names: list) -> dict:
+    """KALEM 4 — denetçinin 'ABARTILI / KANITSIZ' maddesinde adı geçen kriterleri hangi TABLOYA
+    ait olduğuyla birlikte sınıflar. Bir ad hem pozisyon hem profil tablosunda GÜÇLÜ eşleşiyorsa
+    (ör. 'İletişim' ↔ 'İletişim ve ifade netliği') AMBİGÜ → hiçbirine uygulanmaz, log düşülür.
+    Dönüş: {'position':[...], 'profile':[...], 'ambiguous':[...], 'dropped':[...]}."""
+    res = {"position": [], "profile": [], "ambiguous": [], "dropped": []}
+    if not review_notes:
+        return res
     seg = review_notes
-    m = re.search(r"(?:ABART|KANITSIZ|kanıtsız|dayanaksız|desteklenmey)[\s\S]*?(?=\n\s*\d[\.\)]\s|\Z)", review_notes, re.IGNORECASE)
+    m = re.search(r"(?:ABART|KANITSIZ|kanıtsız|dayanaksız|desteklenmey|kanıtla\s+desteklen)[\s\S]*?(?=\n\s*\d[\.\)]\s|\Z)",
+                  review_notes, re.IGNORECASE)
     if m:
         seg = m.group(0)
     low = _norm_name(seg)
-    hits = []
-    for cn in criterion_names:
+    # denetçi metninde geçiş sırasına göre kriterleri topla (önce/açık geçen ≈ daha güçlü gerekçe)
+    ordered_pos, ordered_prof = [], []
+    def _first_pos(cn):
         n = _norm_name(cn)
-        kws = [w for w in n.split() if len(w) >= 4]
-        if n and n in low:
-            hits.append(cn)
-        elif kws and sum(1 for w in kws if w in low) >= max(1, len(kws) // 2):
-            hits.append(cn)
-    return hits
+        idx = low.find(n) if n else -1
+        if idx < 0 and len(n.split()) > 1:
+            for w in n.split():
+                if len(w) >= 5:
+                    j = low.find(w)
+                    if j >= 0:
+                        idx = j if idx < 0 else min(idx, j)
+        return idx
 
-def apply_reviewer_score_revision(report_body: str, flagged: list):
-    """KALEM 9(c) — denetçinin 'kanıtsız' dediği kriterlerin RAPOR TABLOSU hücresindeki puanı
-    deterministik düşürür (awarded *= _REVIEWER_HAIRCUT), hücreye not ekler. recompute_* sonra
-    normalize skoru bu revize hücrelerden yeniden hesaplar. Dönüş: (yeni_body, [revizyon kayıtları])."""
-    if not report_body or not flagged:
-        return report_body, []
-    lines = report_body.splitlines()
+    for cn in position_names:
+        idx = _first_pos(cn)
+        if idx >= 0:
+            ordered_pos.append((idx, cn))
+    for cn in profile_names:
+        idx = _first_pos(cn)
+        if idx >= 0:
+            ordered_prof.append((idx, cn))
+    ordered_pos.sort(); ordered_prof.sort()
+    pos_flagged = [cn for _, cn in ordered_pos]
+    prof_flagged = [cn for _, cn in ordered_prof]
+
+    def _keys(cn):
+        n = _norm_name(cn)
+        ks = {w for w in n.split() if len(w) >= 5}
+        if len(n) >= 5 and " " not in n:
+            ks.add(n)
+        return ks
+
+    # ÇAPRAZ EŞLEŞME KORUMASI: bir pozisyon kriteri ile bir profil kriteri ORTAK anlamlı kelime
+    # paylaşıyorsa (ör. 'İletişim' ↔ 'İletişim ve ifade netliği' → 'iletisim'), denetçinin tek
+    # maddesi ikisine birden vurmuş olabilir → HER İKİSİ de ambigü, hiçbirine uygulanmaz.
+    ambiguous = set()
+    for pc in pos_flagged:
+        for fc in prof_flagged:
+            if _keys(pc) & _keys(fc):
+                ambiguous.add(pc); ambiguous.add(fc)
+
+    for cn in pos_flagged:
+        if cn in ambiguous:
+            res["ambiguous"].append(cn)
+        elif len(res["position"]) < _REVIEWER_MAX_REVISIONS_PER_TABLE:
+            res["position"].append(cn)
+        else:
+            res["dropped"].append(cn)
+    for cn in prof_flagged:
+        if cn in ambiguous:
+            if cn not in res["ambiguous"]:
+                res["ambiguous"].append(cn)
+        elif len(res["profile"]) < _REVIEWER_MAX_REVISIONS_PER_TABLE:
+            res["profile"].append(cn)
+        else:
+            res["dropped"].append(cn)
+    return res
+
+def apply_reviewer_score_revision(region_body: str, flagged_names: list):
+    """KALEM 9(c) + KALEM 4 — verilen RAPOR BÖLGESİNDE (yalnız pozisyon VEYA yalnız profil tablosu)
+    flagged_names kriterlerinin hücre puanını deterministik düşürür (awarded *= _REVIEWER_HAIRCUT).
+    Bölge ayrımı çağıranın sorumluluğu — çapraz eşleşme burada olamaz.
+    Dönüş: (yeni_body, [revizyon kayıtları])."""
+    if not region_body or not flagged_names:
+        return region_body, []
+    lines = region_body.splitlines()
     revisions = []
-    flagged_norm = {_norm_name(f): f for f in flagged}
+    flagged_norm = {_norm_name(f): f for f in flagged_names}
     for i, ln in enumerate(lines):
         if ln.count("|") < 2:
             continue
@@ -4385,8 +4702,7 @@ def apply_reviewer_score_revision(report_body: str, flagged: list):
         if len(cells) < 2:
             continue
         cname_norm = _norm_name(re.sub(r"[*_`]", "", cells[0]))
-        match = next((orig for fn, orig in flagged_norm.items()
-                      if fn and (fn == cname_norm or (len(fn) >= 6 and (fn in cname_norm or cname_norm in fn)))), None)
+        match = next((orig for fn, orig in flagged_norm.items() if fn and _match_strength(fn, cname_norm) == 2), None)
         if not match:
             continue
         mm = re.search(r"(\d+)\s*/\s*(\d+)", cells[1])
@@ -4400,6 +4716,38 @@ def apply_reviewer_score_revision(report_body: str, flagged: list):
         lines[i] = ln.replace(cells[1], new_cell, 1)
         revisions.append({"kriter": match, "eski": f"{old_a}/{cap}", "yeni": f"{new_a}/{cap}"})
     return "\n".join(lines), revisions
+
+def annotate_revised_criteria_prose(report: str, revisions: list) -> str:
+    """KALEM 5 (2. tur) — revize edilen kriterlere değinen RAPOR METNİ cümlelerine denetçi notu
+    ekler + Yönetici Özeti'ne uyarı satırı. Tablo ile düz metin çelişmesin."""
+    if not report or not revisions:
+        return report
+    names = [r.get("kriter") for r in revisions if r.get("kriter")]
+    if not names:
+        return report
+    note = " [İkinci model: bu değerlendirme kanıtla desteklenmiyor — ilgili kriter puanı düşürüldü.]"
+    lines = report.splitlines()
+    hit = 0
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("|") or ln.strip().endswith(":") or not ln.strip():
+            continue
+        if note in ln:
+            continue
+        low = _norm_name(ln)
+        if any(_norm_name(n) in low or any(len(w) >= 5 and w in low for w in _norm_name(n).split()) for n in names):
+            lines[i] = ln.rstrip() + note
+            hit += 1
+            if hit >= 4:
+                break
+    report = "\n".join(lines)
+    # Yönetici Özeti tutarlılık uyarısı
+    summ = ", ".join(names)
+    warn = (f"\n\n[İkinci model revizyonu: {summ} kriter(ler)inde kanıt–puan tutarsızlığı tespit edildi; "
+            f"ilgili puanlar düşürüldü. Bu bölümdeki olumlu ifadeler bu çerçevede okunmalıdır.]")
+    if "İkinci model revizyonu:" not in report:
+        report = re.sub(r"(\*{0,2}\s*Yönetici Özeti\s*\*{0,2}\s*:\s*[^\n]*)",
+                        lambda m: m.group(1) + warn, report, count=1, flags=re.IGNORECASE)
+    return report
 
 def run_deferred_finish_job(candidate_id: int, level: int, regen: bool = False):
     """BackgroundTasks'ten (mülakat az önce bitti) VEYA kurtarma taramasından (takılı kalmış eski
@@ -4558,20 +4906,37 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             print(f"UYARI (denetçi c={candidate_id} L{level}): {type(e).__name__}: {e}")
         _set_reviewer_status(candidate_id, level, rv_status, rv_err)
 
-        # ═══ KALEM 9(c) — denetçinin "kanıtsız iddia" dediği kriterlerin puanı deterministik düşürülür ═══
+        # ═══ KALEM 9(c) + KALEM 4 — denetçinin "kanıtsız" dediği kriterlerin puanı deterministik düşürülür.
+        # Çapraz eşleşme YOK: pozisyon maddesi yalnız PUAN 1 tablosunda, profil maddesi yalnız PUAN 2
+        # tablosunda eşleşir; ait olduğu tablo belirsizse HİÇBİRİNE uygulanmaz. Tablo başına ≤2 revizyon.
         _revisions = []
         try:
-            if review_notes:
-                _all_crit_names = [c.get("name") for c in _pcrit if c.get("name")] + [pc["name"] for pc in PROFILE_CRITERIA]
-                _flagged = reviewer_flagged_criteria(review_notes, _all_crit_names)
-                if _flagged and "---RAPOR---" in reply:
-                    _m_rb0 = re.search(r'---RAPOR---([\s\S]*?)(?:---RAPORSON---|---STANDARTCV---|\Z)', reply)
-                    if _m_rb0:
-                        _rev_body, _revisions = apply_reviewer_score_revision(_m_rb0.group(1), _flagged)
-                        if _revisions:
-                            reply = reply.replace(_m_rb0.group(1), _rev_body, 1)
+            if review_notes and "---RAPOR---" in reply:
+                _pos_names = [c.get("name") for c in _pcrit if c.get("name")]
+                _prof_names = [pc["name"] for pc in PROFILE_CRITERIA]
+                _cls = reviewer_flagged_criteria(review_notes, _pos_names, _prof_names)
+                if _cls["ambiguous"] or _cls["dropped"]:
+                    print(f"[KALEM4] c={candidate_id} L{level} revizyon uygulanmadı — ambigü: {_cls['ambiguous']} · sınır aşımıyla bırakılan: {_cls['dropped']}")
+                _m_rb0 = re.search(r'---RAPOR---([\s\S]*?)(?:---RAPORSON---|---STANDARTCV---|\Z)', reply)
+                if _m_rb0 and (_cls["position"] or _cls["profile"]):
+                    _full_rb = _m_rb0.group(1)
+                    _p1r, _p2r = split_report_regions(_full_rb)
+                    _rev_all = []
+                    if _cls["position"] and _p1r:
+                        _p1r, _rp = apply_reviewer_score_revision(_p1r, _cls["position"])
+                        _rev_all += [dict(x, tablo="PUAN 1") for x in _rp]
+                    if _cls["profile"] and _p2r:
+                        _p2r, _rp = apply_reviewer_score_revision(_p2r, _cls["profile"])
+                        _rev_all += [dict(x, tablo="PUAN 2") for x in _rp]
+                    if _rev_all:
+                        _new_rb = (_p1r.rstrip() + "\n\n" + _p2r.strip() + "\n") if _p2r else _p1r
+                        reply = reply.replace(_full_rb, _new_rb, 1)
+                        _revisions = _rev_all
+                    if _cls["ambiguous"]:
+                        record_system_decision(candidate_id, level, "denetci_revizyon_ambigu",
+                                               f"İkinci model maddesi hangi tabloya ait belirlenemedi, revizyon uygulanmadı: {', '.join(_cls['ambiguous'])}", {})
         except Exception as e:
-            print(f"UYARI (KALEM9c revizyon c={candidate_id}): {type(e).__name__}: {e}")
+            print(f"UYARI (KALEM9c/KALEM4 revizyon c={candidate_id}): {type(e).__name__}: {e}")
 
         # ═══ Puanlama doğrulaması (revizyondan SONRA — normalize skor revize hücrelerden hesaplanır) ═══
         try:
@@ -4590,7 +4955,7 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
                     if fb != _orig_rb:
                         reply = reply.replace(_orig_rb, fb, 1)
                     if fwarn or _revisions:
-                        _rev_warn = [f"İkinci model revizyonu: '{r['kriter']}' {r['eski']} → {r['yeni']} (kanıtsız iddia)." for r in _revisions]
+                        _rev_warn = [f"İkinci model revizyonu ({r.get('tablo','?')}): '{r['kriter']}' {r['eski']} → {r['yeni']} (kanıtsız iddia)." for r in _revisions]
                         record_system_decision(candidate_id, level, "puanlama_duzeltildi",
                                                "Sunucu puanlama doğrulaması + ikinci model revizyonu uygulandı; normalize skor revize edilmiş puanlardan hesaplandı.",
                                                {"final_score": fscore, "profile_score": _pfscore, "revisions": _revisions},
@@ -4763,7 +5128,7 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
 
     db = get_db()
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-    _iv_dates = db.execute("SELECT started_at, interview_ended_at, messages FROM interviews WHERE candidate_id=? AND level=?",
+    _iv_dates = db.execute("SELECT started_at, interview_ended_at, messages, reviewer_score_revision_json FROM interviews WHERE candidate_id=? AND level=?",
                            (candidate_id, level)).fetchone()
     messages = get_interview_messages(db, candidate_id, level)
     try:
@@ -4796,8 +5161,27 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     except Exception as e:
         print(f"UYARI (finalize_interview CV alan tamamlama c={candidate_id}): {type(e).__name__}: {e}")
 
-    # KALEM 3 — başlık kartı ile metin AYNI öneriyi göstersin (tek kaynak = DB recommendation).
-    report = sync_recommendation_line(report, recommendation)
+    # KALEM 3 (2. tur) — çelişki tespiti DETERMİNİSTİK olarak rapora eklenir (model atlasa/yanlış
+    # onaylasa bile görünür). Rapordaki "Tutarlılık / Çelişki" bölümü bunun ışığında okunmalı.
+    try:
+        _disc = compute_field_discrepancies(dict(candidate) if candidate else {}, _transcript_txt)
+        _disc_txt = render_discrepancy_block(_disc, for_prompt=False)
+        if _disc_txt and "Sistem Alan Karşılaştırması" not in report:
+            report = report.rstrip() + "\n\n" + _disc_txt + "\n"
+    except Exception as e:
+        print(f"UYARI (finalize_interview çelişki bloğu c={candidate_id}): {type(e).__name__}: {e}")
+
+    # KALEM 5 (2. tur) — bir kriter ikinci model tarafından revize edildiyse, o kritere değinen
+    # RAPOR METNİ cümlelerine denetçi notu eklenir; tablo ile metin çelişmesin.
+    try:
+        _revs = json.loads(_iv_dates["reviewer_score_revision_json"]) if (_iv_dates and _iv_dates["reviewer_score_revision_json"]) else []
+    except Exception:
+        _revs = []
+    if _revs:
+        report = annotate_revised_criteria_prose(report, _revs)
+
+    # KALEM 3 + 6 — başlık kartı ile metin AYNI öneriyi göstersin; öneri gerekçesi de öneriyle hizalı.
+    report = sync_recommendation_line(report, recommendation, score_position, score_profile)
     # KALEM 4 — rapor metnindeki "Tarih:" satırı mülakatın GERÇEK tarihi olsun (üretim tarihi değil).
     try:
         _iv_date_str = (_parse_iso(_iv_dates["started_at"]).strftime("%d.%m.%Y")
@@ -6031,6 +6415,12 @@ def build_l2_report_prompt(candidate, candidate_level: int, transcript: str,
         "criteria_table_filled": build_criteria_table_filled(pos["criteria"]),
         "profile_table_filled": build_profile_table_filled(),
     })
+    # KALEM 3 (2. tur) — deterministik alan karşılaştırması: model tespiti kendisi yapmaz, yorumlar.
+    try:
+        _disc_block = "\n\n" + render_discrepancy_block(compute_field_discrepancies(dict(candidate), transcript), for_prompt=True)
+    except Exception as e:
+        print(f"UYARI (build_l2_report_prompt çelişki bloğu): {type(e).__name__}: {e}")
+        _disc_block = ""
     return f"""Aşağıda bir sesli iş mülakatının transkripti, aday CV'si, pozisyon kriterleri ve derinlik bilgisi vardır. İnsan kaynakları yöneticisinin karar vermesine yardım edecek, adaya özgü ve ayrıntılı bir değerlendirme raporu üret.
 
 Aday: {candidate['name']}
@@ -6040,10 +6430,11 @@ Derinlik: {depth_tier}
 Kriterler ({total_weight} puan):
 {criteria_text}
 
-KAYIT FORMU BEYANI (adayın/adminin başvuru formunda girdiği bilgi — CV ve sözlü cevaplarla ÇELİŞKİ taraması için kullan):
+KAYIT FORMU BEYANI (adayın/adminin başvuru formunda girdiği bilgi):
 - E-posta: {candidate['email'] or '—'}
 - Eğitim: {candidate['education'] or '—'} · Üniversite: {candidate['university'] or '—'} · Bölüm: {candidate['department'] or '—'}
 - Deneyim yılı (beyan): {candidate['experience_years'] if candidate['experience_years'] not in (None, '', 0) else '—'}
+{_disc_block}
 
 ADAYIN CV'Sİ:
 {cv_for_report}{ai_note_section}{coverage_block}{unanswered_block}{extra_notes}
@@ -6053,7 +6444,7 @@ TRANSKRİPT:
 
 TEMEL KURALLAR:
 - Rapor {report_lang} dilinde yazılacak.
-- ÇELİŞKİ TARAMASI (KESİN): Tutarlılık/Çelişki bölümünü yalnız adayın kendi cevapları içinde değil, CV ↔ sözlü cevap ↔ KAYIT FORMU BEYANI üçlüsü arasında yap. Sayısal ve kimlik beyanlarını doğrudan karşılaştır: deneyim yılı, eğitim/derece, unvan, tarihler, e-posta adresi. "Çelişki yok" diyorsan HANGİ alanları karşılaştırdığını kısaca yaz.
+- ÇELİŞKİ TARAMASI (KESİN): "Tutarlılık / Çelişki Analizi" bölümünü YUKARIDAKİ "SİSTEM ALAN KARŞILAŞTIRMASI" listesine dayandır — tespiti sen yapma. Liste 'çelişki' diyen alanı çelişki olarak yaz; 'karşılaştırılamadı' diyen alan için ASLA "tutarlıdır" deme. Ayrıca transkriptte açıkça görünen başka çelişkiler varsa ekle. Karşılaştırdığın alanları say.
 - Yalnızca adayın gerçekten söylediği sözler mülakat kanıtıdır. Mülakatçının açıklamalarını adaya mal etme.
 - CV bilgisi ile mülakat kanıtını ayır: “CV'de belirtilmiştir” ve “mülakatta doğrulanmıştır/doğrulanamamıştır” ifadelerini açık kullan.
 - Adayın söylemediği deneyim, beceri, sonuç, motivasyon veya kişilik özelliği uydurma.
