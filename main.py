@@ -1978,18 +1978,22 @@ def build_criteria_text(criteria: list) -> str:
         lines.append(f"- {c['name']} ({c['weight']} puan): {c.get('desc', '')}")
     return "\n".join(lines)
 
+_CRIT_CELL_HINT = ("__/{w}  |  VEYA  |  Değerlendirilmedi (sorulmadı) — <gerekçe>  "
+                   "|  VEYA  |  Yetersiz (soruldu, cevap alınamadı) — <gerekçe>")
+
 def build_criteria_table_filled(criteria: list, evidence_header: str = "Kanıt ve Analiz") -> str:
     """KALEM 4 — DETERMİNİSTİK kriter tablosu: satırlar pozisyondan gelir, model AYNEN doldurur.
-    Model satır ekleyemez/çıkaramaz/yeniden adlandıramaz. Payda (tavan) sabit."""
+    Model satır ekleyemez/çıkaramaz/yeniden adlandıramaz. Payda (tavan) sabit.
+    KALEM 1 — 'Değerlendirilmedi' iki türde: (sorulmadı) sistem, (soruldu cevap yok) aday."""
     lines = [f"| Kriter | Puan | {evidence_header} |", "|--------|------|-----------------|"]
     for c in criteria:
-        lines.append(f"| {c['name']} | __/{c['weight']}  (veya: Değerlendirilmedi — <tek cümle gerekçe>) | <kanıt → analiz → sonuç> |")
+        lines.append(f"| {c['name']} | {_CRIT_CELL_HINT.format(w=c['weight'])} | <kanıt → analiz → sonuç> |")
     return "\n".join(lines)
 
 def build_criteria_table_template(criteria: list) -> str:
     lines = ["| Kriter | Puan | Değerlendirme |", "|--------|------|---------------|"]
     for c in criteria:
-        lines.append(f"| {c['name']} | __/{c['weight']}  (veya: Değerlendirilmedi — <gerekçe>) | ... |")
+        lines.append(f"| {c['name']} | {_CRIT_CELL_HINT.format(w=c['weight'])} | ... |")
     return "\n".join(lines)
 
 # ============ RAPOR GÖVDESİ — TEK KAYNAK (Faz C) ============
@@ -2020,7 +2024,7 @@ REPORT_BODY_SECTIONS = [
     ("puanlama_kapsami", {2, 3},  "**Puanlama Kapsamı:** (hangi kriterler değerlendirildi, hangileri değerlendirilmedi; normalize yöntemini kısa açıkla)"),
     ("_blank3",        {1, 2, 3}, ""),
     ("kriter_tablosu_l13", {1},   "{table_template}"),
-    ("kriter_tablosu_l2", {2, 3}, "{criteria_table_filled}\n(YUKARIDAKİ TABLOYU AYNEN KULLAN: satır ekleme/çıkarma/yeniden adlandırma YOK. Her satırda ya `<puan>/<tavan>` ya `Değerlendirilmedi — <tek cümle gerekçe>`. Tavanı AŞMA.)"),
+    ("kriter_tablosu_l2", {2, 3}, "{criteria_table_filled}\n(YUKARIDAKİ TABLOYU AYNEN KULLAN: satır ekleme/çıkarma/yeniden adlandırma YOK, tavanı AŞMA. Her satırda ÜÇ seçenekten biri: `<puan>/<tavan>`  |  `Değerlendirilmedi (sorulmadı) — <gerekçe>` (kriter hiç sorulmadı / teknik / süre yetmedi — adayın kusuru değil)  |  `Yetersiz (soruldu, cevap alınamadı) — <gerekçe>` (kriter soruldu ama aday cevap veremedi / kaçındı / konuyu değiştirdi / yüzeysel geçti). Bir kriter DÖRT kez sorulup cevap alınamadıysa bu 'Yetersiz'tir, 'Değerlendirilmedi' DEĞİL.)"),
     ("_blank4",        {1, 2, 3}, ""),
     ("analitik_dusunme", {2, 3},  "**Analitik Düşünme ve Muhakeme:** (soruyu kavrama, problemi parçalama, neden-sonuç, alternatif kıyaslama, ölçüm/veri kullanımı; somut kanıtlarla)"),
     ("problem_cozme",  {2, 3},    "**Problem Çözme ve Karar Verme Yaklaşımı:** (izlediği yöntem, seçenekler, riskler, sonuç takibi)"),
@@ -2248,7 +2252,7 @@ GENEL:
 - "Serbest Gözlemler" bölümüne: (a) DAVRANIŞ VE TUTUM — agresiflik, sabırsızlık, kabalık, kaçamaklık gözlendiyse dakika + adayın sözüyle SOMUT yaz (davranış tek başına puan düşürmez); (b) POZİSYON UYUMU — aday alanının farklı olduğunu belirttiyse bunu yaz ve değerlendirmenin adayın gerçek alanına göre yapıldığını not et.
 - Bir kriter için yeterli veri toplanamadıysa (yeniden sorulmasına rağmen yanıtsız kaldıysa) raporda "Yanıtsız/Değerlendirilemeyen Kriterler" olarak AYRI listele; bu kriterlere puan verme, toplamı değerlendirilen kriterlerin ağırlığına normalize et.
 - PUAN TAVANI (KESİN): Hiçbir kriter puanı kendi tavanını (ağırlığını) AŞAMAZ ("12/10" ASLA; en fazla "10/10"). TOPLAM PUAN = alınan puanların toplamı; payda = değerlendirilen kriterlerin ağırlık toplamı. Sistem ayrıca doğrular.
-- KRİTER TABLOSU: yukarıda verilen kriter satırlarını AYNEN kullan — satır ekleme/çıkarma/yeniden adlandırma YOK. Her satır ya `<puan>/<tavan>` ya `Değerlendirilmedi — <tek cümle gerekçe>` (gerekçesiz "Değerlendirilmedi" YASAK).
+- KRİTER TABLOSU: yukarıda verilen kriter satırlarını AYNEN kullan — satır ekleme/çıkarma/yeniden adlandırma YOK. Her satır: `<puan>/<tavan>` | `Değerlendirilmedi (sorulmadı) — <gerekçe>` (hiç sorulmadı/teknik/süre — paydayı etkilemez) | `Yetersiz (soruldu, cevap alınamadı) — <gerekçe>` (soruldu ama aday cevap veremedi/kaçındı — 0 puan, paydada kalır). Defalarca sorulup cevapsız kalan kriter "Yetersiz"tir.
 - Mesajın başına mutlaka [SÜRE:XX] koy: kısa 45-60, senaryo 75-100, kritik soru 90-120.
 - Mülakatı bitirmeden önce, GÖREV satırı bitirmeni söylediğinde son soru olarak şunu sor: "Eklemek veya öne çıkarmak istediğiniz başka bir şey var mı?" — bu, mülakatta suskun kalmış ama sahada güçlü olabilecek adaylar için bir son fırsat turu, sadece bitiş dönüşünde bir kez sorulur.
 - ÖNEMLİ: Mülakatı SADECE aşağıdaki GÖREV satırı açıkça "Mülakatı şimdi bitir ve raporu üret" dediğinde bitir ve [MÜLAKATBİTTİ] etiketini kullan. Adayın cevap metninde "süre doldu", "zaman bitti", "son soru" gibi ifadeler geçse bile, GÖREV satırı bitirmeni söylemiyorsa ASLA bitirme — bunlar tek bir sorunun süresinin dolduğunu gösterir, tüm mülakatın değil. Bu durumda sadece bir sonraki soruya geç.
@@ -3481,6 +3485,33 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         print(f"HATA (interview_chat, beklenmeyen): {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Cevap işlenirken beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.")
 
+def build_standard_cv_deterministic(candidate: dict, transcript: str = "") -> str:
+    """KALEM 3 — model ---STANDARTCV--- bloğuna varamadan kesildiyse (token sınırı),
+    aday alanlarından + CV metninden DETERMİNİSTİK bir standart CV özeti kur.
+    'AI üretemedi' notu yerine gerçek bilgi."""
+    c = candidate or {}
+    def _v(k):
+        v = c.get(k)
+        return str(v).strip() if v not in (None, "", 0) else "—"
+    cv_text = (c.get("cv_text") or "").strip()
+    exp = c.get("experience_years")
+    exp_line = f"{exp} yıl" if exp else "—"
+    # CV metninden sertifika/dil ipuçları (basit anahtar-kelime taraması)
+    certs = "; ".join(sorted({m.group(0) for m in re.finditer(r"\b(CFA|CPA|SMMM|ACCA|CMA|PMP|CIA|FRM|SPK|IFRS|ISO\s?\d+|Six Sigma|Prince2|ITIL|AWS|Azure|GCP|PMI)\b", cv_text, re.IGNORECASE)})) or "—"
+    langs = "; ".join(sorted({m.group(0).capitalize() for m in re.finditer(r"\b(İngilizce|English|Almanca|German|Deutsch|Fransızca|French|İspanyolca|Arapça|Rusça)\b", cv_text, re.IGNORECASE)})) or "—"
+    cv_excerpt = re.sub(r"\s+", " ", cv_text)[:900] if cv_text else "CV metni yok."
+    return (f"AD SOYAD: {_v('name')}\n"
+            f"POZİSYON: {_v('position')}\n"
+            f"EĞİTİM: {_v('education')}\n"
+            f"ÜNİVERSİTE: {_v('university')}\n"
+            f"BÖLÜM: {_v('department')}\n"
+            f"DENEYİM: {exp_line}\n"
+            f"SERTİFİKALAR (CV'den): {certs}\n"
+            f"DİL BECERİLERİ (CV'den): {langs}\n"
+            f"CV ÖZETİ (ham metinden): {cv_excerpt}\n"
+            f"MÜLAKAT NOTU: Bu standart CV özeti, AI rapor çıktısı token sınırında kesildiği için "
+            f"sistem tarafından aday kayıt alanlarından ve yüklenen CV metninden derlenmiştir.")
+
 def build_fallback_report(candidate: dict, messages: list, score: int, recommendation: str, reason: str = "") -> str:
     """AI rapor bloğu eksik/bozuk gelirse boş rapor bırakma; kanıta dayalı yedek rapor üret."""
     answers = [m.get("content", "").strip() for m in messages if m.get("role") == "user" and m.get("content")]
@@ -3939,13 +3970,21 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         elif provider == "openai":
             resp = openai_call(
                 "POST", "https://api.openai.com/v1/chat/completions",
-                json_body={"model": model or OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": primary_payload}], "max_tokens": 2600, "temperature": 0.1},
-                timeout=60.0, step="report_generation", severity="user", retry=True,
+                # KALEM 3: 2600 yetmiyordu — rapor gövdesi + kriter tablosu uzayınca çıktı
+                # ---STANDARTCV--- bloğuna varmadan kesiliyor, "CV özeti üretilemedi" düşüyordu.
+                json_body={"model": model or OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": primary_payload}], "max_tokens": 3800, "temperature": 0.1},
+                timeout=75.0, step="report_generation", severity="user", retry=True,
                 context={"candidate_id": candidate_id, "level": level},
             )
             result = resp.json()
             record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "l2_report_generation_deferred", result)
             reply = result["choices"][0]["message"]["content"]
+            _fr = (result.get("choices") or [{}])[0].get("finish_reason")
+            if _fr == "length" or "---STANDARTCVSON---" not in reply:
+                print(f"[REPORT_TRUNCATED] c={candidate_id} L{level} finish_reason={_fr}")
+                record_system_decision(candidate_id, level, "rapor_kesildi",
+                                       "Rapor üretimi token sınırına takıldı; standart CV özeti deterministik olarak tamamlandı.",
+                                       {"finish_reason": _fr})
         else:
             raise RuntimeError(f"Bilinmeyen pending_finish_provider: {provider!r}")
 
@@ -3956,12 +3995,22 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         try:
             dbp = get_db()
             _cprow = dbp.execute("SELECT position FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+            _ivrow = dbp.execute("SELECT criteria_coverage_json, messages, started_at FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
             dbp.close()
             _pcrit = ((get_position(_cprow["position"]) or {}).get("criteria") or []) if _cprow else []
+            try:
+                _pcov = json.loads(_ivrow["criteria_coverage_json"]) if (_ivrow and _ivrow["criteria_coverage_json"]) else None
+            except Exception:
+                _pcov = None
+            try:
+                _ptx = transcript_to_text(build_transcript_view(_ivrow["messages"] if _ivrow else "[]", level, _ivrow["started_at"] if _ivrow else None))
+            except Exception:
+                _ptx = None
             if "---RAPOR---" in reply and _pcrit:
                 m_rb = re.search(r'---RAPOR---([\s\S]*?)(?:---RAPORSON---|---STANDARTCV---|\Z)', reply)
                 if m_rb:
-                    fb, fscore, fwarn = recompute_and_fix_score(m_rb.group(1), _pcrit, extract_score(reply))
+                    fb, fscore, fwarn = recompute_and_fix_score(m_rb.group(1), _pcrit, extract_score(reply),
+                                                                criteria_coverage=_pcov, transcript=_ptx)
                     if fb != m_rb.group(1):
                         reply = reply.replace(m_rb.group(1), fb, 1)
                     if fwarn:
@@ -4069,11 +4118,21 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     try:
         _dbc = get_db()
         _cand_row = _dbc.execute("SELECT position FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+        _ivr = _dbc.execute("SELECT criteria_coverage_json, messages, started_at FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
         _dbc.close()
         _pos = get_position(_cand_row["position"]) if _cand_row else None
         _crit = (_pos or {}).get("criteria") or []
+        try:
+            _fcov = json.loads(_ivr["criteria_coverage_json"]) if (_ivr and _ivr["criteria_coverage_json"]) else None
+        except Exception:
+            _fcov = None
+        try:
+            _ftx = transcript_to_text(build_transcript_view(_ivr["messages"] if _ivr else "[]", level, _ivr["started_at"] if _ivr else None))
+        except Exception:
+            _ftx = None
         if report_match and _crit:
-            _fixed_body, _final_score, _score_warnings = recompute_and_fix_score(report_match.group(1), _crit, score)
+            _fixed_body, _final_score, _score_warnings = recompute_and_fix_score(report_match.group(1), _crit, score,
+                                                                                criteria_coverage=_fcov, transcript=_ftx)
             if _fixed_body != report_match.group(1):
                 reply = reply.replace(report_match.group(1), _fixed_body, 1)
                 report_match = re.search(r'---RAPOR---([\s\S]*?)(?:---RAPORSON---|---STANDARTCV---|\Z)', reply)
@@ -4111,8 +4170,9 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     except Exception as e:
         print(f"UYARI (finalize_interview modalite notu c={candidate_id}): {type(e).__name__}: {e}")
 
-    if not standard_cv:
-        standard_cv = f"AD SOYAD: {candidate['name'] if candidate else '-'}\nPOZİSYON: {candidate['position'] if candidate else '-'}\nMÜLAKAT NOTU: Standart CV özeti AI tarafından üretilemedi; adayın yüklediği CV ve yanıtları ayrıca incelenmelidir."
+    if not standard_cv or len(strip_markdown(standard_cv)) < 30:
+        # KALEM 3: "AI üretemedi" notu yerine aday alanlarından + CV metninden deterministik özet
+        standard_cv = build_standard_cv_deterministic(dict(candidate) if candidate else {})
 
     if regen:
         # EK — geriye dönük yeniden üretim: orijinal bitiş saati (completed_at) KORUNUR,
@@ -4883,12 +4943,37 @@ def _name_score(crit_name: str, cell_name: str) -> float:
 
 _SCORE_FIXED_MARK = "(ham puan:"
 
-def recompute_and_fix_score(report_body: str, position_criteria: list, model_score):
+def _criterion_was_asked(cname: str, criteria_coverage, transcript: str) -> bool:
+    """KALEM 1 — kriter mülakatta gerçekten SORULDU mu? (a) sistem eksikliği ile (b) aday
+    eksikliğini ayırmak için. Kanıt: end_interview criteria_coverage > 10 VEYA transkriptteki
+    mülakatçı sorularında kriter adının anlamlı kelimeleri geçiyor."""
+    if isinstance(criteria_coverage, dict) and criteria_coverage:
+        best = 0.0
+        for k, v in criteria_coverage.items():
+            if _name_score(cname, k) >= 0.5:
+                try:
+                    best = max(best, float(v or 0))
+                except Exception:
+                    pass
+        if best > 10:
+            return True
+    if transcript:
+        kws = [w for w in _norm_name(cname).split() if len(w) >= 4]
+        if kws:
+            q_lines = "\n".join(l.lower() for l in transcript.splitlines() if re.search(r"(^|\])\s*mülakatçı\s*:", l, re.IGNORECASE))
+            hits = sum(1 for w in kws if w in q_lines)
+            if hits >= max(1, len(kws) // 2):
+                return True
+    return False
+
+def recompute_and_fix_score(report_body: str, position_criteria: list, model_score, criteria_coverage=None, transcript: str = None):
     """Sunucu tarafı puanlama doğrulaması:
       - hiçbir kriter puanı kendi tavanını (pozisyon ağırlığı) aşamaz → aşan tavana sabitlenir
-      - skor = (alınan / DEĞERLENDİRİLEN kriterlerin tavanı) * 100 ile gerçekten normalize edilir
+      - KALEM 1: 'Değerlendirilmedi' iki sebebe ayrılır:
+          (a) SİSTEM kaynaklı (sorulmadı / teknik / süre / bağlantı) → paydadan DÜŞÜLÜR
+          (b) ADAY kaynaklı (soruldu, cevap alınamadı / kaçındı / yüzeysel) → paydada KALIR, 0 puan
+      - skor = alınan / (değerlendirilen + aday-kaynaklı eksik) kriterlerin tavanı * 100
       - 'TOPLAM PUAN' satırı NORMALİZE değeri gösterir; parantezde ham puan (extract_score bunu okur)
-      - "Değerlendirilmedi" gerekçesiz ise uyarı
     Dönüş: (duzeltilmis_rapor, final_score, warnings[]). İdempotent: bir kez düzeltilmişse aynen döner."""
     warnings = []
     if not report_body or not position_criteria:
@@ -4914,8 +4999,9 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
     # Her pozisyon kriterine EN İYİ eşleşen tablo satırını ata (satır tekrar kullanılmaz).
     used = set()
     awarded_sum = 0
-    evaluated_cap = 0
-    evaluated_names, skipped = [], []
+    denom_cap = 0                     # payda = değerlendirilen + aday-kaynaklı eksik kriterlerin tavanı
+    evaluated_names = []              # gerçekten puan alanlar
+    sys_missing, cand_missing = [], []   # (a) sistem eksik / (b) aday eksik
     for c in position_criteria:
         cap = _safe_int(c.get("weight"))
         if cap <= 0:
@@ -4928,30 +5014,47 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
             s = _name_score(cname, r["name"])
             if s > best_s:
                 best, best_s = r, s
-        if best is None or best_s < 0.34:
-            warnings.append(f"'{cname}' kriteri rapor tablosunda bulunamadı — değerlendirilmemiş sayıldı.")
-            skipped.append({"kriter": cname, "gerekce": "rapor tablosunda satır yok"})
-            continue
-        used.add(best["line_idx"])
-        puan_cell = best["cell"]
+        puan_cell = best["cell"] if (best and best_s >= 0.34) else ""
+        if best and best_s >= 0.34:
+            used.add(best["line_idx"])
         cell_lc = puan_cell.lower()
-        # "değerlendir..." / "n/a" / "yok" → değerlendirilmemiş (KALEM 4: gerekçe zorunlu). Bu kontrol
-        # sayı aramadan ÖNCE — aksi halde "IFRS 16 sorusuna girilmedi" içindeki 16 puan sanılır.
+
         _mm_frac = re.search(r"(?<![\d/／])(\d+)\s*[/／]\s*(\d+)(?![\d/／])", puan_cell)
         _mm_lead = re.match(r"\s*[*_`]*\s*(\d+)\s*(?:puan|pts?|/\s*\d+)?\s*[*_`]*\s*$", puan_cell, re.IGNORECASE)
-        is_skip_marker = ("değerlendir" in cell_lc) or bool(re.search(r"\b(n/?a|yok)\b", cell_lc)) or puan_cell.strip() in ("-", "—", "", "–")
-        if is_skip_marker and not _mm_frac and not _mm_lead:
-            gm = re.search(r"değerlendir\w*\s*[—:\-–]\s*(.+)$", puan_cell, re.IGNORECASE)
-            reason = (gm.group(1).strip() if gm else "")
-            if not reason and "değerlendir" in cell_lc:
-                warnings.append(f"'{cname}' GEREKÇESİZ 'Değerlendirilmedi' işaretlendi.")
-            skipped.append({"kriter": cname, "gerekce": reason or "(gerekçe yazılmamış)"})
-            continue
         mm = _mm_frac or _mm_lead
+
         if not mm:
-            warnings.append(f"'{cname}' puan hücresi belirsiz (ne net sayı ne 'Değerlendirilmedi'): {puan_cell!r} — değerlendirilmemiş sayıldı.")
-            skipped.append({"kriter": cname, "gerekce": "puan hücresi belirsiz"})
+            # ── DEĞERLENDİRİLMEDİ: türü belirle (KALEM 1) ──
+            # gerekçe = tip işaretinden (Değerlendirilmedi / Yetersiz / (sorulmadı) / (soruldu…)) SONRAKİ metin
+            gm = re.search(r"[—:–\-]\s*(.+)$", re.sub(r"\((?:sorulmad[ıi]|soruldu[^)]*)\)", "", puan_cell, flags=re.IGNORECASE))
+            reason = (gm.group(1).strip() if gm else "")
+            declared_sys = bool(re.search(r"sorulmad|hiç\s+sorul|not\s+asked|teknik|süre\s+yetmed|bağlantı\s+kopt|zaman\s+yetmed", cell_lc))
+            declared_cand = bool(re.search(r"yetersiz|cevap\s+al[ıi]namad|cevap\s+vermed|cevap\s+ver[ei]med|kaç[ıi]nd|konuyu\s+değiş|yüzeysel|geçiştir|bilmed", cell_lc))
+            asked = _criterion_was_asked(cname, criteria_coverage, transcript)
+            if best is None or best_s < 0.34:
+                declared_sys, declared_cand = False, False
+
+            # KANIT ÖNCELİKLİ: kriter mülakatta gerçekten SORULDUYSA (coverage>10 veya mülakatçı
+            # sorularında geçiyor) bu ADAY kaynaklı eksikliktir — model 'sorulmadı' dese bile.
+            if declared_cand or asked:
+                if declared_sys and asked:
+                    warnings.append(f"'{cname}' model '(sorulmadı)' demiş ama kriter mülakatta SORULMUŞ → aday-kaynaklı 'Yetersiz'e çevrildi (0 puan, paydada).")
+                # (b) ADAY kaynaklı — paydada kalır, 0 puan
+                denom_cap += cap
+                _gk = reason or ("(soruldu, cevap alınamadı)" if asked else "aday cevap veremedi/kaçındı")
+                cand_missing.append({"kriter": cname, "gerekce": _gk})
+                if best and best_s >= 0.34 and puan_cell:
+                    li = best["line_idx"]
+                    lines[li] = lines[li].replace(f"| {puan_cell} |", f"| 0/{cap} — Yetersiz (aday): {_gk} |", 1)
+            else:
+                # (a) SİSTEM kaynaklı — paydadan düşülür
+                if not reason and best is not None and best_s >= 0.34 and ("değerlendir" in cell_lc):
+                    warnings.append(f"'{cname}' GEREKÇESİZ 'Değerlendirilmedi' işaretlendi.")
+                if best is None or best_s < 0.34:
+                    warnings.append(f"'{cname}' kriteri rapor tablosunda bulunamadı — sistem eksikliği sayıldı (payda dışı).")
+                sys_missing.append({"kriter": cname, "gerekce": reason or "(gerekçe yazılmamış)"})
             continue
+
         awarded = _safe_int(mm.group(1))
         written_cap = _safe_int(mm.group(2)) if (mm.re.groups >= 2 and mm.group(2)) else None
         if awarded > cap:
@@ -4959,7 +5062,6 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
             awarded = cap
         elif written_cap is not None and written_cap != cap:
             warnings.append(f"'{cname}' payda {written_cap} yazılmış, gerçek tavan {cap} → düzeltildi.")
-        # tablo hücresini HER ZAMAN gerçek tavanla yaz (payda tutarlı olsun)
         li = best["line_idx"]
         _cell_new = f"{awarded}/{cap}"
         if "/" in puan_cell:
@@ -4967,11 +5069,16 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
         else:
             lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {_cell_new} |", 1)
         awarded_sum += awarded
-        evaluated_cap += cap
+        denom_cap += cap
         evaluated_names.append(cname)
 
-    if skipped:
-        warnings.append("Değerlendirilmeyen kriterler: " + "; ".join(f"{s['kriter']} ({s['gerekce']})" for s in skipped))
+    evaluated_cap = denom_cap
+    if sys_missing:
+        warnings.append("Değerlendirilemeyen kriterler (SİSTEM kaynaklı — payda dışı): "
+                        + "; ".join(f"{s['kriter']} ({s['gerekce']})" for s in sys_missing))
+    if cand_missing:
+        warnings.append("Yetersiz / cevapsız kriterler (ADAY kaynaklı — 0 puan, payda içinde): "
+                        + "; ".join(f"{s['kriter']} ({s['gerekce']})" for s in cand_missing))
     if evaluated_cap <= 0:
         return "\n".join(lines), model_score, warnings
     normalized = max(0, min(100, round(awarded_sum / evaluated_cap * 100)))
@@ -4980,7 +5087,8 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
     m_total = re.search(r"(\*\*\s*TOPLAM\s+PUAN\s*[:：]\s*)(\d+)\s*/\s*(\d+)(\s*\*\*)", body, re.IGNORECASE)
     model_total = _safe_int(m_total.group(2)) if m_total else _safe_int(model_score)
     # TOPLAM PUAN satırı: NORMALİZE değeri /100 olarak (extract_score bunu okur) + parantezde ham.
-    new_total_line = f"**TOPLAM PUAN: {normalized}/100**  (ham puan: {awarded_sum}/{evaluated_cap}; değerlendirilen {len(evaluated_names)}/{len(position_criteria)} kriter)"
+    new_total_line = (f"**TOPLAM PUAN: {normalized}/100**  (ham puan: {awarded_sum}/{evaluated_cap}; "
+                      f"değerlendirilen {len(evaluated_names)}, aday-kaynaklı eksik {len(cand_missing)}, sistem-kaynaklı eksik {len(sys_missing)})")
     need_fix = bool(warnings) or (m_total and (abs(model_total - normalized) > 1 or _safe_int(m_total.group(3)) != 100))
     if need_fix or not m_total:
         if m_total:
@@ -4989,7 +5097,16 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
             body = new_total_line + "\n\n" + body
         warnings.append(f"Toplam puan yeniden hesaplandı: ham {awarded_sum}/{evaluated_cap} → normalize %{normalized}/100 "
                         f"(model {model_total}/{_safe_int(m_total.group(3)) if m_total else total_weight} yazmıştı).")
-        return body, normalized, warnings
+    # KALEM 1 — iki eksiklik listesi rapor metninde AYRI ve deterministik görünsün
+    if (sys_missing or cand_missing) and "Kriter Eksiklik Ayrımı (sistem)" not in body:
+        blk = ["", "**Kriter Eksiklik Ayrımı (sistem):**"]
+        if cand_missing:
+            blk.append("- Aday kaynaklı (kriter soruldu, aday cevap veremedi — **0 puan, paydada**): "
+                       + "; ".join(f"{s['kriter']} — {s['gerekce']}" for s in cand_missing))
+        if sys_missing:
+            blk.append("- Sistem kaynaklı (hiç sorulmadı / teknik / süre — **puanı etkilemez, payda dışı**): "
+                       + "; ".join(f"{s['kriter']} — {s['gerekce']}" for s in sys_missing))
+        body = body.rstrip() + "\n" + "\n".join(blk) + "\n"
     return body, normalized, warnings
 
 # ═══ KALEM 3 — Modalite veri kapsamı (kamera kareleri + ses metrikleri) rapora deterministik yazılır ═══
@@ -5151,10 +5268,10 @@ TEMEL KURALLAR:
 - CV bilgisi ile mülakat kanıtını ayır: “CV'de belirtilmiştir” ve “mülakatta doğrulanmıştır/doğrulanamamıştır” ifadelerini açık kullan.
 - Adayın söylemediği deneyim, beceri, sonuç, motivasyon veya kişilik özelliği uydurma.
 - Aynı kalıp cümleleri her bölümde tekrar etme. Rapor bu adaya özgü olmalı; somut proje, karar, örnek ve ifadeleri kullan.
-- Sorulmayan veya yeterli veri oluşmayan kriterlere otomatik 0 verme. “Değerlendirilmedi / yeterli kanıt oluşmadı” yaz. Toplam puanı yalnızca gerçekten değerlendirilen kriterlerin ağırlıklarını 100'e normalize ederek hesapla ve raporda hangi kriterlerin değerlendirilmediğini belirt.
-- PUAN TAVANI (KESİN): Hiçbir kriter puanı kendi tavanını (ağırlığını) AŞAMAZ. "Uyum 12/10" gibi bir şey ASLA yazma; en fazla "10/10". TOPLAM PUAN satırındaki payda = değerlendirilen kriterlerin ağırlık toplamı; TOPLAM PUAN = alınan puanların toplamı. Bunu doğru hesapla, sistem ayrıca doğrular.
-- KRİTER TABLOSU DETERMİNİSTİK: Rapordaki kriter tablosunun satırları YUKARIDA verilen tablonun BİREBİR AYNISI olacak — aynı kriter adları, aynı sıra, aynı tavanlar. Satır ekleme, çıkarma, birleştirme veya yeniden adlandırma YOK. Bir kriteri "Değerlendirilmedi" işaretliyorsan yanına TEK CÜMLE somut gerekçe yaz (gerekçesiz "Değerlendirilmedi" YASAK).
-- Aday bir konuda sorulup açıkça bilmediğini/uygulamadığını söylediyse bu “değerlendirildi fakat yetersiz” sayılabilir; hiç sorulmadıysa “değerlendirilmedi” sayılır.
+- EKSİK KRİTERİN İKİ TÜRÜ (KARIŞTIRMA): `Değerlendirilmedi (sorulmadı) — <gerekçe>` = kriter HİÇ sorulmadı / teknik sorun / süre yetmedi / bağlantı koptu → adayın kusuru DEĞİL, puanı ETKİLEMEZ (paydadan düşülür). `Yetersiz (soruldu, cevap alınamadı) — <gerekçe>` = kriter SORULDU (bir veya daha çok kez) ama aday cevap veremedi / kaçındı / konuyu değiştirdi / yüzeysel geçti → bu bir ÖLÇÜM SONUCUDUR, 0 puan, PAYDADA KALIR. Bir kriter defalarca sorulup cevapsız kaldıysa KESİNLİKLE "Yetersiz"tir.
+- Toplam puanı yalnızca (değerlendirilen + aday-kaynaklı Yetersiz) kriterlerin ağırlığına göre normalize et. "Sorulmadı" olanları hesaba KATMA. Raporda iki listeyi AYRI göster.
+- PUAN TAVANI (KESİN): Hiçbir kriter puanı kendi tavanını (ağırlığını) AŞAMAZ. "Uyum 12/10" gibi bir şey ASLA yazma; en fazla "10/10". TOPLAM PUAN = alınan puanların toplamı. Bunu doğru hesapla, sistem ayrıca doğrular.
+- KRİTER TABLOSU DETERMİNİSTİK: Rapordaki kriter tablosunun satırları YUKARIDA verilen tablonun BİREBİR AYNISI olacak — aynı kriter adları, aynı sıra, aynı tavanlar. Satır ekleme, çıkarma, birleştirme veya yeniden adlandırma YOK. Gerekçesiz eksik-işaretleme YASAK.
 - Erken sonlandırma, davranış gözlemi veya pozisyon uyumsuzluğu notu verildiyse: raporda ilgili başlık altında SOMUT (dakika + transkriptteki söz) yaz; bunları TEK BAŞINA puan düşürme gerekçesi yapma.
 - Her puan için Kanıt → Analiz → Sonuç zinciri kur.
 - Analitik düşünme, kavrama, muhakeme, neden-sonuç kurma, problem çözme, düşünce esnekliği, öğrenme çevikliği ve belirsizlikte karar verme hakkında yalnızca transkriptte gözlenebilen sinyalleri yaz. IQ, zekâ puanı, psikiyatrik tanı, yalan tespiti veya kesin kişilik teşhisi yapma.
@@ -5860,8 +5977,11 @@ def regenerate_report(candidate_id: int, background_tasks: BackgroundTasks, leve
                            for e in _events if isinstance(e, dict))
     _old_reason = (interview["result_reason"] or "") if "result_reason" in interview.keys() else ""
     _reason_says_early = bool(re.search(r"erken sonland|kendi isteğiyle|aday.*talebi|talebiyle", _old_reason, re.IGNORECASE))
-    corrected_end_reason = False
-    if _had_aday_talebi or _reason_says_early:
+    # KALEM 2 — düzeltme İDEMPOTENT: zaten düzeltilmişse etiket/olay TEKRAR eklenmez.
+    _already_corrected = any(isinstance(e, dict) and e.get("corrected") for e in _events) \
+                         or "yeniden üretiminde düzeltildi" in _old_reason.lower()
+    corrected_end_reason = _already_corrected
+    if (_had_aday_talebi or _reason_says_early) and not _already_corrected:
         eff, downgraded = validate_end_reason("aday_talebi", clean_transcript)
         last_line = next((l for l in reversed(clean_transcript.splitlines()) if l.strip()), "")
         mulakatci_closing = bool(re.search(r"Mülakatçı\s*:", last_line) and re.search(r"tamamla|noktala|teşekkür|sona er|bitir", last_line, re.IGNORECASE))
@@ -5870,12 +5990,16 @@ def regenerate_report(candidate_id: int, background_tasks: BackgroundTasks, leve
             _regen_notes.append("Erken sonlandırma tespiti GERİ ALINDI: transkriptin son sözü mülakatçı kapanışıdır, "
                                 "adayda açık bitirme talebi yok.")
             for e in _events:
-                if isinstance(e, dict) and (e.get("subtype") == "aday_talebi" or e.get("type") == "termination"):
+                if isinstance(e, dict) and (e.get("subtype") == "aday_talebi" or e.get("type") == "termination") and not e.get("corrected"):
                     e["corrected"] = True
                     e["description"] = "[Rapor yeniden üretiminde düzeltildi] " + (e.get("description") or "")
-            _events.append({"type": "end_reason_downgraded", "subtype": "regenerate",
-                            "occurred_at": _now_ts(), "source": "system",
-                            "description": "Geriye dönük yeniden üretimde erken-sonlandırma tespiti hatalı bulundu ve geri alındı."})
+            _dg = next((e for e in _events if isinstance(e, dict) and e.get("type") == "end_reason_downgraded" and e.get("subtype") == "regenerate"), None)
+            if _dg:
+                _dg["occurred_at"] = _now_ts()  # tek satır — büyüyen liste yok
+            else:
+                _events.append({"type": "end_reason_downgraded", "subtype": "regenerate",
+                                "occurred_at": _now_ts(), "source": "system",
+                                "description": "Geriye dönük yeniden üretimde erken-sonlandırma tespiti hatalı bulundu ve geri alındı."})
             try:
                 db.execute("UPDATE interviews SET result_events_json=?, result_reason=?, partial=0 WHERE candidate_id=? AND level=?",
                            (json.dumps(_events, ensure_ascii=False)[:12000],
