@@ -515,6 +515,8 @@ def init_db():
         ("candidates", "last_start_at", "TIMESTAMP" if USE_POSTGRES else "TEXT"),
         ("candidates", "invite_expires_at", "TIMESTAMP" if USE_POSTGRES else "TEXT"),
         # BÖLÜM A/B/D: kapsama + kriter tekrar sayacı + sistem kararı gerekçesi
+        ("interviews", "score_position", "INTEGER"),       # ÇİFT PUANLAMA: PUAN 1 — pozisyon uygunluğu (karar bunun üzerinden)
+        ("interviews", "score_profile", "INTEGER"),         # ÇİFT PUANLAMA: PUAN 2 — kişisel/bilişsel profil (eşik/gözlem); score = ikisinin ortalaması
         ("interviews", "criteria_coverage_json", "TEXT"),   # A4: modelin end_interview'da bildirdiği kriter kapsanma yüzdeleri
         ("interviews", "criterion_attempts_json", "TEXT"),  # B2: kriter/konu başına yeniden-sorma sayacı (L1 metin akışı)
         ("interviews", "system_decision_json", "TEXT"),     # D1: finalize kararı + gerekçe (rapor üretildi mi / neden / hangi koşul)
@@ -1996,6 +1998,23 @@ def build_criteria_table_template(criteria: list) -> str:
         lines.append(f"| {c['name']} | {_CRIT_CELL_HINT.format(w=c['weight'])} | ... |")
     return "\n".join(lines)
 
+# ============ ÇİFT PUANLAMA — PUAN 2: KİŞİSEL VE BİLİŞSEL PROFİL ============
+# Pozisyondan BAĞIMSIZ, her aday için AYNI sabit kriter seti. PUAN 1 (pozisyon uygunluğu)
+# işe alım kararını verir; PUAN 2 eşik/gözlem görevi görür (bkz. finalize_interview KARAR KURALI).
+# Ağırlıklar toplamı 100 — payda normalize yöntemi PUAN 1 ile aynı (recompute_profile_section).
+PROFILE_CRITERIA = [
+    {"name": "Analitik yapı ve muhakeme", "weight": 20, "desc": "problemi parçalama, neden-sonuç kurma, veri/örnek kullanımı, alternatif kıyaslama"},
+    {"name": "İletişim ve ifade netliği", "weight": 20, "desc": "soruyu doğru anlama, cevabı yapılandırma, açıklık, gereksiz dağılmama"},
+    {"name": "Baskı altında davranış", "weight": 15, "desc": "çelişki/zorlayıcı sorularda sükunet, tutarlılık, savunmacılığa kaçmama"},
+    {"name": "İnisiyatif ve sorumluluk alma", "weight": 15, "desc": "kendi katkısını sahiplenme, proaktiflik, sonucu takip etme"},
+    {"name": "Tutum ve işbirliği", "weight": 15, "desc": "mülakatçıyla işbirliği, saygı, açıklık, yönlendirmeye uyum"},
+    {"name": "Öğrenme ve adaptasyon eğilimi", "weight": 15, "desc": "geri bildirimi alma, yeni bilgi/çerçeveye açıklık, kendini düzeltme"},
+]
+PROFILE_TOTAL_WEIGHT = sum(c["weight"] for c in PROFILE_CRITERIA)  # 100
+
+def build_profile_table_filled() -> str:
+    return build_criteria_table_filled(PROFILE_CRITERIA, evidence_header="Somut Örnek + [dk] → Analiz → Sonuç")
+
 # ============ RAPOR GÖVDESİ — TEK KAYNAK (Faz C) ============
 # get_system_prompt() (L1/L3) ve /api/realtime/report'un report_prompt'u (L2) aynı "TAM FORMAT"
 # rapor gövdesini iki ayrı f-string olarak bakımı yapıyordu. Bu liste tek kaynaktır: her satır
@@ -2048,7 +2067,13 @@ REPORT_BODY_SECTIONS = [
     ("genel_kani_l13", {1},       "**Genel Kanı:** ...{note_report_field}"),
     ("genel_kani_l2",  {2, 3},    "**Genel Kanı:** (kanıtların dengeli sentezi){ai_note_report_field}"),
     ("oneri",          {1, 2, 3}, "**Öneri:** İşe Al / Değerlendirmeye Al / Reddet"),
-    ("oneri_gerekcesi", {2, 3},   "**Öneri Gerekçesi:** (tek paragraf, somut ve karar destekleyici)"),
+    ("oneri_gerekcesi", {2, 3},   "**Öneri Gerekçesi:** (tek paragraf, somut ve karar destekleyici; kararın PUAN 1'e dayandığını belirt)"),
+    ("_blank_p2a",     {1, 2, 3}, ""),
+    ("puan2_baslik",   {1, 2, 3}, "---\n### PUAN 2 — KİŞİSEL VE BİLİŞSEL PROFİL (pozisyondan bağımsız, her aday için sabit)"),
+    ("puan2_aciklama", {1, 2, 3}, "(Bu bölüm PUAN 1'den / pozisyon uygunluğundan AYRIDIR ve işe alım kararını TEK BAŞINA belirlemez. Her kriter için transkriptten SOMUT bir örnek ve [dk] dakika damgası ZORUNLU — dayanaksız çıkarım, kişilik teşhisi, IQ/zekâ yorumu YASAK. Eksik kriterde PUAN 1 ile AYNI ayrım: `Değerlendirilmedi (sorulmadı) — <gerekçe>` (paydayı etkilemez) vs `Yetersiz (soruldu, veri alınamadı) — <gerekçe>` (0 puan, paydada kalır).)"),
+    ("puan2_tablo",    {1, 2, 3}, "{profile_table_filled}"),
+    ("puan2_toplam",   {1, 2, 3}, "**PROFİL PUANI: XX/100**  (yalnızca değerlendirilen + aday-kaynaklı 'Yetersiz' kriterlerin ağırlığına normalize; yöntem PUAN 1 ile aynı. Sistem ayrıca doğrular.)"),
+    ("puan2_veto",     {1, 2, 3}, "**Profil Veto Kontrolü:** SADECE kurumsal bir ortamda çalışmaya engel olacak düzeyde CİDDİ olumsuz bulgu varsa — saldırganlık, hakaret, işbirliğine tam kapalılık, mülakat boyunca sürdürülen açık düşmanlık — tam olarak şu satırı ekle: `[VETO: <somut olay + transkriptteki söz + kaçıncı dakika>]`. Sıradan düşüklük (zayıf analitik, düşük inisiyatif, çekingenlik, gerginlik, kısa cevaplar) VETO SEBEBİ DEĞİLDİR — bunlar yalnızca yukarıdaki tabloda düşük puan + kısa not olur. Ciddi bulgu yoksa yalnızca: `Veto yok.` yaz."),
     ("raporson",       {1, 2, 3}, "---RAPORSON---"),
     ("_blank5",        {1, 2, 3}, ""),
     ("standartcv_baslangic", {1, 2, 3}, "---STANDARTCV---"),
@@ -2187,6 +2212,7 @@ Bu notu mülakat boyunca aktif bir koşul olarak uygula: notta bir konu/iddia ge
         "candidate_name": candidate_name, "position_name": position_name, "category": category,
         "date_str": datetime.now().strftime('%d.%m.%Y'), "total_weight": total_weight,
         "table_template": table_template, "note_report_field": note_report_field,
+        "profile_table_filled": build_profile_table_filled(),
     })
 
     return f"""Sen MedeX AI mülakat uzmanısın. {lang_instruction} Aday: {candidate_name}. Pozisyon: {position_name}. Kategori: {category}.
@@ -2252,6 +2278,7 @@ GENEL:
 - "Serbest Gözlemler" bölümüne: (a) DAVRANIŞ VE TUTUM — agresiflik, sabırsızlık, kabalık, kaçamaklık gözlendiyse dakika + adayın sözüyle SOMUT yaz (davranış tek başına puan düşürmez); (b) POZİSYON UYUMU — aday alanının farklı olduğunu belirttiyse bunu yaz ve değerlendirmenin adayın gerçek alanına göre yapıldığını not et.
 - Bir kriter için yeterli veri toplanamadıysa (yeniden sorulmasına rağmen yanıtsız kaldıysa) raporda "Yanıtsız/Değerlendirilemeyen Kriterler" olarak AYRI listele; bu kriterlere puan verme, toplamı değerlendirilen kriterlerin ağırlığına normalize et.
 - PUAN TAVANI (KESİN): Hiçbir kriter puanı kendi tavanını (ağırlığını) AŞAMAZ ("12/10" ASLA; en fazla "10/10"). TOPLAM PUAN = alınan puanların toplamı; payda = değerlendirilen kriterlerin ağırlık toplamı. Sistem ayrıca doğrular.
+- ÇİFT PUANLAMA (KESİN): Rapor İKİ ayrı puan içerir. **PUAN 1 = TOPLAM PUAN** — yukarıdaki POZİSYON kriterleri; işe alım önerisi (İşe Al / Değerlendirmeye Al / Reddet) YALNIZCA buna göre verilir. **PUAN 2 = PROFİL PUANI** — pozisyondan bağımsız, her adayda aynı olan kişisel/bilişsel profil kriterleri; her satır transkriptten somut örnek + [dk] ile. İki tabloyu ve iki puanı KARIŞTIRMA; profil kriterlerini pozisyon tablosuna, pozisyon kriterlerini profil tablosuna YAZMA.
 - KRİTER TABLOSU: yukarıda verilen kriter satırlarını AYNEN kullan — satır ekleme/çıkarma/yeniden adlandırma YOK. Her satır: `<puan>/<tavan>` | `Değerlendirilmedi (sorulmadı) — <gerekçe>` (hiç sorulmadı/teknik/süre — paydayı etkilemez) | `Yetersiz (soruldu, cevap alınamadı) — <gerekçe>` (soruldu ama aday cevap veremedi/kaçındı — 0 puan, paydada kalır). Defalarca sorulup cevapsız kalan kriter "Yetersiz"tir.
 - Mesajın başına mutlaka [SÜRE:XX] koy: kısa 45-60, senaryo 75-100, kritik soru 90-120.
 - Mülakatı bitirmeden önce, GÖREV satırı bitirmeni söylediğinde son soru olarak şunu sor: "Eklemek veya öne çıkarmak istediğiniz başka bir şey var mı?" — bu, mülakatta suskun kalmış ama sahada güçlü olabilecek adaylar için bir son fırsat turu, sadece bitiş dönüşünde bir kez sorulur.
@@ -2300,10 +2327,50 @@ def normalize_recommendation(score: int, ai_recommendation: Optional[str] = None
     return "İşe Al"
 
 def extract_score(reply: str) -> int:
+    # PUAN 1 (pozisyon uygunluğu) — "TOPLAM PUAN" satırı. PUAN 2 satırı "PROFİL PUANI" olduğu
+    # için buraya karışmaz.
     m = re.search(r'TOPLAM\s+PUAN\s*[:：]\s*(\d+)', reply or "", re.IGNORECASE)
     if not m:
         return 0
     return max(0, min(100, int(m.group(1))))
+
+def extract_profile_score(reply: str):
+    """PUAN 2 (kişisel/bilişsel profil) — 'PROFİL PUANI: NN/100'. Yoksa None (eski kayıt / kısa
+    format / profil bölümü üretilmemiş) → panel eski tek-puan davranışına düşer."""
+    m = re.search(r'PROF\S*\s+PUANI\s*[:：]\s*(\d+)', reply or "", re.IGNORECASE)
+    if not m:
+        return None
+    return max(0, min(100, int(m.group(1))))
+
+# PUAN 1 (pozisyon) bölgesi ile PUAN 2 (profil) bölgesini ayırır — iki kriter tablosu ayrı
+# doğrulansın, _name_score çapraz eşleşmesi olmasın. Ayraç: "### PUAN 2" başlığı ya da (başlık
+# düşmüşse) ilk "PROFİL PUANI" satırı — hangisi önce gelirse.
+def split_report_regions(report_body: str):
+    if not report_body:
+        return report_body or "", ""
+    best = None
+    for pat in (r'(?:^|\n)[ \t]*(?:-{2,}[ \t]*\n[ \t]*)?#{0,4}[ \t]*PUAN[ \t]*2\b',
+                r'(?:^|\n)[ \t]*\*{0,2}[ \t]*PROF\S*[ \t]+PUANI\b'):
+        m = re.search(pat, report_body, re.IGNORECASE)
+        if m and (best is None or m.start() < best):
+            best = m.start()
+    if best is None:
+        return report_body, ""
+    return report_body[:best], report_body[best:]
+
+def detect_profile_veto(text: str):
+    """PUAN 2 veto etiketi: [VETO: <somut gerekçe + dakika>]. Yalnızca modelin açıkça yazdığı,
+    yeterince somut (>=15 karakter gerekçeli) etiket geçerli — 'kör sayı kesmesi' yok.
+    Dönüş: gerekçe metni | None."""
+    if not text:
+        return None
+    m = re.search(r'\[\s*VETO\s*:\s*(.+?)\]', text, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return None
+    reason = re.sub(r'\s+', ' ', m.group(1)).strip()
+    if len(reason) < 15:
+        return None
+    return reason[:500]
 
 def strip_markdown(value: str) -> str:
     if not value:
@@ -2485,7 +2552,7 @@ def delete_position(position_id: int, payload=Depends(verify_admin), db=Depends(
 def get_candidates(payload=Depends(verify_admin), org_id: Optional[int] = None, db=Depends(db_dep)):
     scoped_org_id = get_org_id_for_admin(db, payload, org_id)
     rows = db.execute("""
-        SELECT c.*, i.score, i.recommendation, i.completed_at as interview_completed,
+        SELECT c.*, i.score, i.score_position, i.score_profile, i.recommendation, i.completed_at as interview_completed,
                i.completed_at as interview_completed_at, i.total_input_tokens, i.total_output_tokens,
                i.processing_status, i.processing_error, i.started_at,
                i.partial, i.completion_pct, i.technical_error_ref
@@ -2515,7 +2582,7 @@ def get_person(person_id: int, payload=Depends(verify_admin), db=Depends(db_dep)
                c.is_archived, c.created_at, c.completed_at, c.terminated_reason,
                c.login_count, c.first_login_at, c.last_login_at,
                c.interview_start_count, c.last_start_at, c.invite_expires_at,
-               i.score, i.recommendation, i.completed_at as interview_completed_at,
+               i.score, i.score_position, i.score_profile, i.recommendation, i.completed_at as interview_completed_at,
                i.processing_status, i.processing_error, i.started_at,
                i.partial, i.completion_pct, i.technical_error_ref
         FROM candidates c
@@ -4009,14 +4076,22 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             if "---RAPOR---" in reply and _pcrit:
                 m_rb = re.search(r'---RAPOR---([\s\S]*?)(?:---RAPORSON---|---STANDARTCV---|\Z)', reply)
                 if m_rb:
-                    fb, fscore, fwarn = recompute_and_fix_score(m_rb.group(1), _pcrit, extract_score(reply),
+                    _orig_rb = m_rb.group(1)
+                    fb, fscore, fwarn = recompute_and_fix_score(_orig_rb, _pcrit, extract_score(reply),
                                                                 criteria_coverage=_pcov, transcript=_ptx)
-                    if fb != m_rb.group(1):
-                        reply = reply.replace(m_rb.group(1), fb, 1)
+                    # ÇİFT PUANLAMA — PUAN 2 (profil) bölgesi de denetçiden ÖNCE düzeltilsin.
+                    _p1r, _p2r = split_report_regions(fb)
+                    _pfscore = None
+                    if _p2r:
+                        _fp2, _pfscore, _pfw = recompute_profile_section(_p2r, transcript=_ptx, criteria_coverage=_pcov)
+                        fb = _p1r.rstrip() + "\n\n" + _fp2.strip() + "\n"
+                        fwarn = list(fwarn) + list(_pfw)
+                    if fb != _orig_rb:
+                        reply = reply.replace(_orig_rb, fb, 1)
                     if fwarn:
                         record_system_decision(candidate_id, level, "puanlama_duzeltildi",
                                                "Rapor sonrası sunucu puanlama doğrulaması (denetçiden önce) düzeltme yaptı.",
-                                               {"final_score": fscore}, warnings=fwarn)
+                                               {"final_score": fscore, "profile_score": _pfscore}, warnings=fwarn)
         except Exception as e:
             print(f"UYARI (KALEM5 pre-review score fix c={candidate_id}): {type(e).__name__}: {e}")
 
@@ -4115,6 +4190,7 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     # KALEM 2 — puanlama doğrulaması: kriter puanı tavanını aşamaz; skor gerçekten normalize edilir;
     # rapordaki "TOPLAM PUAN" ile DB'deki score aynı sayı olur.
     _score_warnings = []
+    _profile_score = None
     try:
         _dbc = get_db()
         _cand_row = _dbc.execute("SELECT position FROM candidates WHERE id=?", (candidate_id,)).fetchone()
@@ -4131,28 +4207,66 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         except Exception:
             _ftx = None
         if report_match and _crit:
-            _fixed_body, _final_score, _score_warnings = recompute_and_fix_score(report_match.group(1), _crit, score,
+            _orig_region = report_match.group(1)
+            _fixed_body, _final_score, _score_warnings = recompute_and_fix_score(_orig_region, _crit, score,
                                                                                 criteria_coverage=_fcov, transcript=_ftx)
-            if _fixed_body != report_match.group(1):
-                reply = reply.replace(report_match.group(1), _fixed_body, 1)
+            # ÇİFT PUANLAMA — PUAN 2 (profil) bölgesi ayrıca doğrulanır (PUAN 1 ile aynı yöntem).
+            _p1r, _p2r = split_report_regions(_fixed_body)
+            if _p2r:
+                _fixed_p2, _pscore, _p2w = recompute_profile_section(_p2r, transcript=_ftx, criteria_coverage=_fcov)
+                if _pscore is not None:
+                    _profile_score = _pscore
+                _fixed_body = _p1r.rstrip() + "\n\n" + _fixed_p2.strip() + "\n"
+                _score_warnings = list(_score_warnings) + list(_p2w)
+            if _fixed_body != _orig_region:
+                reply = reply.replace(_orig_region, _fixed_body, 1)
                 report_match = re.search(r'---RAPOR---([\s\S]*?)(?:---RAPORSON---|---STANDARTCV---|\Z)', reply)
             if _final_score is not None:
                 score = _final_score  # KALEM 5: denetçiden önce düzeltilmişse guard'la no-op, yine normalize skoru döner
     except Exception as e:
         print(f"UYARI (finalize_interview puanlama doğrulaması c={candidate_id}): {type(e).__name__}: {e}")
 
-    recommendation = normalize_recommendation(score, rec_match.group(1) if rec_match else None)
+    if _profile_score is None:
+        _profile_score = extract_profile_score(reply)
+
+    # ÇİFT PUANLAMA — KARAR KURALI:
+    #  - score_position (PUAN 1) = pozisyon uygunluğu → işe alım önerisi + <20 eşiği BUNA göre
+    #  - score_profile (PUAN 2) = kişisel/bilişsel profil → eşik/gözlem; tek başına kesin veto DEĞİL
+    #  - ana panelde saklanan `score` = iki puanın ortalaması (profil yoksa = score_position, eski davranış)
+    #  - [VETO: ...] etiketi yalnızca ciddi olumsuz bulguda (saldırganlık/hakaret/tam kapalılık/
+    #    sürdürülen açık düşmanlık) → recommendation "Reddet" + system_decision "veto"
+    score_position = score
+    score_profile = _profile_score
+    score = round((score_position + score_profile) / 2) if score_profile is not None else score_position
+    _veto_reason = detect_profile_veto(reply)
+
+    recommendation = normalize_recommendation(score_position, rec_match.group(1) if rec_match else None)
 
     # BÖLÜM A2 (adım 3): Bu noktaya gelindiyse veri yeterliydi ve rapor üretildi (yetersiz veri
     # zaten upstream'de "Değerlendirilemedi"ye ayrılıyor — assess_data_sufficiency / A1). Dolayısıyla
     # burada gelen DÜŞÜK puan artık "veri yok" değil, gerçek bir başarısızlıktır → sonuç RED.
     # normalize_recommendation zaten s<40 için "Reddet" döndürür; <20'de raporu OLDUĞU GİBİ bas,
     # sahte "DEĞERLENDİRİLEMEDİ" metniyle DEĞİŞTİRME. (Kapsama eşiği ≠ puan eşiği.)
-    score_below_reject_threshold = score is not None and score < 20
+    score_below_reject_threshold = score_position is not None and score_position < 20
     if score_below_reject_threshold:
         recommendation = "Reddet"
         _set_result_meta(candidate_id, level,
-                         result_reason=f"Toplam değerlendirme puanı ({score}/100) %20 eşiğinin çok altında; aday kriterlerde yeterli yetkinlik gösteremedi. Sonuç: Reddet.")
+                         result_reason=f"Pozisyon uygunluğu puanı ({score_position}/100) %20 eşiğinin çok altında; aday pozisyon kriterlerinde yeterli yetkinlik gösteremedi. Sonuç: Reddet.")
+
+    # ÇİFT PUANLAMA — PROFİL VETOSU: kör sayı kesmesi YOK; yalnızca modelin somut gerekçeli [VETO: …]
+    # etiketi. Sıradan düşüklük (referans eşik 50 altı) tek başına veto DEĞİL — sadece rapora not.
+    if _veto_reason:
+        recommendation = "Reddet"
+        _set_result_meta(candidate_id, level,
+                         result_reason=f"Profil vetosu — kurumsal ortamda çalışmaya engel olacak düzeyde ciddi olumsuz bulgu: {_veto_reason} (Öneri PUAN 1'e göre {normalize_recommendation(score_position)} olurdu; veto ile Reddet.)")
+        record_system_decision(candidate_id, level, "veto",
+                               f"PUAN 2 profil vetosu tetiklendi: {_veto_reason}",
+                               {"score_position": score_position, "score_profile": score_profile,
+                                "recommendation_before_veto": normalize_recommendation(score_position)})
+    elif score_profile is not None and score_profile < 50:
+        record_system_decision(candidate_id, level, "profil_dusuk_esik_alti",
+                               f"PUAN 2 profil puanı ({score_profile}/100) referans eşik 50'nin altında ancak veto tetikleyecek ciddi bulgu YOK — karar PUAN 1'e göre veriliyor, düşüklük rapora not.",
+                               {"score_position": score_position, "score_profile": score_profile})
 
     db = get_db()
     candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
@@ -4178,15 +4292,16 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         # EK — geriye dönük yeniden üretim: orijinal bitiş saati (completed_at) KORUNUR,
         # rapor üretim zamanı ayrı alanda (report_regenerated_at). completed_at IS NULL guard'ı yok.
         db.execute("""
-            UPDATE interviews SET report=?, standard_cv=?, score=?, recommendation=?,
+            UPDATE interviews SET report=?, standard_cv=?, score=?, score_position=?, score_profile=?, recommendation=?,
                    report_regenerated_at=CURRENT_TIMESTAMP, processing_status='completed', processing_error=NULL
             WHERE candidate_id=? AND level=?
-        """, (report, standard_cv, score, recommendation, candidate_id, level))
+        """, (report, standard_cv, score, score_position, score_profile, recommendation, candidate_id, level))
         db.commit()
         db.close()
         record_system_decision(candidate_id, level, "rapor_yeniden_uretildi",
                                "Geriye dönük yeniden üretim tamamlandı; orijinal bitiş saati korundu.",
-                               {"score": score, "recommendation": recommendation}, warnings=_score_warnings)
+                               {"score": score, "score_position": score_position, "score_profile": score_profile,
+                                "recommendation": recommendation, "veto": bool(_veto_reason)}, warnings=_score_warnings)
         _ensure_result_reason(candidate_id, level, score, recommendation, terminated_reason)
         return {"message": "Rapor yeniden üretildi.", "completed": True, "score": score, "recommendation": recommendation}
 
@@ -4194,10 +4309,10 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     # ile atomik). Eğer bu satır başka bir eşzamanlı çağrı tarafından zaten tamamlanmışsa
     # (rowcount=0), üzerine yazma ve tekrar e-posta gönderme — mevcut kayıtlı sonucu dön.
     cur = db.execute("""
-        UPDATE interviews SET report=?, standard_cv=?, score=?, recommendation=?, completed_at=CURRENT_TIMESTAMP,
-               processing_status='completed', processing_error=NULL
+        UPDATE interviews SET report=?, standard_cv=?, score=?, score_position=?, score_profile=?, recommendation=?,
+               completed_at=CURRENT_TIMESTAMP, processing_status='completed', processing_error=NULL
         WHERE candidate_id=? AND level=? AND completed_at IS NULL
-    """, (report, standard_cv, score, recommendation, candidate_id, level))
+    """, (report, standard_cv, score, score_position, score_profile, recommendation, candidate_id, level))
     already_finalized = cur.rowcount == 0
     # candidates.status sadece adayın O AN İÇİN AKTİF OLDUĞU level tamamlandığında güncellenir
     # (adayın current level'ı değiştiyse, bu eski bir çağrı olabilir — dokunma).
@@ -4981,7 +5096,12 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
     if _SCORE_FIXED_MARK in report_body:
         # zaten doğrulanmış (KALEM 5: denetçiden önce bir kez uygulanıyor) — çift işleme yok
         return report_body, extract_score(report_body), warnings
-    lines = report_body.splitlines()
+    # ÇİFT PUANLAMA: bu fonksiyon YALNIZCA PUAN 1 (pozisyon) bölgesini işler. PUAN 2 (profil)
+    # bölgesi recompute_profile_section tarafından ayrıca doğrulanır — burada dokunulmadan geçer.
+    _p1_region, _p2_region = split_report_regions(report_body)
+    def _reattach(s):
+        return (s.rstrip() + "\n\n" + _p2_region.lstrip("\n")) if _p2_region else s
+    lines = _p1_region.splitlines()
     _skip = {"kriter", "criterion", "puan", "score", "değerlendirme", "kanıt ve analiz", "kanit ve analiz"}
     # aday tablo satırları: >=2 '|', ilk hücre anlamlı (ayraç/başlık değil)
     rows = []
@@ -4995,6 +5115,10 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
         if len(c0) < 2 or c0 in _skip or set(cells[0].replace(" ", "")) <= set("-:|"):
             continue
         rows.append({"line_idx": i, "name": cells[0], "cell": cells[1] if len(cells) > 1 else ""})
+    # Güvenlik ağı: PUAN 2 başlığı düşmüş ve profil satırları PUAN 1 bölgesinde kalmışsa,
+    # bunları pozisyon puanına karıştırma (ör. 'İletişim ve ifade netliği' ↔ pozisyon 'İletişim').
+    _prof_names = [pc["name"] for pc in PROFILE_CRITERIA]
+    rows = [r for r in rows if max((_name_score(pn, r["name"]) for pn in _prof_names), default=0.0) < 0.6]
 
     # Her pozisyon kriterine EN İYİ eşleşen tablo satırını ata (satır tekrar kullanılmaz).
     used = set()
@@ -5080,7 +5204,7 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
         warnings.append("Yetersiz / cevapsız kriterler (ADAY kaynaklı — 0 puan, payda içinde): "
                         + "; ".join(f"{s['kriter']} ({s['gerekce']})" for s in cand_missing))
     if evaluated_cap <= 0:
-        return "\n".join(lines), model_score, warnings
+        return _reattach("\n".join(lines)), model_score, warnings
     normalized = max(0, min(100, round(awarded_sum / evaluated_cap * 100)))
     total_weight = sum(_safe_int(c.get("weight")) for c in position_criteria)
     body = "\n".join(lines)
@@ -5105,6 +5229,127 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
                        + "; ".join(f"{s['kriter']} — {s['gerekce']}" for s in cand_missing))
         if sys_missing:
             blk.append("- Sistem kaynaklı (hiç sorulmadı / teknik / süre — **puanı etkilemez, payda dışı**): "
+                       + "; ".join(f"{s['kriter']} — {s['gerekce']}" for s in sys_missing))
+        body = body.rstrip() + "\n" + "\n".join(blk) + "\n"
+    return _reattach(body), normalized, warnings
+
+_PROFILE_SCORE_FIXED_MARK = "(profil ham:"
+
+def recompute_profile_section(profile_region: str, transcript: str = None, criteria_coverage=None):
+    """ÇİFT PUANLAMA — PUAN 2 (kişisel/bilişsel profil) bölgesi için PUAN 1 ile AYNI puanlama
+    doğrulaması: kriter tavanı + aday/sistem-kaynaklı eksiklik ayrımı + değerlendirilen ağırlığa
+    normalize. 'PROFİL PUANI' satırını NORMALİZE değerle yeniden yazar.
+    Dönüş: (duzeltilmis_bolge, profil_skoru|None, warnings[]). İdempotent."""
+    warnings = []
+    if not profile_region:
+        return profile_region or "", None, warnings
+    if _PROFILE_SCORE_FIXED_MARK in profile_region:
+        return profile_region, extract_profile_score(profile_region), warnings
+    if not re.search(r'PROF\S*\s+PUANI', profile_region, re.IGNORECASE):
+        return profile_region, None, warnings
+    lines = profile_region.splitlines()
+    _skip = {"kriter", "criterion", "puan", "score", "değerlendirme", "kanıt ve analiz", "kanit ve analiz",
+             "somut örnek", "somut ornek"}
+    rows = []
+    for i, ln in enumerate(lines):
+        if ln.count("|") < 2:
+            continue
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        c0 = _norm_name(re.sub(r"[*_`]", "", cells[0]))
+        if len(c0) < 2 or c0 in _skip or set(cells[0].replace(" ", "")) <= set("-:|"):
+            continue
+        rows.append({"line_idx": i, "name": cells[0], "cell": cells[1] if len(cells) > 1 else ""})
+
+    used = set()
+    awarded_sum = 0
+    denom_cap = 0
+    evaluated_names = []
+    sys_missing, cand_missing = [], []
+    for c in PROFILE_CRITERIA:
+        cap = _safe_int(c.get("weight"))
+        cname = c.get("name", "")
+        best, best_s = None, 0.0
+        for r in rows:
+            if r["line_idx"] in used:
+                continue
+            s = _name_score(cname, r["name"])
+            if s > best_s:
+                best, best_s = r, s
+        puan_cell = best["cell"] if (best and best_s >= 0.34) else ""
+        if best and best_s >= 0.34:
+            used.add(best["line_idx"])
+        cell_lc = puan_cell.lower()
+
+        _mm_frac = re.search(r"(?<![\d/／])(\d+)\s*[/／]\s*(\d+)(?![\d/／])", puan_cell)
+        _mm_lead = re.match(r"\s*[*_`]*\s*(\d+)\s*(?:puan|pts?|/\s*\d+)?\s*[*_`]*\s*$", puan_cell, re.IGNORECASE)
+        mm = _mm_frac or _mm_lead
+
+        if not mm:
+            gm = re.search(r"[—:–\-]\s*(.+)$", re.sub(r"\((?:sorulmad[ıi]|soruldu[^)]*)\)", "", puan_cell, flags=re.IGNORECASE))
+            reason = (gm.group(1).strip() if gm else "")
+            declared_sys = bool(re.search(r"sorulmad|hiç\s+sorul|not\s+asked|teknik|süre\s+yetmed|bağlantı\s+kopt|zaman\s+yetmed", cell_lc))
+            declared_cand = bool(re.search(r"yetersiz|cevap\s+al[ıi]namad|cevap\s+vermed|veri\s+al[ıi]namad|kaç[ıi]nd|konuyu\s+değiş|yüzeysel|geçiştir|bilmed", cell_lc))
+            asked = _criterion_was_asked(cname, criteria_coverage, transcript)
+            if best is None or best_s < 0.34:
+                declared_sys, declared_cand = False, False
+            if declared_cand or asked:
+                if declared_sys and asked:
+                    warnings.append(f"[PROFİL] '{cname}' model '(sorulmadı)' demiş ama transkriptte geçiyor → aday-kaynaklı 'Yetersiz' (0 puan, paydada).")
+                denom_cap += cap
+                _gk = reason or ("(soruldu, veri alınamadı)" if asked else "aday veri oluşturamadı")
+                cand_missing.append({"kriter": cname, "gerekce": _gk})
+                if best and best_s >= 0.34 and puan_cell:
+                    li = best["line_idx"]
+                    lines[li] = lines[li].replace(f"| {puan_cell} |", f"| 0/{cap} — Yetersiz (aday): {_gk} |", 1)
+            else:
+                if best is None or best_s < 0.34:
+                    warnings.append(f"[PROFİL] '{cname}' kriteri profil tablosunda bulunamadı — sistem eksikliği (payda dışı).")
+                sys_missing.append({"kriter": cname, "gerekce": reason or "(gerekçe yazılmamış)"})
+            continue
+
+        awarded = _safe_int(mm.group(1))
+        written_cap = _safe_int(mm.group(2)) if (mm.re.groups >= 2 and mm.group(2)) else None
+        if awarded > cap:
+            warnings.append(f"[PROFİL] '{cname}' puanı {awarded} tavanını ({cap}) aşıyordu → {cap}.")
+            awarded = cap
+        elif written_cap is not None and written_cap != cap:
+            warnings.append(f"[PROFİL] '{cname}' payda {written_cap} yazılmış, gerçek tavan {cap} → düzeltildi.")
+        li = best["line_idx"]
+        _cell_new = f"{awarded}/{cap}"
+        if "/" in puan_cell:
+            lines[li] = re.sub(r"\d+\s*[/／]\s*\d+", _cell_new, lines[li], count=1)
+        else:
+            lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {_cell_new} |", 1)
+        awarded_sum += awarded
+        denom_cap += cap
+        evaluated_names.append(cname)
+
+    body = "\n".join(lines)
+    if denom_cap <= 0:
+        warnings.append("[PROFİL] Değerlendirilebilir profil kriteri yok — PROFİL PUANI hesaplanamadı.")
+        return body, None, warnings
+    normalized = max(0, min(100, round(awarded_sum / denom_cap * 100)))
+    m_total = re.search(r"(\*\*\s*PROF\S*\s+PUANI\s*[:：]\s*)(\d+)\s*/\s*(\d+)(\s*\*\*)", body, re.IGNORECASE)
+    model_total = _safe_int(m_total.group(2)) if m_total else None
+    new_total_line = (f"**PROFİL PUANI: {normalized}/100**  {_PROFILE_SCORE_FIXED_MARK} {awarded_sum}/{denom_cap}; "
+                      f"değerlendirilen {len(evaluated_names)}, aday-kaynaklı eksik {len(cand_missing)}, sistem-kaynaklı eksik {len(sys_missing)})")
+    need_fix = bool(warnings) or (m_total and (abs((model_total or 0) - normalized) > 1 or _safe_int(m_total.group(3)) != 100))
+    if need_fix or not m_total:
+        if m_total:
+            body = re.sub(r"\*\*\s*PROF\S*\s+PUANI\s*[:：][^\n]*\*\*", new_total_line, body, count=1, flags=re.IGNORECASE)
+        else:
+            body = re.sub(r"(PROF\S*\s+PUANI\s*[:：][^\n]*)", new_total_line, body, count=1, flags=re.IGNORECASE)
+        if model_total is not None and abs(model_total - normalized) > 1:
+            warnings.append(f"[PROFİL] Puan yeniden hesaplandı: ham {awarded_sum}/{denom_cap} → %{normalized} (model {model_total} yazmıştı).")
+    if (sys_missing or cand_missing) and "Profil Kriter Eksiklik Ayrımı" not in body:
+        blk = ["", "**Profil Kriter Eksiklik Ayrımı (sistem):**"]
+        if cand_missing:
+            blk.append("- Aday kaynaklı (soruldu, veri oluşmadı — **0 puan, paydada**): "
+                       + "; ".join(f"{s['kriter']} — {s['gerekce']}" for s in cand_missing))
+        if sys_missing:
+            blk.append("- Sistem kaynaklı (sorulmadı / teknik / süre — **payda dışı**): "
                        + "; ".join(f"{s['kriter']} — {s['gerekce']}" for s in sys_missing))
         body = body.rstrip() + "\n" + "\n".join(blk) + "\n"
     return body, normalized, warnings
@@ -5246,6 +5491,7 @@ def build_l2_report_prompt(candidate, candidate_level: int, transcript: str,
         "date_str": datetime.now().strftime('%d.%m.%Y'), "total_weight": total_weight,
         "ai_note_report_field": ai_note_report_field,
         "criteria_table_filled": build_criteria_table_filled(pos["criteria"]),
+        "profile_table_filled": build_profile_table_filled(),
     })
     return f"""Aşağıda bir sesli iş mülakatının transkripti, aday CV'si, pozisyon kriterleri ve derinlik bilgisi vardır. İnsan kaynakları yöneticisinin karar vermesine yardım edecek, adaya özgü ve ayrıntılı bir değerlendirme raporu üret.
 
@@ -5271,6 +5517,7 @@ TEMEL KURALLAR:
 - EKSİK KRİTERİN İKİ TÜRÜ (KARIŞTIRMA): `Değerlendirilmedi (sorulmadı) — <gerekçe>` = kriter HİÇ sorulmadı / teknik sorun / süre yetmedi / bağlantı koptu → adayın kusuru DEĞİL, puanı ETKİLEMEZ (paydadan düşülür). `Yetersiz (soruldu, cevap alınamadı) — <gerekçe>` = kriter SORULDU (bir veya daha çok kez) ama aday cevap veremedi / kaçındı / konuyu değiştirdi / yüzeysel geçti → bu bir ÖLÇÜM SONUCUDUR, 0 puan, PAYDADA KALIR. Bir kriter defalarca sorulup cevapsız kaldıysa KESİNLİKLE "Yetersiz"tir.
 - Toplam puanı yalnızca (değerlendirilen + aday-kaynaklı Yetersiz) kriterlerin ağırlığına göre normalize et. "Sorulmadı" olanları hesaba KATMA. Raporda iki listeyi AYRI göster.
 - PUAN TAVANI (KESİN): Hiçbir kriter puanı kendi tavanını (ağırlığını) AŞAMAZ. "Uyum 12/10" gibi bir şey ASLA yazma; en fazla "10/10". TOPLAM PUAN = alınan puanların toplamı. Bunu doğru hesapla, sistem ayrıca doğrular.
+- ÇİFT PUANLAMA (KESİN): Rapor İKİ ayrı puan içerir. PUAN 1 = "TOPLAM PUAN" → yukarıdaki POZİSYON kriterleri; işe alım önerisi (İşe Al / Değerlendirmeye Al / Reddet) ve %20 eşiği YALNIZCA buna göredir. PUAN 2 = "PROFİL PUANI" → pozisyondan bağımsız sabit kişisel/bilişsel profil kriterleri; her satır transkriptten SOMUT örnek + [dk] ile, dayanaksız çıkarım yok. İki tabloyu ve iki puanı KARIŞTIRMA. Profil bölümündeki "[VETO: …]" etiketini SADECE kurumsal ortamda çalışmaya engel ciddi bulguda (saldırganlık, hakaret, işbirliğine tam kapalılık, sürdürülen açık düşmanlık) yaz; sıradan düşüklük veto sebebi değildir.
 - KRİTER TABLOSU DETERMİNİSTİK: Rapordaki kriter tablosunun satırları YUKARIDA verilen tablonun BİREBİR AYNISI olacak — aynı kriter adları, aynı sıra, aynı tavanlar. Satır ekleme, çıkarma, birleştirme veya yeniden adlandırma YOK. Gerekçesiz eksik-işaretleme YASAK.
 - Erken sonlandırma, davranış gözlemi veya pozisyon uyumsuzluğu notu verildiyse: raporda ilgili başlık altında SOMUT (dakika + transkriptteki söz) yaz; bunları TEK BAŞINA puan düşürme gerekçesi yapma.
 - Her puan için Kanıt → Analiz → Sonuç zinciri kur.
@@ -5585,12 +5832,26 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
 
     score = interview.get("score")
     score_display = "-" if score is None else f"{score}/100"
-    recommendation = normalize_recommendation(score or 0, interview.get("recommendation")) if score is not None else (interview.get("recommendation") or "-")
+    # ÇİFT PUANLAMA: stored recommendation authoritative'dir (PUAN 1 + veto zaten işlenmiş).
+    # Eski kayıtta yoksa ortalamadan türet.
+    recommendation = interview.get("recommendation") or (normalize_recommendation(score or 0) if score is not None else "-")
+    s_pos = interview.get("score_position")
+    s_prof = interview.get("score_profile")
 
-    metric_table = Table([
-        [Paragraph("SKOR", styles["Small"]), Paragraph("ÖNERİ", styles["Small"])],
-        [Paragraph(ptxt(score_display), styles["Metric"]), Paragraph(ptxt(recommendation), styles["Metric"])],
-    ], colWidths=[8.4*cm, 8.4*cm])
+    if s_prof is not None:
+        metric_table = Table([
+            [Paragraph("PUAN 1 — POZİSYON", styles["Small"]), Paragraph("PUAN 2 — PROFİL", styles["Small"]),
+             Paragraph("ORTALAMA", styles["Small"]), Paragraph("ÖNERİ", styles["Small"])],
+            [Paragraph(ptxt("-" if s_pos is None else f"{s_pos}/100"), styles["Metric"]),
+             Paragraph(ptxt(f"{s_prof}/100"), styles["Metric"]),
+             Paragraph(ptxt(score_display), styles["Metric"]),
+             Paragraph(ptxt(recommendation), styles["Metric"])],
+        ], colWidths=[4.2*cm, 4.2*cm, 4.2*cm, 4.2*cm])
+    else:
+        metric_table = Table([
+            [Paragraph("SKOR", styles["Small"]), Paragraph("ÖNERİ", styles["Small"])],
+            [Paragraph(ptxt(score_display), styles["Metric"]), Paragraph(ptxt(recommendation), styles["Metric"])],
+        ], colWidths=[8.4*cm, 8.4*cm])
     metric_table.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,-1), rl_colors.HexColor("#f8fafc")),
         ("BOX", (0,0), (-1,-1), 0.5, rl_colors.HexColor("#e2e8f0")),
@@ -5716,29 +5977,41 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     report_text = strip_markdown(_insert_heading_breaks(interview.get("report"))) or "Rapor bulunamadı."
     story.append(Paragraph("AI Değerlendirme Raporu", styles["Section"]))
     lines = [ln.rstrip() for ln in report_text.split("\n") if ln.strip()]
-    table_rows, table_consumed = parse_markdown_table(lines)
-    if table_rows:
-        # Önce tablo dışı üst satırları yaz, sonra kriter tablosunu gerçek tablo yap.
-        story.extend(flow_report_lines(lines, consumed=table_consumed))
-        # Yalnızca kriter tablosuna benzeyen satırları tabloya al.
-        clean_rows = []
-        for row in table_rows:
-            if any("Kriter" in c for c in row) or len(row) >= 3:
-                clean_rows.append(row[:3])
-        if len(clean_rows) >= 2:
-            story.append(Spacer(1, 6))
-            rt = Table([[Paragraph(ptxt(c), styles["BodyWrap"]) for c in row] for row in clean_rows], colWidths=[5.0*cm, 2.1*cm, 9.0*cm])
-            rt.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (-1,0), rl_colors.HexColor("#eff6ff")),
-                ("FONTNAME", (0,0), (-1,0), font_bold),
-                ("GRID", (0,0), (-1,-1), 0.3, rl_colors.HexColor("#dbeafe")),
-                ("VALIGN", (0,0), (-1,-1), "TOP"),
-                ("TOPPADDING", (0,0), (-1,-1), 5),
-                ("BOTTOMPADDING", (0,0), (-1,-1), 5),
-            ]))
-            story.append(rt)
+
+    def _emit_report_block(block_lines):
+        tr, tc = parse_markdown_table(block_lines)
+        if tr:
+            story.extend(flow_report_lines(block_lines, consumed=tc))
+            clean_rows = []
+            for row in tr:
+                if any("Kriter" in c for c in row) or len(row) >= 3:
+                    clean_rows.append(row[:3])
+            if len(clean_rows) >= 2:
+                story.append(Spacer(1, 6))
+                rt = Table([[Paragraph(ptxt(c), styles["BodyWrap"]) for c in row] for row in clean_rows], colWidths=[5.0*cm, 2.1*cm, 9.0*cm])
+                rt.setStyle(TableStyle([
+                    ("BACKGROUND", (0,0), (-1,0), rl_colors.HexColor("#eff6ff")),
+                    ("FONTNAME", (0,0), (-1,0), font_bold),
+                    ("GRID", (0,0), (-1,-1), 0.3, rl_colors.HexColor("#dbeafe")),
+                    ("VALIGN", (0,0), (-1,-1), "TOP"),
+                    ("TOPPADDING", (0,0), (-1,-1), 5),
+                    ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+                ]))
+                story.append(rt)
+        else:
+            story.extend(flow_report_lines(block_lines))
+
+    # ÇİFT PUANLAMA: PUAN 1 (pozisyon) ve PUAN 2 (profil) AYRI blok işlenir — iki kriter tablosu
+    # tek tabloda birleşmesin.
+    _p2_idx = next((i for i, ln in enumerate(lines)
+                    if re.search(r'(^|[^A-Za-zÇĞİÖŞÜçğıöşü])PUAN\s*2\b', ln, re.IGNORECASE)
+                    or re.search(r'PROF\S*\s+PUANI', ln, re.IGNORECASE)), None)
+    if _p2_idx is not None and _p2_idx > 0:
+        _emit_report_block(lines[:_p2_idx])
+        story.append(Spacer(1, 10))
+        _emit_report_block(lines[_p2_idx:])
     else:
-        story.extend(flow_report_lines(lines))
+        _emit_report_block(lines)
 
     if interview.get("standard_cv"):
         story.append(Paragraph("Standart CV Özeti (CV'den Çıkarım)", styles["Section"]))
