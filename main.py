@@ -531,6 +531,8 @@ def init_db():
         ("candidates", "person_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("candidates", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("positions", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
+        # B7 — panelden düzenlenmiş pozisyonlar deploy'da (init_db forced-update) EZİLMESİN.
+        ("positions", "is_customized", "INTEGER DEFAULT 0"),
     ]
     for table, column, definition in migrations:
         try:
@@ -593,10 +595,12 @@ def init_db():
                     active INTEGER DEFAULT 1,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     org_id INTEGER,
+                    is_customized INTEGER DEFAULT 0,
                     UNIQUE(org_id, name)
                 );
-                INSERT INTO positions_new (id, name, category, role_description, criteria_json, active, created_at, org_id)
-                    SELECT id, name, category, role_description, criteria_json, active, created_at, org_id FROM positions;
+                INSERT INTO positions_new (id, name, category, role_description, criteria_json, active, created_at, org_id, is_customized)
+                    SELECT id, name, category, role_description, criteria_json, active, created_at, org_id,
+                           COALESCE(is_customized, 0) FROM positions;
                 DROP TABLE positions;
                 ALTER TABLE positions_new RENAME TO positions;
             """)
@@ -708,17 +712,23 @@ def init_db():
         ("Frontend Developer", "Kullanıcı arayüzü, deneyim, state ve tarayıcı tarafı geliştirme rolü.", [("React/UI Yetkinliği",30,"Component yapısı, hook kullanımı, routing (React Router vb.)"),("UX & Responsive",20,"Mobil uyum, erişilebilirlik (a11y) ve kullanılabilirlik prensipleri"),("API Entegrasyonu",15,"Async veri çekme, hata/loading state yönetimi"),("Performans",10,"Bundle boyutu optimizasyonu, lazy loading, render performansı"),("Test & Debug",15,"Browser dev tools, console debug ve cross-browser test"),("Tasarım Dikkati",10,"Design system/Figma uyumu ve görsel tutarlılık")]),
         ("DevOps Engineer", "CI/CD, bulut, deploy, izleme, güvenlik ve altyapı otomasyonundan sorumlu rol.", [("CI/CD",25,"Pipeline kurulumu (GitHub Actions, Jenkins vb.), release ve rollback stratejisi"),("Cloud & Container",25,"Docker, Kubernetes veya cloud servisleri (AWS/Azure/GCP) yönetimi"),("Monitoring",15,"Log/metric toplama (Prometheus, Grafana vb.) ve alert kurulumu"),("Security",15,"Secrets yönetimi (Vault vb.), network güvenliği ve hardening"),("Automation",10,"Infrastructure as Code (Terraform, Ansible) ve script otomasyonu"),("Problem Çözme",10,"Incident response ve kök neden analizi")]),
         ("QA Engineer", "Test planı, manuel/otomasyon test, kalite süreçleri ve hata yönetiminden sorumlu rol.", [("Test Tasarımı",25,"Test case yazımı, senaryo ve edge-case kapsaması"),("Otomasyon",20,"Test otomasyon araçları (Selenium, Cypress, Playwright vb.) ve scripting"),("Hata Analizi",20,"Bug raporu yazımı, reproduce adımları ve önceliklendirme"),("Ürün Anlayışı",15,"Kullanıcı akışı ve gereksinim dokümanına hakimiyet"),("İletişim",10,"Geliştirici/PM ile bug/test sonucu iletişimi"),("Dikkat",10,"Detay odaklılık ve regresyon test disiplini")]),
-        ("Project Manager", "Proje planlama, ekip koordinasyonu, risk, zaman ve paydaş yönetiminden sorumlu rol.", [("Planlama",25,"Kapsam (scope), timeline ve kaynak planı oluşturma (Gantt chart vb.)"),("Risk Yönetimi",20,"Risk kaydı (risk register), issue takibi ve aksiyon planı"),("İletişim",20,"Paydaş ve ekip ile düzenli status raporlama"),("Liderlik",15,"Ekip motivasyonu, önceliklendirme ve karar alma"),("Bütçe",10,"Maliyet takibi ve kaynak optimizasyonu"),("Araç Kullanımı",10,"Jira, MS Project veya benzeri araçlarla iş takibi")]),
+        ("Project Manager", "Proje planlama, ekip koordinasyonu, risk, zaman ve paydaş yönetiminden sorumlu rol.", [("Planlama",25,"Kapsam (scope), timeline ve kaynak planı oluşturma (Gantt chart vb.)"),("Risk Yönetimi",20,"Risk kaydı (risk register), issue takibi ve aksiyon planı"),("İletişim",20,"Paydaş ve ekip ile düzenli status raporlama"),("Liderlik",15,"Ekip motivasyonu, önceliklendirme ve karar alma"),("Bütçe",10,"Maliyet takibi ve kaynak optimizasyonu"),("Yazılım ve Sistem Kullanımı",10,"Jira, MS Project, Asana veya benzeri proje yönetim yazılımlarıyla iş takibi ve raporlama")]),
         ("Product Manager", "Ürün vizyonu, roadmap, kullanıcı ihtiyacı ve iş önceliklendirme rolü.", [("Ürün Stratejisi",25,"Ürün vizyonu ve roadmap önceliklendirme (RICE, MoSCoW vb.)"),("Kullanıcı Anlayışı",20,"Kullanıcı araştırması, UX testleri ve ihtiyaç analizi"),("Analitik",15,"Metric/funnel analizi (conversion rate vb.) ile veri odaklı karar"),("Teknik İletişim",15,"Geliştirici ekiple teknik kısıt ve önceliklendirme uyumu"),("Stakeholder Yönetimi",15,"İş birimleri ve yönetimle beklenti yönetimi"),("Problem Çözme",10,"Trade-off analizleri ve önceliklendirme kararları")]),
-        ("Business Analyst", "İş gereksinimlerini analiz eden, süreç modelleyen ve teknik ekibe aktaran rol.", [("Gereksinim Yönetimi",20,"İşletme ihtiyaçlarını doğru toplama ve belgeleme"),("Süreç Modelleme",15,"Akış şemaları ve senaryolar oluşturma (UML, BPMN)"),("Veri Analitiği",15,"Verileri yorumlama ve trend çıkarma; SQL, Tableau veya PowerBI gibi araçlara hakimiyet"),("Çevik (Agile) Metodolojiler",15,"Scrum ve Kanban süreçlerinde aktif rol alma, kullanıcı hikayeleri (user story) yazma"),("Paydaş Yönetimi",15,"Müşteriler ve geliştirici ekipler arasında net dil kullanma ve koordinasyon"),("Müzakere ve Problem Çözme",10,"Çatışma yönetimi ve karmaşık iş problemlerine rasyonel çözüm üretme"),("Sunum Becerileri",10,"Teknik olmayan yöneticilere analiz ve iş değerini net şekilde aktarma")]),
+        ("Business Analyst", "İş gereksinimlerini analiz eden, süreç modelleyen ve teknik ekibe aktaran rol.", [("Gereksinim Yönetimi",20,"İşletme ihtiyaçlarını doğru toplama, önceliklendirme ve BRD/kullanıcı hikayesi olarak belgeleme"),("Süreç Modelleme",15,"Mevcut/hedef süreç akış şemaları ve senaryolar oluşturma (UML, BPMN)"),("Veri Analitiği",15,"Verileri yorumlama ve trend çıkarma; SQL, Tableau veya Power BI gibi araçlara hakimiyet"),("Çevik (Agile) Metodolojiler",15,"Scrum ve Kanban süreçlerinde aktif rol alma, backlog ve kullanıcı hikayesi yönetimi"),("Paydaş Yönetimi ve İletişim",20,"Müşteri ile geliştirici ekip arasında net dil kullanma, koordinasyon ve teknik olmayan yöneticilere analiz/iş değerini net sunma"),("Müzakere ve Problem Çözme",15,"Çatışma yönetimi ve karmaşık iş problemlerine rasyonel, veriye dayalı çözüm üretme")]),
         ("HR Specialist", "İşe alım, çalışan ilişkileri, eğitim, performans ve insan kaynakları operasyonları rolü.", [("İşe Alım",25,"Aday tarama, mülakat süreci tasarımı ve işe alım metrikleri (time-to-hire vb.)"),("İletişim",20,"Çalışan ve yönetici arasında net ve empatik iletişim"),("Organizasyon",15,"Özlük dosyası, süreç takibi ve dokümantasyon"),("Mevzuat & Uyum",15,"İş Kanunu ve şirket politikalarına hakimiyet"),("Analitik",10,"HR metrikleri (turnover, engagement) analizi"),("Gizlilik",15,"KVKK kapsamında çalışan verisi gizliliği ve etik yaklaşım")]),
-        ("Finance Specialist", "Finansal kayıt, raporlama, bütçe, ödeme ve mali kontrol süreçlerinden sorumlu rol.", [("Finansal Bilgi",25,"Muhasebe kayıtları, bütçe hazırlığı ve finansal raporlama"),("Dikkat & Doğruluk",25,"Fatura/ödeme kontrolü, hata önleme ve mutabakat"),("Analitik",20,"Finansal veri analizi ve trend yorumlama"),("Araç Kullanımı",10,"Excel (pivot, formül) ve ERP (SAP, Logo, Odoo vb.) kullanımı"),("Uyum",10,"Vergi mevzuatı ve iç kontrol standartlarına uyum"),("İletişim",10,"Ekip ve yönetimle finansal durum raporlama")]),
+        ("Finance Specialist", "Finansal raporlama, bütçe planlama, nakit akışı takibi, mali kontrol ve yönetim raporlaması odaklı rol (muhasebe kaydı/beyanname/dönem sonu işlemleri Muhasebe Uzmanı kapsamındadır).", [("Finansal Raporlama ve Bütçe",25,"Yönetim raporları, bütçe hazırlığı ve bütçe-gerçekleşme analizi, konsolidasyon"),("Nakit Akışı ve Mali Kontrol",25,"Nakit akış tablosu, tahsilat/ödeme planlama, iç kontrol ve onay süreçleri, mutabakat"),("Analitik",20,"Finansal veri analizi, oran analizi ve trend yorumlama; karar destekleyici içgörü"),("Yazılım ve Sistem Kullanımı",10,"Excel (pivot, formül, model kurma) ve ERP (SAP, Logo, Odoo vb.) raporlama modülleri"),("Uyum",10,"Vergi mevzuatı, iç kontrol ve şirket politikalarına uyum farkındalığı"),("İletişim",10,"Ekip ve üst yönetime finansal durumu net ve karar odaklı aktarma")]),
         ("Sales Manager", "Satış hedefleri, ekip, müşteri ilişkileri ve gelir büyümesinden sorumlu rol.", [("Satış Stratejisi",25,"Hedef belirleme, segment analizi ve pipeline yönetimi"),("Ekip Yönetimi",20,"Satış ekibi koçluğu ve performans değerlendirmesi"),("Müşteri İlişkileri",20,"Güven inşası, müzakere ve müşteri sorunu çözümü"),("Analitik",15,"CRM verisi (Salesforce, HubSpot vb.), forecast ve KPI takibi"),("Sonuç Odaklılık",10,"Satış hedefine yönelik aksiyon planı takibi"),("İletişim",10,"Sunum ve ikna becerisiyle müşteri/ekip yönetimi")]),
         ("Marketing Manager", "Pazarlama stratejisi, kampanya, marka, içerik ve performans yönetimi rolü.", [("Strateji",25,"Pazar analizi, hedef kitle segmentasyonu ve konumlandırma"),("Kampanya Yönetimi",20,"Kampanya planlama, uygulama ve optimizasyon"),("Dijital Pazarlama",15,"SEO, ads (Google/Meta) ve sosyal medya yönetimi"),("Analitik",15,"Metric (CTR, ROI) analizi ve raporlama (Google Analytics vb.)"),("Yaratıcılık",15,"İçerik ve mesaj stratejisi geliştirme"),("İletişim",10,"Ekip ve ajans koordinasyonu")]),
         ("Kasa Yöneticisi", "Kasa operasyonlarını, nakit akışını ve kasa personelini yöneten; günlük/haftalık kasa mutabakatı ile veri güvenliğinden sorumlu rol.", [("Finansal Okuryazarlık & Nakit Yönetimi",25,"Nakit akışı takibi, kasa mutabakatı, kasa açığı/fazlası kontrolü"),("Dikkat & Doğruluk",20,"Kasa sayımı, veri girişi ve işlem hatasını önleme"),("Sorumluluk & Güvenilirlik",15,"İşletmenin nakit varlığını yönetme ve veri güvenliği"),("Ekip & Vardiya Yönetimi",15,"Yoğun temoda vardiya planlama ve kasa personelini yönlendirme"),("Teknoloji Hakimiyeti",15,"MS Office (özellikle Excel) ve ERP/POS sistemleri kullanımı"),("İletişim & Müşteri İlişkileri",10,"Müşteri memnuniyeti ve ödeme sorunu çözümü")]),
-        ("Muhasebe Uzmanı", "Tek Düzen Hesap Planı kayıtları, beyanname ve bildirimler, e-belge süreçleri, dönem sonu işlemleri, mutabakat ve mali tablo yorumlamadan sorumlu rol.", [("Tek Düzen Hesap Planı ve kayıt mantığı",12,"Yevmiye kaydı kurma, borç/alacak mantığı, hesap sınıflarını doğru kullanma."),("Beyanname ve bildirimler",12,"KDV, muhtasar, damga beyannameleri; BA-BS formları; beyanname takvimi."),("e-Fatura / e-Arşiv / e-Defter",8,"e-belge süreçleri, berat yükleme, iptal/itiraz akışı."),("Dönem sonu işlemleri",10,"Amortisman, karşılıklar, kur değerlemesi, reeskont, kapanış kayıtları."),("Mutabakat ve hesap takibi",10,"Cari ve banka mutabakatı, kasa-banka takibi, açık kalan hesapların çözümü."),("Mali tablo okuma ve yorumlama",8,"Bilanço ve gelir tablosunu okuma, oran/tutarsızlık yorumlama."),("Bordro ve SGK entegrasyonu",6,"Bordro kayıtlarının muhasebeye aktarımı, SGK bildirimleri."),("Maliyet muhasebesi temelleri",6,"Stok değerleme, üretim/hizmet maliyeti, maliyet dağıtımı."),("Muhasebe/ERP yazılımı deneyimi",8,"Logo, Mikro, Netsis, SAP veya Odoo üzerinde fiili çalışma deneyimi."),("Excel yetkinliği",5,"Pivot, düşeyara/indis-kaçıncı, mutabakat ve kontrol tabloları kurma."),("Mevzuat takibi",5,"Güncel kalma alışkanlığı, değişikliği hangi kaynaktan izlediği."),("Hata bulma ve tutarsızlık takibi",6,"Kapanmayan hesap / tutmayan mutabakat senaryosunda izlediği yol."),("Dönem baskısı altında iş yönetimi",4,"Beyanname takvimi yoğunluğunda önceliklendirme ve teslim disiplini.")]),
+        ("Muhasebe Uzmanı", "Muhasebe kaydı, beyanname ve bildirimler, e-belge süreçleri, dönem sonu işlemleri ve mutabakat odaklı rol (finansal raporlama/bütçe/nakit akışı yönetimi Finance Specialist kapsamındadır).", [("Muhasebe Bilgisi",20,"Tek Düzen Hesap Planı, yevmiye ve borç/alacak kayıt mantığı, hesap sınıflarını doğru kullanma; dönem sonu işlemleri (amortisman, karşılık, kur değerlemesi, reeskont, kapanış)."),("Vergi ve Mevzuat",20,"KDV, muhtasar, damga beyannameleri; BA-BS formları; beyanname takvimi; e-Fatura / e-Arşiv / e-Defter süreçleri, berat yükleme; mevzuat değişikliklerini takip etme."),("Kontrol ve Doğruluk",20,"Cari, banka ve kasa mutabakatı, açık kalan hesapların çözümü; kapanmayan hesap / tutmayan mutabakat senaryosunda izlenen hata bulma yöntemi."),("Analitik",15,"Bilanço ve gelir tablosu okuma, oran/tutarsızlık yorumlama; stok değerleme ve maliyet muhasebesi temelleri (üretim/hizmet maliyeti, maliyet dağıtımı)."),("Yazılım ve Sistem Kullanımı",15,"Logo, Mikro, Netsis, SAP veya Odoo üzerinde fiili muhasebe deneyimi; Excel (pivot, düşeyara/indis-kaçıncı, mutabakat ve kontrol tabloları)."),("Süreç Yönetimi",10,"Bordro kayıtlarının muhasebeye aktarımı ve SGK bildirimleri; beyanname takvimi yoğunluğunda önceliklendirme ve teslim disiplini.")]),
     ]
     for name, desc, criteria_pairs in defaults:
+        # B3 — 6 kriter standardı: seed'de ihlal varsa BAŞLATMAYI DURDURMA, sadece net logla.
+        if len(criteria_pairs) != 6:
+            print(f"[SEED_UYARI] '{name}' pozisyonu {len(criteria_pairs)} kriterle tanımlı — standart TAM 6.")
+        _wsum = sum(w for _, w, _ in criteria_pairs)
+        if _wsum != 100:
+            print(f"[SEED_UYARI] '{name}' pozisyonu kriter ağırlık toplamı {_wsum} — 100 olmalı.")
         criteria = [{"name": n, "weight": w, "desc": d} for n, w, d in criteria_pairs]
         category = infer_position_category(name)
         conn.execute(
@@ -727,9 +737,10 @@ def init_db():
         )
         # PostgreSQL'e ilk geçişte yanlış kategoriler kaydedilmiş olabileceği için,
         # kodla gelen varsayılan pozisyonların kategorisini V14.5 kurallarına göre düzelt.
-        # Yalnızca MedeX'in defaults listesindeki pozisyonlarına uygulanır; kullanıcı eklediği
-        # özel pozisyonlara ve diğer kurumların kendi kopyalarına dokunmaz.
-        conn.execute("UPDATE positions SET category=? WHERE name=? AND org_id=?", (category, name, medex_org_id))
+        # Yalnızca MedeX'in defaults listesindeki, PANELDEN ÖZELLEŞTİRİLMEMİŞ (is_customized=0)
+        # pozisyonlarına uygulanır; kullanıcı eklediği özel/özelleştirilmiş kayıtlara dokunmaz.
+        conn.execute("UPDATE positions SET category=? WHERE name=? AND org_id=? AND COALESCE(is_customized,0)=0",
+                     (category, name, medex_org_id))
     # TEK SEFERLİK İÇERİK DÜZELTMESİ: defaults listesindeki TÜM pozisyonların kriterleri
     # detaylandırılıp somut araç/standart/yöntem örnekleriyle zenginleştirildi (ör. Business
     # Analyst'te sadece 2/6 kriterin somut kancası vardı — Dokümantasyon->BRD, Test Desteği->UAT
@@ -741,7 +752,9 @@ def init_db():
     # bu bloğu kaldırmamız gerekebilir, haber verin.
     for name, desc, criteria_pairs in defaults:
         forced_json = json.dumps([{"name": n, "weight": w, "desc": d} for n, w, d in criteria_pairs], ensure_ascii=False)
-        conn.execute("UPDATE positions SET criteria_json=? WHERE name=? AND org_id=?", (forced_json, name, medex_org_id))
+        # B7 — panelden özelleştirilmiş (is_customized=1) kayıtları EZME.
+        conn.execute("UPDATE positions SET criteria_json=?, role_description=? WHERE name=? AND org_id=? AND COALESCE(is_customized,0)=0",
+                     (forced_json, desc, name, medex_org_id))
     conn.commit()
 
     # TEK SEFERLİK ONARIM: ilk sürümde telefon eşleştirmesi e-posta farklı olsa bile devreye
@@ -1500,6 +1513,110 @@ def _desqueeze_text(text: str) -> str:
     out = re.sub(r"(?<=\d)(?=[A-Za-zÇĞİÖŞÜçğıöşü])", " ", out)
     return out
 
+# ═══ B1 — SÖZLÜK TABANLI SEGMENTASYON (harici bağımlılık YOK) ═══
+# Yapışık CV metnini ("SerbestMuhasebeciMaliMüşavir") gömülü Türkçe kelime listesiyle böler.
+# Kapsam: sık Türkçe fonksiyon/bağlaç kelimeleri + iş / muhasebe-finans / klinik araştırma /
+# genel teknik terimler. Yalnız GEREKÇELİ kullanım: segmentasyon okunabilirlik puanını
+# artırıyorsa uygulanır; aksi hâlde ham metin korunur (çağıran karşılaştırır).
+_TR_WORDLIST = set(w.lower() for w in (
+    # fonksiyon / bağlaç / sık kelimeler
+    "ve","veya","ile","için","gibi","kadar","göre","ancak","fakat","ama","çünkü","daha","çok","az",
+    "olarak","olan","olup","oldu","olduğu","olmak","yani","hem","ya","de","da","ki","mi","bu","şu","o",
+    "bir","iki","üç","dört","beş","altı","yedi","sekiz","dokuz","on","yıl","yıla","yıllık","yakın","sonra",
+    "önce","bugün","şu an","süre","süresi","boyunca","tüm","her","bazı","tek","aynı","farklı","yeni","eski",
+    "büyük","küçük","genel","özel","temel","ileri","orta","tam","yarı","üst","alt","iç","dış","ön","arka",
+    "sağ","sol","yüksek","düşük","hızlı","yavaş","doğru","yanlış","iyi","kötü","güçlü","zayıf",
+    "ben","sen","biz","siz","onlar","kendi","şey","kişi","kişiler","adet","tane","dahil","hariç",
+    "başlangıç","bitiş","devam","tamam","evet","hayır","belki","kesin","yaklaşık","toplam","kısmi",
+    "bin","milyon","milyar","yüzde","adres","telefon","eposta","email","tarih","gün","ay","hafta",
+    # kişisel / CV
+    "serbest","meslek","mesleki","müşavir","mali","muhasebeci","muhasebe","muhasebecilik","kariyer",
+    "deneyim","deneyimli","tecrübe","tecrübeli","eğitim","öğrenim","lisans","önlisans","yükseklisans",
+    "doktora","lise","ticaret","üniversite","üniversitesi","fakülte","fakültesi","bölüm","bölümü",
+    "mezun","mezunu","okul","kurs","sertifika","sertifikası","staj","stajyer","referans","özgeçmiş",
+    "işletme","iktisat","ekonomi","maliye","hukuk","mühendislik","mühendisi","yönetim","yönetimi","idari",
+    "kişisel","bilgiler","yetkinlik","yetkinlikler","beceri","beceriler","dil","diller","ingilizce","almanca",
+    # muhasebe / finans
+    "hesap","hesabı","hesaplar","plan","planı","planlama","kayıt","kayıtları","kayıtlar","yevmiye","defter",
+    "defteri","bilanço","gelir","gider","tablo","tablosu","tabloları","borç","alacak","bakiye","cari","kasa",
+    "banka","bankası","mutabakat","mutabakatı","denetim","denetimi","fatura","faturası","irsaliye","tahsilat",
+    "ödeme","ödemeler","tahakkuk","reeskont","amortisman","karşılık","karşılıklar","değerleme","kur","döviz",
+    "dönem","dönemi","kapanış","açılış","beyanname","beyannamesi","muhtasar","damga","katma","değer","vergi",
+    "vergisi","vergileri","stopaj","tevkifat","bildirim","bildirimler","form","formu","formlar","efatura",
+    "earşiv","edefter","berat","bordro","bordrosu","sigorta","prim","işçilik","personel","özlük","bütçe",
+    "bütçeleme","nakit","akış","akışı","raporlama","rapor","raporu","raporlar","finansal","finans","yatırım",
+    "kredi","faiz","gelir tablosu","maliyet","maliyeti","maliyetler","stok","stoklar","envanter","sayım",
+    "konsolidasyon","konsolide","oran","oranı","analiz","analizi","kontrol","kontrolü","kontroller","onay",
+    "iç kontrol","mevzuat","mevzuatı","standart","standartları","uyum","uyumluluk","tutar","tutarı","tutarsızlık",
+    "logo","mikro","netsis","luca","zirve","excel","erp","yazılım","yazılımı","sistem","sistemi","sistemleri",
+    "pivot","formül","fonksiyon","tablo kurma","program","programı","modül","modülü","entegrasyon","aktarım",
+    "işler","işlem","işlemler","işlemleri","süreç","süreçler","süreçleri","takip","takibi","yönetici","uzman",
+    "uzmanı","sorumlu","sorumlusu","asistan","asistanı","şef","şefi","müdür","müdürü","departman","departmanı",
+    # klinik araştırma
+    "klinik","araştırma","araştırması","çalışma","çalışması","protokol","protokolü","hasta","hastalar","ziyaret",
+    "ziyareti","monitör","monitörü","monitoring","koordinatör","koordinatörü","koordinasyon","saha","merkez",
+    "merkezi","sponsor","sponsoru","etik","kurul","kurulu","onam","gönüllü","ilaç","farmakovijilans","güvenlilik",
+    "advers","olay","raporu","laboratuvar","numune","örneklem","veri","verileri","girişi","doğrulama","kalite",
+    "güvence","regülasyon","regülatif","başvuru","dosya","dosyası","doküman","dokümantasyon","arşiv","arşivleme",
+    # genel iş / teknik
+    "proje","projesi","projeler","projelerin","ekip","ekibi","takım","takımı","müşteri","müşteriler","müşterinin",
+    "hedef","hedefler","hedefleri","strateji","stratejisi","stratejik","pazar","pazarlama","satış","satışlar",
+    "sunum","sunumu","iletişim","iletişimi","koordine","organizasyon","organize","planladım","yürüttüm","hazırladım",
+    "geliştirme","geliştirdim","uyguladım","yönettim","sağladım","gerçekleştirdim","oluşturdum","kurdum","destek",
+    "operasyon","operasyonel","performans","verimlilik","risk","riskleri","çözüm","çözümü","sorun","sorunları",
+    "karar","kararı","kararlar","toplantı","toplantılar","sunucu","veritabanı","kod","test","testi","yazılımcı",
+    "geliştirici","mühendis","analist","danışman","danışmanlık","şirket","şirketi","firma","firması","kurum","kurumu",
+)) | set(w.lower() for w in ("smmm","ymm","kdv","sgk","ba","bs","poc","crf","edc","ctms","gcp","sop","ae","sae"))
+_TR_MAXW = max(len(w) for w in _TR_WORDLIST if " " not in w)
+
+def _segment_alpha_run(run: str) -> list:
+    """Yalnız harflerden oluşan boşluksuz dizi → greedy longest-match ile kelime parçaları.
+    Çözülemeyen kısımlar tek parça olarak kalır."""
+    pieces, i, n, buf = [], 0, len(run), ""
+    while i < n:
+        best = 0
+        for L in range(min(_TR_MAXW, n - i), 2, -1):
+            if run[i:i + L].lower() in _TR_WORDLIST:
+                best = L
+                break
+        if best:
+            if buf:
+                pieces.append(buf); buf = ""
+            pieces.append(run[i:i + best]); i += best
+        else:
+            buf += run[i]; i += 1
+    if buf:
+        pieces.append(buf)
+    return [p for p in pieces if p]
+
+_URLISH_RE = re.compile(r"://|www\.|@|\b[\w.-]+\.(?:com|net|org|io|gov|edu|tr|co)\b", re.IGNORECASE)
+
+def _segment_run(run: str) -> str:
+    """Boşluksuz bir parçayı böler. Önce noktalama/rakam sınırlarından ayırır, sonra her SAF HARF
+    dizisine sözlük segmentasyonu uygular. E-posta/URL benzeri parçalara dokunmaz."""
+    if _URLISH_RE.search(run):
+        return run
+    out = []
+    for tok in re.findall(r"[A-Za-zÇĞİÖŞÜçğıöşü]+|[^A-Za-zÇĞİÖŞÜçğıöşü]+", run):
+        if tok and tok[0].isalpha() and len(tok) >= 10:
+            out.extend(_segment_alpha_run(tok))
+        else:
+            out.append(tok)
+    # parçaları boşlukla birleştir; ardışık noktalama parçalarını yapıştırmaya çalışma (basit ve yeterli)
+    joined = " ".join(p for p in out if p)
+    joined = re.sub(r"\s+([,.;:!?)\]}])", r"\1", joined)   # noktalamayı öne yapıştır
+    joined = re.sub(r"([(\[{])\s+", r"\1", joined)
+    return joined
+
+def _dict_segment(text: str) -> str:
+    """B1 — yapışık metni sözlükle böler. Yalnız 14+ karakterli boşluksuz parçalara uygulanır."""
+    parts = re.split(r"(\s+)", text)
+    for idx, part in enumerate(parts):
+        if not part or part.isspace() or len(part) < 14:
+            continue
+        parts[idx] = _segment_run(part)
+    return "".join(parts)
+
 def _pdf_strategies(content: bytes):
     """Sırasıyla denenecek (etiket, çıkarım fonksiyonu) çiftleri."""
     def _plumber(x_tol=None, layout=False):
@@ -1544,12 +1661,18 @@ def extract_text_from_pdf(content: bytes) -> str:
     if not best_text:
         return f"[PDF okunamadı: {'; '.join(errors) or 'metin çıkarılamadı'}]"
     r = cv_text_readability(best_text)
-    # SON ÇARE: hâlâ ciddi yapışıksa kısmi kelime ayrımını dene, puanı artırıyorsa uygula.
-    if r["space_ratio"] < 0.10:
-        dq = _desqueeze_text(best_text)
-        if cv_text_readability(dq)["score"] > r["score"]:
-            best_text, best_label = dq, (best_label or "?") + "+desqueeze"
-            r = cv_text_readability(best_text)
+    # SON ÇARE (yapışık metin): sırayla dene, YALNIZ okunabilirlik puanını artıran adımı uygula.
+    #  1) sözlük tabanlı segmentasyon (B1)  2) camelCase/harf-rakam sınırı (_desqueeze)
+    if r["space_ratio"] < 0.12:
+        for _lbl, _fn in (("dictseg", _dict_segment), ("desqueeze", _desqueeze_text)):
+            try:
+                cand = _fn(best_text)
+            except Exception as e:
+                print(f"UYARI (CV {_lbl} c=?): {type(e).__name__}: {e}")
+                continue
+            if cand != best_text and cv_text_readability(cand)["score"] > r["score"]:
+                best_text, best_label = cand, (best_label or "?") + "+" + _lbl
+                r = cv_text_readability(best_text)
     if not r["ok"]:
         print(f"[CV_EXTRACT_LOW_READABILITY] strateji={best_label} "
               f"space_ratio={r['space_ratio']} avg_token_len={r['avg_token_len']} long_token_ratio={r['long_token_ratio']} "
@@ -2004,8 +2127,9 @@ def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_t
     """Rolü, dili, hitabı ve kapanışı kilitli profesyonel realtime mülakatçı talimatı.
     level=2 (varsayılan) çıktısı bilerek birebir eskisiyle aynı bırakıldı — sadece level=3
     çağrıldığında ek bir SEVİYE TONU satırı ve L3'ün kendi süre/derinlik hedefi devreye girer."""
-    pos = get_position(position_name) or {"criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
+    pos = get_position(position_name) or {"criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}], "role_description": ""}
     criteria = pos.get("criteria") or []
+    role_desc = (pos.get("role_description") or "").strip()   # B6 — L1/L3'te olduğu gibi L2'ye de ver
     criteria_compact = "; ".join(f"{c.get('name','Kriter')} %{c.get('weight',0)}" for c in criteria)
     criteria_names = ", ".join(f'"{c.get("name", "Kriter")}"' for c in criteria)
     lang_name = LANGUAGE_NAMES.get(interview_language, "Türkçe")
@@ -2022,7 +2146,9 @@ def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_t
 MÜLAKATÇI İLKESİ — MERKEZ (kural listesi değil, karar çerçeven):
 Amacın adayın mesleki bilgi ve yetkinlik düzeyini ölçmek. Bu amaca ulaşmak için TAM inisiyatif sendedir: senaryo/soru listesi takip etmezsin, adayı okur ve duruma göre karar verirsin. Amaca hizmet ettiğin sürece adayla tam uyumlu davranırsın. Amaç eleme değil, iyi adayı yakalamak.
 
-Aday: {candidate_name}. Pozisyon: {position_name}. Derinlik: {depth_label}. Kriterler: {criteria_compact}. CV özeti: {cv_compact}. Özel not: {note_compact or 'yok'}.
+Aday: {candidate_name}. Pozisyon: {position_name}. Derinlik: {depth_label}.
+Rol: {role_desc or 'Bu pozisyon için genel yetkinlik değerlendirmesi.'}
+Kriterler: {criteria_compact}. CV özeti: {cv_compact}. Özel not: {note_compact or 'yok'}.
 {level_tone_line}
 İNİSİYATİF:
 - Sabit soru sırası/sayısı yok; adayın cevabına göre yön belirle. Zayıf alanı derinleştir, güçlü alanda oyalanma.
@@ -2618,36 +2744,54 @@ def list_positions(payload=Depends(verify_admin), org_id: Optional[int] = None, 
     rows = db.execute("SELECT * FROM positions WHERE org_id=? ORDER BY created_at DESC", (scoped_org_id,)).fetchall()
     return [{
         "id": r["id"], "name": r["name"], "category": r["category"] if "category" in r.keys() else "Genel", "role_description": r["role_description"],
-        "criteria": json.loads(r["criteria_json"]), "active": bool(r["active"])
+        "criteria": json.loads(r["criteria_json"]), "active": bool(r["active"]),
+        "is_customized": bool(r["is_customized"]) if "is_customized" in r.keys() and r["is_customized"] is not None else False,
     } for r in rows]
+
+# B3 — her pozisyon TAM 6 kriter içerir (standart, istisnasız). Pozisyona özgü ek beklentiler
+# kriter değil, aday kaydındaki AI notu alanından iletilir.
+POSITION_CRITERIA_COUNT = 6
+
+def _validate_position_criteria(criteria):
+    """B3 — panelden gelen pozisyon kriterlerini doğrular. HARD REJECT: 6 kriter değilse 400
+    (init_db seed'inde ise yalnız loglanır — başlatmayı durdurmayız). Ağırlık toplamı 100 değilse
+    uyarı döner (bloklamaz — mevcut davranış korunur)."""
+    n = len(criteria)
+    if n != POSITION_CRITERIA_COUNT:
+        raise HTTPException(status_code=400,
+                            detail=f"Her pozisyon tam {POSITION_CRITERIA_COUNT} kriter içermelidir (gönderilen: {n}). "
+                                   f"Pozisyona özgü ek beklentileri aday kaydındaki 'AI notu' alanından iletin.")
+    total = sum(c.weight for c in criteria)
+    return None if total == 100 else f"Uyarı: kriter ağırlıkları toplamı {total}, 100 olması önerilir"
 
 @app.post("/api/admin/positions")
 def create_position(data: PositionCreate, payload=Depends(verify_admin), db=Depends(db_dep)):
-    total = sum(c.weight for c in data.criteria)
+    warning = _validate_position_criteria(data.criteria)
     org_id = get_org_id_for_admin(db, payload)
     try:
         db.execute(
-            "INSERT INTO positions (name, category, role_description, criteria_json, org_id) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO positions (name, category, role_description, criteria_json, org_id, is_customized) VALUES (?, ?, ?, ?, ?, 1)",
             (data.name, data.category, data.role_description, json.dumps([c.dict() for c in data.criteria], ensure_ascii=False), org_id)
         )
         db.commit()
     except (sqlite3.IntegrityError, psycopg.IntegrityError):
         raise HTTPException(status_code=400, detail="Bu pozisyon adı zaten var")
-    warning = None if total == 100 else f"Uyarı: kriter ağırlıkları toplamı {total}, 100 olması önerilir"
     return {"message": "Pozisyon eklendi", "warning": warning}
 
 @app.put("/api/admin/positions/{position_id}")
 def update_position(position_id: int, data: PositionCreate, payload=Depends(verify_admin), db=Depends(db_dep)):
+    warning = _validate_position_criteria(data.criteria)
     org_id = get_org_id_for_admin(db, payload)
     owned = db.execute("SELECT id FROM positions WHERE id=? AND org_id=?", (position_id, org_id)).fetchone()
     if not owned:
         raise HTTPException(status_code=404, detail="Pozisyon bulunamadı")
+    # B7 — panelden düzenlenen pozisyon is_customized=1 olur; init_db bir daha üzerine yazmaz.
     db.execute(
-        "UPDATE positions SET name=?, category=?, role_description=?, criteria_json=? WHERE id=?",
+        "UPDATE positions SET name=?, category=?, role_description=?, criteria_json=?, is_customized=1 WHERE id=?",
         (data.name, data.category, data.role_description, json.dumps([c.dict() for c in data.criteria], ensure_ascii=False), position_id)
     )
     db.commit()
-    return {"message": "Pozisyon güncellendi"}
+    return {"message": "Pozisyon güncellendi", "warning": warning}
 
 @app.delete("/api/admin/positions/{position_id}")
 def delete_position(position_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
@@ -3690,8 +3834,27 @@ _EDU_PHRASES = [
 def _norm_ws(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
+def normalize_cv_for_analysis(cv_text: str) -> str:
+    """B1 — analiz (çıkarım/çelişki) öncesi, DEPOLANMIŞ yapışık CV metnine sözlük segmentasyonu
+    uygular (yalnız okunabilirlik puanını artırıyorsa). Yeni yüklemeler zaten extract_text_from_pdf'te
+    segmente ediliyor; bu, eski kayıtlar ve DOCX için ek güvence."""
+    t = (cv_text or "").strip()
+    if not t or t.startswith("["):
+        return t
+    r = cv_text_readability(t)
+    if r["space_ratio"] >= 0.12:
+        return t
+    try:
+        seg = _dict_segment(t)
+        if seg != t and cv_text_readability(seg)["score"] > r["score"]:
+            return seg
+    except Exception as e:
+        print(f"UYARI (normalize_cv_for_analysis): {type(e).__name__}: {e}")
+    return t
+
 def _cv_text_is_readable(t: str) -> bool:
-    """Yapışık/okunamaz metinden çıkarım yapma; boşluk oranı düşükse False."""
+    """Yapışık/okunamaz metinden çıkarım yapma; boşluk oranı düşükse False.
+    (Çağıranlar önce normalize_cv_for_analysis'ten geçirmeli.)"""
     return bool((t or "").strip()) and cv_text_readability(t)["space_ratio"] >= 0.09
 
 def _verbatim_in(value: str, source: str) -> bool:
@@ -3728,7 +3891,7 @@ def extract_cv_fields_heuristic(cv_text: str = "", transcript: str = "") -> dict
     """SIKI sezgisel çıkarım. Transkript öncelikli; yapışık CV'den çıkarım YOK; birebir doğrulama.
     Dönüş: {education, university, department, experience_years, _cv_readable, _notes[]}."""
     tr = transcript or ""
-    cv = cv_text or ""
+    cv = normalize_cv_for_analysis(cv_text or "")   # B1 — yapışıksa sözlükle böl
     cv_ok = _cv_text_is_readable(cv)
     out = {"education": None, "university": None, "department": None, "experience_years": None,
            "_cv_readable": cv_ok, "_notes": []}
@@ -3843,7 +4006,7 @@ def patch_standard_cv_blanks(standard_cv: str, candidate: dict, transcript: str 
 # hazır listeyi yorumlar, tespiti kendisi yapmaz. CV okunamıyorsa "karşılaştırılamadı" denir.
 def compute_field_discrepancies(candidate: dict, transcript: str = "") -> dict:
     c = candidate or {}
-    cv = c.get("cv_text") or ""
+    cv = normalize_cv_for_analysis(c.get("cv_text") or "")   # B1 — yapışıksa sözlükle böl
     tr = transcript or ""
     cv_ok = _cv_text_is_readable(cv)
     rows = []
@@ -3939,7 +4102,7 @@ def build_standard_cv_deterministic(candidate: dict, transcript: str = "") -> st
         if val in (None, "", 0):
             return "—"
         return f"{val}" + ("" if src == "form" else "  (CV/mülakattan tahmin)")
-    cv_text = (c.get("cv_text") or "").strip()
+    cv_text = normalize_cv_for_analysis((c.get("cv_text") or "").strip())   # B1
     exp_val, exp_src = _fields.get("experience_years", (None, ""))
     exp_line = (f"{exp_val} yıl" + ("" if exp_src == "form" else "  (CV/mülakattan tahmin)")) if exp_val else "—"
     # CV metninden sertifika/dil ipuçları (basit anahtar-kelime taraması)
@@ -6620,7 +6783,110 @@ def build_modality_coverage_note(candidate_id: int, level: int) -> str:
     else:
         lines.append("- Ses metrikleri: TOPLANAMADI — realtime_events'te konuşma başlangıç/bitiş olayı yok; "
                      "yanıt gecikmesi / duraklama / konuşma-sessizlik oranı / söz kesme ölçülemedi.")
+    # B2 — L2/L3 sesli hatta sunucu tarafı soru-tekrarı tespiti (ses metrikleri bloğunun yanında).
+    try:
+        rep = detect_repeated_questions(candidate_id, level)
+        for r in rep:
+            lines.append(f"- ⚠️ Soru tekrarı: Mülakatçı \"{r['kriter']}\" konusunda {r['count']} kez ısrar etti"
+                         f"{' (' + r['span'] + ')' if r.get('span') else ''}; aday bu turlarda yeterli yanıt vermedi. "
+                         f"(Gözlem — puana etki etmez.)")
+    except Exception as e:
+        print(f"UYARI (B2 soru tekrarı c={candidate_id} L{level}): {type(e).__name__}: {e}")
     return "\n".join(lines)
+
+# ═══ B2 — SORU TEKRARI TESPİTİ (sunucu tarafı, L2/L3 sesli) ═══
+# L1'de [YENIDEN] etiketini sayan sunucu sayacı var; L2/L3 sesli hatta yok. Kayıtlı transkript
+# üzerinden art arda gelen mülakatçı sorularının kelime örtüşmesine bakarak "aynı soru N kez"
+# durumunu tespit eder. SES HATTINA DOKUNMAZ. PUANA ETKİ ETMEZ — yalnız gözlem.
+_QREPEAT_OVERLAP_THRESHOLD = 0.55   # ardışık mülakatçı soruları arasında anlamlı kelime Jaccard eşiği
+_QREPEAT_MIN_RUN = 3               # "2 denemeyi aşan" = aynı sorunun 3+ kez sorulması
+
+def _q_keywords(text: str) -> set:
+    return {w for w in _norm_name(text).split() if len(w) >= 4 and w not in _ANNOTATE_STOPWORDS}
+
+def _stem_overlap(a: set, b: set) -> int:
+    """Türkçe eklerini yok saymak için kaba kök eşleşmesi: iki kelimeden biri diğerinin >=5
+    harfli ön ekiyse eşleşmiş sayılır."""
+    hits = 0
+    for wa in a:
+        for wb in b:
+            if wa == wb or (len(wa) >= 5 and len(wb) >= 5 and (wa.startswith(wb[:5]) or wb.startswith(wa[:5]))):
+                hits += 1
+                break
+    return hits
+
+def detect_repeated_questions(candidate_id: int, level: int) -> list:
+    if level not in (2, 3):
+        return []
+    try:
+        db = get_db()
+        try:
+            iv = db.execute("SELECT messages, started_at FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+            pos_row = db.execute("SELECT position FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"UYARI (detect_repeated_questions fetch c={candidate_id}): {type(e).__name__}: {e}")
+        return []
+    if not iv:
+        return []
+    view = build_transcript_view(iv["messages"], level, iv["started_at"])
+    _crits = ((get_position(pos_row["position"]) if pos_row else None) or {}).get("criteria", [])
+    # kriter eşleştirme için ad + desc anahtar kelimeleri (sorular somut, kriter adları soyut)
+    crit_kw = [(c.get("name"), _q_keywords((c.get("name") or "") + " " + (c.get("desc") or "")))
+               for c in _crits if c.get("name")]
+
+    # mülakatçı sorularını sırayla al; her birine, arada gelen aday cevabının "boş/yetersiz" olup
+    # olmadığını iliştir.
+    q_items = []   # {ts, kw, bos}
+    rows = view
+    for idx, row in enumerate(rows):
+        if row["role"] != "mulakatci":
+            continue
+        txt = row["text"] or ""
+        if len(_q_keywords(txt)) < 2 or "?" not in txt and len(txt) < 15:
+            continue
+        # sonraki aday cevabı
+        nxt = next((r for r in rows[idx + 1:] if r["role"] == "aday"), None)
+        ans = (nxt["text"] if nxt else "") or ""
+        _al = ans.strip().lower()
+        aday_bos = (len(_al) < 12) or is_likely_hallucination(ans, "tr") or is_hallucination_marker_line(ans) \
+                   or bool(re.match(r"(anlamad|anlayamad|tekrar\s+ed|pardon|duyamad|efendim|bilmiyorum|geçelim)", _al))
+        q_items.append({"ts": row.get("ts") or "", "kw": _q_keywords(txt), "bos": aday_bos})
+
+    out = []
+    n = len(q_items)
+    used = [False] * n
+    for a in range(n):
+        if used[a] or not q_items[a]["kw"]:
+            continue
+        run = [a]
+        base = set(q_items[a]["kw"])
+        for b in range(a + 1, n):
+            kb = q_items[b]["kw"]
+            if not kb:
+                continue
+            inter = len(base & kb)
+            jacc = inter / max(1, len(base | kb))
+            if jacc >= _QREPEAT_OVERLAP_THRESHOLD:
+                run.append(b)
+                base |= kb
+            elif b - run[-1] > 2:
+                break
+        if len(run) >= _QREPEAT_MIN_RUN and sum(1 for k in run if q_items[k]["bos"]) >= len(run) - 1:
+            for k in run:
+                used[k] = True
+            # kriter eşleştir: run'ın kelimeleri hangi kriterin ad+desc anahtarlarıyla en çok örtüşüyor
+            best_crit, best_ov = None, 0
+            for cn, ck in crit_kw:
+                ov = _stem_overlap(base, ck)
+                if ov > best_ov:
+                    best_crit, best_ov = cn, ov
+            ts0 = q_items[run[0]]["ts"]
+            ts1 = q_items[run[-1]]["ts"]
+            span = f"[{ts0}]–[{ts1}]" if ts0 and ts1 else ""
+            out.append({"kriter": best_crit or "bir konu", "count": len(run), "span": span})
+    return out[:4]
 
 def build_l2_report_prompt(candidate, candidate_level: int, transcript: str,
                            criteria_coverage=None, extra_notes: str = "") -> str:
