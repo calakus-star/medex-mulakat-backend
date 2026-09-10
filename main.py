@@ -1148,6 +1148,25 @@ AI_PRICING_PER_1M = {
     ("anthropic", "claude-sonnet-4-6"): {"input": 3.0, "input_cached": 3.0,  "output": 15.0, "audio_input": 3.0,  "audio_input_cached": 3.0,  "audio_output": 15.0},
 }
 
+# MADDE 5 — token bazlı DEĞİL, dakika (transkripsiyon) / 1K karakter (TTS) bazlı fiyatlandırma.
+# AI_PRICING_PER_1M yapısına uymadıkları için ayrı tutulur; record_flat_usage bunları okur.
+# Elle bakımlı yaklaşık oranlar — gerçek fatura kaynağı değildir, model/fiyat değişince güncelle.
+AI_PRICING_FLAT = {
+    ("openai", "whisper-1"): {"unit": "minute",  "usd_per_unit": 0.006},   # $0.006 / dakika
+    ("openai", "tts-1"):     {"unit": "1k_char", "usd_per_unit": 0.015},    # $15 / 1M karakter
+    ("openai", "tts-1-hd"):  {"unit": "1k_char", "usd_per_unit": 0.030},
+}
+
+# MADDE 4 — rapor zinciri transkript kırpma tavanı. Ölçüm: 30 dk mülakat transkripti ~18-22k
+# karakter; L3 "derin" (~48 dk) talkatif adayda ~35-40k'ya çıkabiliyor. Önceki slice'lar
+# (rapor 30k / profil 26k / denetçi 20k) bu üst uçta transkriptin SONUNU (kapanış turları,
+# 'eklemek istediğiniz bir şey' cevabı, erken sonlandırma sözleri) kesip kanıt kaybına yol
+# açıyordu — özellikle denetçi [:20000] tipik bir derin mülakatı bile kesiyordu. Tek ortak
+# tavan 40k: tipik mülakatta zaten devreye girmez (kırpma yok), en uzun mülakatta bile
+# kapanış turlarını korur. Maliyeti: nadir uzun mülakatta 2-3 çağrıya ~+6k token (~$0.05) —
+# kanıt bütünlüğü için kabul edilir (bkz. görev Madde 4: kanıt kaybına yol açan kırpma YAPMA).
+TRANSCRIPT_PROMPT_MAX_CHARS = 40000
+
 def _estimate_cost_usd(provider: str, model: str, input_tokens: int, output_tokens: int,
                         audio_input_tokens: int, audio_output_tokens: int,
                         cached_input_tokens: int = 0, cached_audio_input_tokens: int = 0) -> float:
@@ -1287,6 +1306,132 @@ def record_realtime_events(candidate_id: int, level: int, events: Optional[list]
         db.commit(); db.close()
     except Exception as e:
         print(f"UYARI (realtime_events kaydı yazılamadı): {type(e).__name__}: {e}")
+
+def record_flat_usage(candidate_id: int, level: Optional[int], provider: str, model: str, action: str,
+                      minutes: float = 0.0, chars: int = 0, raw: Optional[dict] = None) -> None:
+    """MADDE 5 — dakika/karakter bazlı AI kullanımını (Whisper transkripsiyon, OpenAI TTS)
+    ai_usage_logs'a AYRI SATIR olarak yazar: token sütunları 0, estimated_cost_usd dolu.
+    interviews.total_*_tokens'a DOKUNMAZ (bunlar token değil). Görünürlük amaçlı; tasarruf değil.
+    Hata mülakat akışını bozmaz."""
+    try:
+        rate = AI_PRICING_FLAT.get((provider, model)) or {}
+        if rate.get("unit") == "minute":
+            units = max(0.0, float(minutes or 0))
+        elif rate.get("unit") == "1k_char":
+            units = max(0.0, (chars or 0) / 1000.0)
+        else:
+            units = 0.0
+        cost_usd = round(units * float(rate.get("usd_per_unit", 0.0)), 4)
+        db = get_db()
+        db.execute("""
+            INSERT INTO ai_usage_logs
+            (candidate_id, level, provider, model, action, input_tokens, output_tokens, audio_input_tokens, audio_output_tokens,
+             cached_input_tokens, cached_audio_input_tokens, total_tokens, estimated_cost_usd, raw_json)
+            VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, ?, ?)
+        """, (candidate_id, level, provider, model, action, cost_usd,
+              json.dumps({**(raw or {}), "billed_minutes": round(float(minutes or 0), 3),
+                          "billed_chars": int(chars or 0), "rate": rate}, ensure_ascii=False)[:8000]))
+        db.commit(); db.close()
+        print(f"[AI_USAGE flat] c={candidate_id} L{level} {provider}/{model} {action} min={float(minutes or 0):.2f} chars={chars} ~${cost_usd}")
+    except Exception as e:
+        print(f"UYARI (record_flat_usage c={candidate_id} L{level} {action}): {type(e).__name__}: {e}")
+
+def _realtime_candidate_speech_seconds(candidate_id: int, level: int) -> float:
+    """realtime_events'teki speech_started/stopped çiftlerinden adayın toplam konuşma süresini
+    (= Whisper'ın realtime input_audio_transcription ile transkript ettiği süre) saniye verir.
+    compute_voice_metrics'in aksine cevapsız/halüsinasyon turları da dahildir — Whisper onları
+    da transkript eder, dolayısıyla maliyeti de doğar."""
+    try:
+        db = get_db()
+        rows = db.execute(
+            "SELECT event_type, elapsed_ms FROM realtime_events WHERE candidate_id=? AND level=? "
+            "AND event_type IN ('input_audio_buffer.speech_started','input_audio_buffer.speech_stopped') "
+            "ORDER BY elapsed_ms ASC, id ASC", (candidate_id, level)
+        ).fetchall()
+        db.close()
+    except Exception as e:
+        print(f"UYARI (_realtime_candidate_speech_seconds c={candidate_id}): {type(e).__name__}: {e}")
+        return 0.0
+    starts = [_safe_int(r["elapsed_ms"]) for r in rows if str(r["event_type"]).endswith("speech_started")]
+    stops = [_safe_int(r["elapsed_ms"]) for r in rows if str(r["event_type"]).endswith("speech_stopped")]
+    total_ms, si = 0, 0
+    for s in starts:
+        while si < len(stops) and stops[si] < s:
+            si += 1
+        if si < len(stops):
+            total_ms += max(0, stops[si] - s)
+            si += 1
+    return round(total_ms / 1000.0, 1)
+
+def backfill_realtime_cost_from_events(candidate_id: int, level: int, model: str) -> None:
+    """MADDE 6 — Realtime maliyeti tamamen frontend'in usage_delta'sına bağlı; heartbeat hatası
+    veya sekmenin erken kapanması durumunda o pay HİÇ kaydedilmez. Bu fonksiyon realtime_events'teki
+    ham response.done usage'ından TOPLAMI çıkarır, ai_usage_logs'ta kayıtlı realtime toplamıyla
+    karşılaştırır ve ciddi bir eksik varsa FARKI 'realtime_backfill' action'ıyla yazar.
+    ÇİFT SAYIM KORUMASI: (a) zaten bir realtime_backfill satırı varsa hiç çalışmaz;
+    (b) tam toplamı değil yalnızca (events − logged) eksik farkını yazar;
+    (c) önemsiz farkı (ölçüm gürültüsü) yok sayar."""
+    db = get_db()
+    try:
+        if db.execute("SELECT 1 FROM ai_usage_logs WHERE candidate_id=? AND level=? AND action='realtime_backfill' LIMIT 1",
+                      (candidate_id, level)).fetchone():
+            return
+        ev_rows = db.execute("SELECT event_data FROM realtime_events WHERE candidate_id=? AND level=? AND event_type='response.done'",
+                             (candidate_id, level)).fetchall()
+        # NOT: LIKE deseni PARAMETRE olarak veriliyor (SQL'e gömülü '%' değil) — psycopg3'te
+        # gömülü literal '%' parametreli sorguda sorun çıkarır; sqlite'ta da bu biçim güvenli.
+        logged = db.execute(
+            "SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o, "
+            "COALESCE(SUM(audio_input_tokens),0) ai, COALESCE(SUM(audio_output_tokens),0) ao "
+            "FROM ai_usage_logs WHERE candidate_id=? AND level=? AND provider='openai' AND action LIKE ?",
+            (candidate_id, level, "realtime%")).fetchone()
+    except Exception as e:
+        print(f"UYARI (backfill_realtime_cost_from_events fetch c={candidate_id}): {type(e).__name__}: {e}")
+        return
+    finally:
+        db.close()
+
+    ev = {"i": 0, "o": 0, "ai": 0, "ao": 0, "ci": 0, "cai": 0}
+    for r in ev_rows:
+        try:
+            u = (json.loads(r["event_data"]) or {}).get("usage") or {}
+        except Exception:
+            continue
+        din = u.get("input_token_details") or u.get("input_tokens_details") or {}
+        dout = u.get("output_token_details") or u.get("output_tokens_details") or {}
+        cdet = din.get("cached_tokens_details") or din.get("cached_tokens_detail") or {}
+        it = _safe_int(u.get("input_tokens")) or _safe_int(u.get("prompt_tokens"))
+        ot = _safe_int(u.get("output_tokens")) or _safe_int(u.get("completion_tokens"))
+        a_in, a_out = _safe_int(din.get("audio_tokens")), _safe_int(dout.get("audio_tokens"))
+        c_tot, c_aud = _safe_int(din.get("cached_tokens")), _safe_int(cdet.get("audio_tokens"))
+        c_txt = _safe_int(cdet.get("text_tokens")) if cdet.get("text_tokens") is not None else max(0, c_tot - c_aud)
+        ev["i"] += max(0, it - a_in)
+        ev["o"] += max(0, ot - a_out)
+        ev["ai"] += a_in
+        ev["ao"] += a_out
+        ev["ci"] += c_txt
+        ev["cai"] += c_aud
+    ev_total = ev["i"] + ev["o"] + ev["ai"] + ev["ao"]
+    if ev_total <= 0:
+        return
+    miss_i = max(0, ev["i"] - _safe_int(logged["i"]))
+    miss_o = max(0, ev["o"] - _safe_int(logged["o"]))
+    miss_ai = max(0, ev["ai"] - _safe_int(logged["ai"]))
+    miss_ao = max(0, ev["ao"] - _safe_int(logged["ao"]))
+    missing_total = miss_i + miss_o + miss_ai + miss_ao
+    if missing_total < max(2000, int(ev_total * 0.10)):
+        return  # önemsiz fark — çift sayım riskine değmez
+    cached_i, cached_ai = min(miss_i, ev["ci"]), min(miss_ai, ev["cai"])
+    record_ai_usage(candidate_id, level, "openai", model, "realtime_backfill",
+                    input_tokens=miss_i, output_tokens=miss_o,
+                    audio_input_tokens=miss_ai, audio_output_tokens=miss_ao,
+                    cached_input_tokens=cached_i, cached_audio_input_tokens=cached_ai,
+                    raw={"source": "realtime_events response.done yedek kaydı",
+                         "events_total": ev,
+                         "logged_total": {k: _safe_int(logged[k]) for k in ("i", "o", "ai", "ao")},
+                         "missing_written": {"i": miss_i, "o": miss_o, "ai": miss_ai, "ao": miss_ao}})
+    print(f"[REALTIME_BACKFILL] c={candidate_id} L{level} eksik yazıldı: "
+          f"{miss_i + miss_o} metin + {miss_ai} ses-in + {miss_ao} ses-out token")
 
 def save_interview_state(db, candidate_id: int, messages: list, level: int = 1):
     compact = build_compact_memory(messages)
@@ -2175,10 +2320,7 @@ ADAYI OKU, UYUM SAĞLA:
 - Aday açıkça kendi mesleki alanının bu pozisyondan FARKLI olduğunu söylerse ısrar etme: alanını kısaca doğrula ve DEĞERLENDİRMEYİ ADAYIN GERÇEK ALANI için yürüt; bunu "pozisyon uyumsuzluğu" olarak nota geç.
 - Uzun sessizlik ya da anlamsız/kopuk girdi gelirse önce TEKNİK TEYİT iste: "Sesiniz bana net gelmiyor gibi, beni duyabiliyor musunuz?" — cevap gelince kaldığın yerden devam et.
 
-SÜRE VE AKIŞ BİLGİSİ (adaya kısaca haber ver):
-- Mülakatın yaklaşık yarısına gelindiğinde: "Yaklaşık yarısına geldik."
-- Son sorulara geçerken: "Son birkaç soruya geçiyoruz."
-- Kapanışa geçeceğini önceden söyle: "Birazdan mülakatı tamamlıyor olacağız."
+SÜRE VE AKIŞ BİLGİSİ: Adayın kendini konumlandırabilmesi için akışın birkaç doğal noktasında ÇOK KISA bir bilgi ver — "yaklaşık yarısındayız", "son birkaç soru", "birazdan tamamlıyoruz" gibi tek bir doğal ifade yeterli; aynı bilgiyi üç ayrı açıklayıcı cümleyle verme.
 
 ADAYLA UYUM (kısıt yok):
 - Soruyu tekrar isterse tekrar et, gerekçe sorma. Açıklama/örnek/yeniden ifade isterse ver.
@@ -3658,7 +3800,14 @@ def interview_chat(data: ChatMessage, background_tasks: BackgroundTasks, payload
     # Not: q_count tavanı level'a göre yükseltildi çünkü derinleştirme/netleştirme turları da bu sayaca dahil oluyor.
     # Süre bazlı bitiş asıl tetikleyici; sabit soru tavanı sadece maliyet/uzunluk güvenlik ağı.
     # Level 3 adaptif: elapsed eşiği aşılsa da minimum soru sayısı daha yüksek tutulur (daha geç kesilir).
-    should_finish_condition = (data.elapsed_seconds > lvl_cfg["minutes"] * 60 and q_count >= lvl_cfg["min_q"]) or q_count >= lvl_cfg["max_q"]
+    should_finish_condition = (
+        (data.elapsed_seconds > lvl_cfg["minutes"] * 60 and q_count >= lvl_cfg["min_q"])
+        or q_count >= lvl_cfg["max_q"]
+        # MADDE 3 — metin akışı üst süre sınırı (L1/L3-metin): hedef sürenin 3 katını aşan oturum
+        # min_q sağlanmasa bile kapanışa girer. Metin turu ucuz olduğu için tavan yüksek tutuldu;
+        # gerçek bir mülakat bu sınıra ulaşmaz, yalnızca saatlerce açık kalan oturumları bağlar.
+        or data.elapsed_seconds > lvl_cfg["minutes"] * 60 * 3
+    )
 
     # İKİ AŞAMALI KAPANIŞ: bitiş şartı oluştuğunda direkt rapor üretip kesmek yerine,
     # önce bir kapanış/son-söz sorusu sorulur (closing_asked=0 -> 1), aday buna cevap
@@ -4814,7 +4963,7 @@ DUSUK_PUAN: <5. maddedeki kriter adları, virgülle; yoksa: yok>
 İLKE: Kanıt yoksa ne lehte ne aleyhte varsayım yapma. Modalite kanıtları (mimik/ses) puanı DEĞİŞTİRMEZ; yalnızca destekleyici. Belirgin bir sorun yoksa "Belirgin bir görüş ayrılığı yok." yaz (etiketleri yine ekle).
 
 === TRANSKRİPT ===
-{(transcript_text or '')[:20000]}
+{(transcript_text or '')[:TRANSCRIPT_PROMPT_MAX_CHARS]}
 
 === RAPOR TASLAĞI ===
 {(draft_report or '')[:12000]}
@@ -4895,7 +5044,7 @@ def build_independent_profile_prompt(candidate: dict, transcript: str) -> str:
 Eksik kriter iki türlüdür: `Değerlendirilmedi (sorulmadı) — <gerekçe>` (paydayı etkilemez) ve `Yetersiz (soruldu, veri alınamadı) — <gerekçe>` (0 puan, paydada kalır).
 
 TRANSKRİPT:
-{(transcript or '')[:26000]}
+{(transcript or '')[:TRANSCRIPT_PROMPT_MAX_CHARS]}
 
 Çıktı yalnızca şu bölüm olsun (başka hiçbir şey yazma, ---RAPOR--- / ---RAPORSON--- etiketi KOYMA):
 {p2_body}"""
@@ -5179,7 +5328,7 @@ def run_deferred_finish_job(candidate_id: int, level: int, regen: bool = False):
                                               iv["started_at"] if iv and "started_at" in iv.keys() else None)
                 ttext = transcript_to_text(tview)
                 if ttext.strip():
-                    extra_blocks.append("=== TAM TRANSKRİPT (rapor bu ham konuşmaya dayanmalı) ===\n" + ttext[:22000])
+                    extra_blocks.append("=== TAM TRANSKRİPT (rapor bu ham konuşmaya dayanmalı) ===\n" + ttext[:TRANSCRIPT_PROMPT_MAX_CHARS])
             except Exception as e:
                 print(f"UYARI (deferred transkript bloğu c={candidate_id}): {type(e).__name__}: {e}")
         try:
@@ -5856,9 +6005,10 @@ async def voice_transcribe(file: UploadFile = File(...), payload=Depends(verify_
 
     candidate_id = payload["candidate_id"]
     db = get_db()
-    candidate = db.execute("SELECT interview_language FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+    candidate = db.execute("SELECT interview_language, level FROM candidates WHERE id=?", (candidate_id,)).fetchone()
     db.close()
     lang = (candidate["interview_language"] if candidate else None) or "tr"
+    _cand_level = (candidate["level"] if candidate else None) or 1
 
     try:
         audio_bytes = await file.read()
@@ -5867,11 +6017,19 @@ async def voice_transcribe(file: UploadFile = File(...), payload=Depends(verify_
         resp = await asyncio.to_thread(
             openai_call, "POST", "https://api.openai.com/v1/audio/transcriptions",
             files={"file": (file.filename or "audio.webm", audio_bytes, file.content_type or "audio/webm")},
-            data={"model": "whisper-1", "language": lang},
+            data={"model": "whisper-1", "language": lang, "response_format": "verbose_json"},
             timeout=30.0, step="voice_transcribe", severity="user", retry=True,
             context={"candidate_id": candidate_id},
         )
         result = resp.json()
+        # MADDE 5 — Whisper maliyeti görünürlüğü: verbose_json 'duration' (saniye) alanını verir.
+        try:
+            _dur = float(result.get("duration") or 0)
+            if _dur > 0:
+                record_flat_usage(candidate_id, _cand_level, "openai", "whisper-1", "voice_transcribe",
+                                  minutes=_dur / 60.0, raw={"duration_seconds": round(_dur, 1)})
+        except Exception as _e:
+            print(f"UYARI (voice_transcribe maliyet kaydı c={candidate_id}): {type(_e).__name__}: {_e}")
         return {"text": (result.get("text") or "").strip()}
     except AIError as e:
         raise ai_http_exception(e)
@@ -5893,13 +6051,27 @@ async def voice_speak(data: VoiceSpeakRequest, payload=Depends(verify_token)):
         raise HTTPException(status_code=400, detail="Okunacak metin boş")
 
     voice = OPENAI_TTS_VOICE_BY_LANG.get(data.language or "tr", "alloy")
+    _tts_text = data.text[:3000]
     try:
         resp = await asyncio.to_thread(
             openai_call, "POST", "https://api.openai.com/v1/audio/speech",
-            json_body={"model": "tts-1", "voice": voice, "input": data.text[:3000], "response_format": "mp3"},
+            json_body={"model": "tts-1", "voice": voice, "input": _tts_text, "response_format": "mp3"},
             timeout=30.0, step="voice_speak", severity="user", retry=True,
             context={"candidate_id": payload.get("candidate_id")},
         )
+        # MADDE 5 — TTS maliyeti görünürlüğü: karakter bazlı ($15 / 1M karakter).
+        try:
+            _cid = payload.get("candidate_id")
+            _lvl = None
+            if _cid:
+                _db = get_db()
+                _cr = _db.execute("SELECT level FROM candidates WHERE id=?", (_cid,)).fetchone()
+                _db.close()
+                _lvl = (_cr["level"] if _cr else None) or 1
+            record_flat_usage(_cid, _lvl, "openai", "tts-1", "voice_speak", chars=len(_tts_text),
+                              raw={"chars": len(_tts_text)})
+        except Exception as _e:
+            print(f"UYARI (voice_speak maliyet kaydı): {type(_e).__name__}: {_e}")
         return StreamingResponse(io.BytesIO(resp.content), media_type="audio/mpeg")
     except AIError as e:
         raise ai_http_exception(e)
@@ -5942,6 +6114,22 @@ class RealtimeSyncRequest(BaseModel):
 
 MIN_L2_DURATION_SECONDS = 90  # Güvenilir rapor için asgari görüşme süresi
 MIN_L2_ANSWERED_COUNT = 3  # En az üç gerçek aday cevabı olmadan puan/ret üretme
+
+# MADDE 1 — YANIT BAŞINA TOKEN TAVANI. Realtime session'da mülakatçının TEK yanıtta üretebileceği
+# çıktı (metin + ses) üst sınırı. Ölçülmüş referans: 12 dk L3'te ~10.000 ses-çıkışı token'ı;
+# mülakatçı turu başına ortalama ~700-1000, sözlü örnekli en zengin meşru tur ~1500-2000 token.
+# 4096 = normal turun ~4 katı, zengin turun ~2 katı üstünde — meşru hiçbir tur buna değmez,
+# kesilme riski YOK. Yalnızca anormal uzun monologları (bozuk model / 3-8k token) tavanlar.
+# Gerçek transkript ölçümü yapılamadı (yerel DB'de kayıtlı mülakat yok); değer bilinçli olarak
+# yüksek seçildi çünkü kesilme = aday bozuk cümle duyar = KABUL EDİLEMEZ.
+REALTIME_MAX_RESPONSE_TOKENS = 4096
+
+def realtime_safe_limit_seconds(target_seconds: int) -> int:
+    """MADDE 3 — her seviye/derinlik için sesli mülakat üst süre sınırı. Hedef sürenin 1.5 katı
+    (doğal akışı kesmez), 12 dk alt ve 55 dk üst sınırla (OpenAI Realtime platform tavanı 60 dk).
+    Sınıra ulaşınca frontend mülakatçıya doğal kapanış talimatı verir (ani kesme YOK), gecikmeli
+    zorla bitiş devreye girer — mevcut L3 mekanizmasının aynısı, artık L2'de de aktif."""
+    return int(min(55 * 60, max(12 * 60, round((target_seconds or 0) * 1.5))))
 
 @app.post("/api/realtime/session")
 async def create_realtime_session(payload=Depends(verify_token)):
@@ -6007,6 +6195,9 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "type": "realtime",
             "model": realtime_model,
             "instructions": instructions,
+            # MADDE 1 — mülakatçının tek yanıtta üretebileceği çıktı (metin+ses) tavanı; anormal
+            # uzun monologları keser, normal/örnekli tur çok altında kalır (bkz. sabit tanımı).
+            "max_response_output_tokens": REALTIME_MAX_RESPONSE_TOKENS,
             "audio": {
                 "output": {"voice": OPENAI_REALTIME_VOICE},
                 "input": {
@@ -6092,6 +6283,9 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "criteria_names": criteria_names_list,
             # FAZ D: mimik kare örneklemesi bu planlanan süreye eşit dağıtılır (aralik = target_seconds/24).
             "target_seconds": depth_cfg["minutes"] * 60,
+            # MADDE 3: sesli mülakat üst süre sınırı (L2 + L3). Frontend bu değere ulaşınca AI'a
+            # doğal kapanış talimatı verir; gecikmeli zorla bitiş devreye girer.
+            "safe_limit_seconds": realtime_safe_limit_seconds(depth_cfg["minutes"] * 60),
         }
     except AIError as e:
         raise ai_http_exception(e)
@@ -7064,7 +7258,7 @@ ADAYIN CV'Sİ:
 {cv_for_report}{ai_note_section}{coverage_block}{unanswered_block}{extra_notes}
 
 TRANSKRİPT:
-{(transcript or '')[:30000]}
+{(transcript or '')[:TRANSCRIPT_PROMPT_MAX_CHARS]}
 
 TEMEL KURALLAR:
 - Rapor {report_lang} dilinde yazılacak.
@@ -7141,6 +7335,25 @@ async def create_l2_report(data: RealtimeReportRequest, background_tasks: Backgr
     if data.realtime_usage:
         record_realtime_usage_summary(effective_candidate_id, candidate_level, get_realtime_model(candidate_level), data.realtime_usage, action="realtime_final_frontend")
     record_realtime_events(effective_candidate_id, candidate_level, data.events)
+
+    # MADDE 6 — Realtime maliyet yedek kaydı: frontend usage_delta'sı eksikse (heartbeat hatası /
+    # sekme erken kapandı) realtime_events'teki ham response.done usage'ından farkı yaz. Çift
+    # sayım koruması fonksiyon içinde (realtime_backfill satırı + yalnızca eksik fark).
+    try:
+        backfill_realtime_cost_from_events(effective_candidate_id, candidate_level, get_realtime_model(candidate_level))
+    except Exception as e:
+        print(f"UYARI (realtime backfill c={effective_candidate_id}): {type(e).__name__}: {e}")
+
+    # MADDE 5 — Whisper (realtime input_audio_transcription) maliyeti görünürlüğü: adayın
+    # transkript edilen konuşma süresi kadar dakika bazlı ayrı kayıt.
+    try:
+        _spk_sec = _realtime_candidate_speech_seconds(effective_candidate_id, candidate_level)
+        if _spk_sec > 0:
+            record_flat_usage(effective_candidate_id, candidate_level, "openai", "whisper-1",
+                              "realtime_transcription", minutes=_spk_sec / 60.0,
+                              raw={"source": "realtime_events speech_started/stopped", "speech_seconds": _spk_sec})
+    except Exception as e:
+        print(f"UYARI (whisper maliyet kaydı c={effective_candidate_id}): {type(e).__name__}: {e}")
 
     # KALEM 1 — SUNUCU tarafı halüsinasyon filtresi (frontend filtresi tek savunma hattı olmasın).
     _lang = (candidate["interview_language"] if "interview_language" in candidate.keys() else "tr") or "tr"
@@ -7906,7 +8119,7 @@ def regenerate_report(candidate_id: int, background_tasks: BackgroundTasks, leve
                                    email=(cand["email"] if "email" in cand.keys() else None))
         prompt = (f"GÖREV: Aşağıdaki tam transkriptten mülakatı bitir ve raporu üret (yönetici talebiyle YENİDEN üretim). "
                   f"Elindeki veriyle adil değerlendir; sorulmamış kriterleri 'değerlendirilemedi' işaretle. [MÜLAKATBİTTİ] etiketini kullan.{_regen_note_txt}\n\n"
-                  f"=== TAM TRANSKRİPT ===\n{clean_transcript[:24000]}")
+                  f"=== TAM TRANSKRİPT ===\n{clean_transcript[:TRANSCRIPT_PROMPT_MAX_CHARS]}")
         prov, mdl = "claude", "claude-sonnet-4-6"
 
     # EK — completed_at (orijinal bitiş saati) EZİLMEZ. run_deferred_finish_job regen=True ile
