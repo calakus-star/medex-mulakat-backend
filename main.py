@@ -1554,6 +1554,56 @@ def _nearest_snapshot_id(candidate_id: int, elapsed_ms) -> Optional[int]:
     best = min(rows, key=lambda r: abs((_safe_int(r["elapsed_ms"]) or 0) - _safe_int(elapsed_ms)))
     return best["id"]
 
+# GÖREV 3 — kamera DOĞRULAMA karesi seçimi.
+#   L1 → 0 (yazışmalı mülakat, kamera yok)   L2 → 4   L3 → 6
+# Kaynak havuz = MİMİK analizi kareleri (reason='mimic_sample'); ayrı bir doğrulama seti YOK.
+# Kareler mülakat süresine EŞİT dilimlere bölünüp her dilimden bir kare (dilim ortasına en yakın)
+# alınır — tek dakikada toplanma sorunu ortadan kalkar.
+VERIFICATION_FRAME_COUNT = {1: 0, 2: 4, 3: 6}
+
+def select_verification_frames(candidate_id: int, level: Optional[int]) -> list:
+    """Mimik havuzundan süreye yayılmış N doğrulama karesi seçer. Dönüş: [{id, image_base64,
+    captured_at, elapsed_ms}] — elapsed_ms artan sırada. Mimik karesi yoksa eski doğrulama
+    setine (reason<>'mimic_sample') düşer."""
+    n = VERIFICATION_FRAME_COUNT.get(level or 1, 4)
+    if n <= 0:
+        return []
+    db = get_db()
+    try:
+        pool = db.execute(
+            "SELECT id, image_base64, captured_at, elapsed_ms FROM snapshots "
+            "WHERE candidate_id=? AND reason='mimic_sample' ORDER BY COALESCE(elapsed_ms,0) ASC, id ASC",
+            (candidate_id,)
+        ).fetchall()
+        if not pool:
+            pool = db.execute(
+                "SELECT id, image_base64, captured_at, elapsed_ms FROM snapshots "
+                "WHERE candidate_id=? AND (reason IS NULL OR reason<>'mimic_sample') "
+                "ORDER BY COALESCE(elapsed_ms,0) ASC, captured_at ASC, id ASC",
+                (candidate_id,)
+            ).fetchall()
+    finally:
+        db.close()
+    rows = [dict(r) for r in pool]
+    if not rows:
+        return []
+    if len(rows) <= n:
+        return rows
+    lo = _safe_int(rows[0].get("elapsed_ms")) or 0
+    hi = _safe_int(rows[-1].get("elapsed_ms")) or (lo + 1)
+    span = max(1, hi - lo)
+    picked, used = [], set()
+    for k in range(n):
+        target = lo + span * (k + 0.5) / n           # k. dilimin ORTASI
+        cand = min((r for i, r in enumerate(rows) if i not in used),
+                   key=lambda r: abs((_safe_int(r.get("elapsed_ms")) or 0) - target), default=None)
+        if cand is None:
+            break
+        used.add(rows.index(cand))
+        picked.append(cand)
+    picked.sort(key=lambda r: _safe_int(r.get("elapsed_ms")) or 0)
+    return picked
+
 def _append_result_event(candidate_id: int, level: int, event: dict, skip_if_any: bool = False) -> None:
     """interviews.result_events_json dizisine yapılandırılmış bir olay ekler. En iyi çaba;
     hata olursa mülakat/rapor akışını bozmaz. skip_if_any=True ise zaten kayıt varsa hiçbir
@@ -5815,9 +5865,9 @@ def save_snapshot(data: SnapshotData, payload=Depends(verify_token), db=Depends(
     # FAZ D: doğrulama kareleri (kamera kanıtı — PDF/panel) ile mimik analiz kareleri AYRI sayılır
     # ve AYRI üst sınıra tabidir; biri diğerinin kotasını yemez.
     if is_mimic:
-        cap, count_filter = 24, "reason='mimic_sample'"
+        cap, count_filter = 32, "reason='mimic_sample'"   # GÖREV 3.4 — 24→32 üst sınır (kısa mülakatta bile yeterli havuz)
     else:
-        cap, count_filter = 4, "(reason IS NULL OR reason<>'mimic_sample')"
+        cap, count_filter = 6, "(reason IS NULL OR reason<>'mimic_sample')"   # eski fallback seti
 
     existing_count = db.execute(
         f"SELECT COUNT(*) as c FROM snapshots WHERE candidate_id=? AND {count_filter}", (data.candidate_id,)
@@ -7336,14 +7386,16 @@ async def create_l2_report(data: RealtimeReportRequest, background_tasks: Backgr
     }
 
 @app.get("/api/admin/snapshots/{candidate_id}")
-def get_snapshots(candidate_id: int, payload=Depends(verify_admin), db=Depends(db_dep)):
-    # FAZ D: mimik analiz kareleri (reason='mimic_sample') panelde/PDF'te GÖSTERİLMEZ — bunlar
-    # yalnızca arka plan analizi içindir; "4/4 doğrulama karesi" görünümü bozulmasın.
-    rows = db.execute(
-        "SELECT id, image_base64, captured_at FROM snapshots WHERE candidate_id=? AND (reason IS NULL OR reason<>'mimic_sample') ORDER BY captured_at ASC",
-        (candidate_id,)
-    ).fetchall()
-    return [{"id": r["id"], "image_base64": r["image_base64"], "captured_at": r["captured_at"]} for r in rows]
+def get_snapshots(candidate_id: int, level: Optional[int] = None, payload=Depends(verify_admin), db=Depends(db_dep)):
+    # GÖREV 3 — doğrulama kareleri MİMİK havuzundan, mülakat süresine yayılmış olarak seçilir
+    # (L1=0, L2=4, L3=6). Ayrı bir doğrulama seti kullanılmaz.
+    lvl = level
+    if lvl is None:
+        cr = db.execute("SELECT level FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+        lvl = (cr["level"] if cr else None) or 1
+    frames = select_verification_frames(candidate_id, lvl)
+    return [{"id": r["id"], "image_base64": r["image_base64"], "captured_at": r.get("captured_at"),
+             "elapsed_ms": r.get("elapsed_ms")} for r in frames]
 
 
 # ---- PDF Report ----
@@ -7671,32 +7723,40 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
             story.append(Paragraph(f"<font size=7 color='#64748b'>{ptxt(stamp)}</font><b>{who}:</b> {ptxt(row['text'])}", styles["BodyWrap"]))
             story.append(Spacer(1, 2))
 
-    story.append(PageBreak())
-    story.append(Paragraph(f"Kamera Doğrulama Kareleri ({len(snapshots[:4])}/4)", styles["Section"]))
-    if not snapshots:
-        story.append(Paragraph("Bu mülakat için kayıtlı kamera karesi bulunamadı.", styles["BodyWrap"]))
+    _lvl = interview.get("level") or 1
+    _want = VERIFICATION_FRAME_COUNT.get(_lvl, 4)
+    if _lvl == 1 or _want == 0:
+        # GÖREV 3.1 — Level 1 yazışmalı mülakattır, kamera yoktur; bu bölüm hiç basılmaz.
+        pass
     else:
-        rows = []
-        row = []
-        for idx, snap in enumerate(snapshots[:4], start=1):
-            try:
-                data_url = snap.get("image_base64", "")
-                raw = data_url.split(",", 1)[1] if "," in data_url else data_url
-                img_bytes = base64.b64decode(raw)
-                img = Image(io.BytesIO(img_bytes), width=7.4*cm, height=5.4*cm)
-                cell = [Paragraph(f"<b>Kare {idx}</b><br/><font size=7>{ptxt(format_pdf_datetime(snap.get('captured_at')))}</font>", styles["Small"]), img]
-                row.append(cell)
-                if len(row) == 2:
-                    rows.append(row); row = []
-            except Exception as e:
-                print(f"UYARI (PDF kamera karesi eklenemedi, kare {idx}): {type(e).__name__}: {e}")
-        if row:
-            row.append("")
-            rows.append(row)
-        if rows:
-            img_table = Table(rows, colWidths=[8.4*cm, 8.4*cm])
-            img_table.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP"), ("GRID", (0,0), (-1,-1), 0.25, rl_colors.HexColor("#e2e8f0")), ("PADDING", (0,0), (-1,-1), 8)]))
-            story.append(img_table)
+        story.append(PageBreak())
+        story.append(Paragraph(f"Kamera Doğrulama Kareleri ({len(snapshots[:_want])}/{_want} — mimik havuzundan, mülakat süresine yayılmış)", styles["Section"]))
+        if not snapshots:
+            story.append(Paragraph("Bu mülakat için kayıtlı kamera karesi bulunamadı.", styles["BodyWrap"]))
+        else:
+            rows = []
+            row = []
+            for idx, snap in enumerate(snapshots[:_want], start=1):
+                try:
+                    data_url = snap.get("image_base64", "")
+                    raw = data_url.split(",", 1)[1] if "," in data_url else data_url
+                    img_bytes = base64.b64decode(raw)
+                    img = Image(io.BytesIO(img_bytes), width=7.4*cm, height=5.4*cm)
+                    _ems = _safe_int(snap.get("elapsed_ms"))
+                    _mmss = f" · {_ems // 60000}:{(_ems // 1000) % 60:02d}. dk" if _ems else ""
+                    cell = [Paragraph(f"<b>Kare {idx}</b>{_mmss}<br/><font size=7>{ptxt(format_pdf_datetime(snap.get('captured_at')))}</font>", styles["Small"]), img]
+                    row.append(cell)
+                    if len(row) == 2:
+                        rows.append(row); row = []
+                except Exception as e:
+                    print(f"UYARI (PDF kamera karesi eklenemedi, kare {idx}): {type(e).__name__}: {e}")
+            if row:
+                row.append("")
+                rows.append(row)
+            if rows:
+                img_table = Table(rows, colWidths=[8.4*cm, 8.4*cm])
+                img_table.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP"), ("GRID", (0,0), (-1,-1), 0.25, rl_colors.HexColor("#e2e8f0")), ("PADDING", (0,0), (-1,-1), 8)]))
+                story.append(img_table)
 
     # KALEM 5 — teknik not (yalnız yönetici PDF'i): token kesilmesi vb.
     if interview.get("report_tech_note"):
@@ -7719,7 +7779,8 @@ def download_interview_pdf(candidate_id: int, level: Optional[int] = None, paylo
     candidate = db.execute("SELECT * FROM candidates WHERE id=? AND org_id=?", (candidate_id, scoped_org_id)).fetchone()
     target_level = level if level is not None else ((candidate["level"] or 1) if candidate else 1)
     interview = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, target_level)).fetchone()
-    snapshots = db.execute("SELECT id, image_base64, captured_at FROM snapshots WHERE candidate_id=? AND (reason IS NULL OR reason<>'mimic_sample') ORDER BY captured_at ASC", (candidate_id,)).fetchall()
+    # GÖREV 3 — doğrulama kareleri: mimik havuzundan, süreye yayılmış, seviye bazlı (L1=0, L2=4, L3=6)
+    snapshots = select_verification_frames(candidate_id, target_level)
     if not candidate or not interview:
         raise HTTPException(status_code=404, detail="Rapor bulunamadı")
 
