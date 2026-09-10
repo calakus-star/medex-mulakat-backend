@@ -2462,6 +2462,27 @@ CRITERION_SCORING_RULE = (
     "- Bu kural POZİSYON (PUAN 1) ve PROFİL (PUAN 2) tablolarının İKİSİ için de geçerlidir."
 )
 
+# TUR 2 / GÖREV B — AÇIK PUANLAMA RUBRİĞİ. Amaç puanı yükseltmek/düşürmek değil, KANITA BAĞLAMAK.
+# İki çalıştırma arasında aynı transkriptte puanların gerekçesiz oynamasını (69→80, Süreç Yönetimi
+# 5→10/10) önler. Bantlar kriterden BAĞIMSIZ geneldir; tam puan için kanıt zorunluluğu KESİN.
+SCORING_RUBRIC = (
+    "PUANLAMA RUBRİĞİ (KESİN — her PUAN 1 ve PUAN 2 kriteri için uygula):\n"
+    "- TAM PUANA YAKIN (tavanın %85-100'ü): aday bu kriterde transkriptten EN AZ İKİ ayrı [dk] "
+    "damgalı somut örnek verdi, sistematik/yapılandırılmış bir yaklaşım gösterdi VE en az bir "
+    "istisna/zor durumu doğru yönetti. Bu üç şart birlikte yoksa tam puana yakın VERME.\n"
+    "- ORTA (tavanın %45-70'i): genel prensibi/adımları biliyor, en az bir somut örnek var ama "
+    "örnekler sınırlı, derinlik veya istisna yönetimi zayıf.\n"
+    "- DÜŞÜK (tavanın %15-40'ı): cevap yüzeysel, örnek yok veya çok genel; prensip ezberden "
+    "tekrarlanmış, uygulamaya bağlanmamış.\n"
+    "- 0 / Değerlendirilemedi: yukarıdaki TEK KURAL'a göre.\n"
+    "TAM PUAN KISITI (KESİN): Bir kritere tavan puanı (ör. 10/10, 20/20) verebilmen için o "
+    "kriterin 'Kanıt ve Analiz' hücresinde transkriptten EN AZ İKİ farklı [dk] dakika damgalı "
+    "somut kanıt göstermen ZORUNLUDUR. İki damgalı kanıt yoksa en fazla tavanın %80'i verilebilir.\n"
+    "KANIT ZORUNLULUĞU (KESİN): Her kriter puanının 'Kanıt ve Analiz' hücresinde EN AZ BİR [dk] "
+    "dakika damgası bulunmalıdır. Damgasız puan KABUL EDİLMEZ — damga koyamıyorsan o kriter "
+    "'Değerlendirilemedi (sistem)'dir."
+)
+
 def build_criteria_table_filled(criteria: list, evidence_header: str = "Kanıt ve Analiz") -> str:
     """DETERMİNİSTİK kriter tablosu: satırlar pozisyondan gelir, model AYNEN doldurur.
     Model satır ekleyemez/çıkaramaz/yeniden adlandıramaz. Payda (tavan) sabit.
@@ -2524,10 +2545,10 @@ REPORT_BODY_SECTIONS = [
     ("kriter_tablosu_l13", {1},   "{table_template}"),
     ("kriter_tablosu_l2", {2, 3}, "{criteria_table_filled}\n(YUKARIDAKİ TABLOYU AYNEN KULLAN: satır ekleme/çıkarma/yeniden adlandırma YOK, tavanı AŞMA.)\n" + CRITERION_SCORING_RULE),
     ("_blank4",        {1, 2, 3}, ""),
-    ("_cognitive_note", {2, 3},   "_(Aşağıdaki üç başlık NİTELİKSEL gözlemdir ve PUAN 2 — kişisel/bilişsel profil değerlendirmesini besler; PUAN 1 pozisyon kriteri DEĞİLDİR. PUAN 1 kriterleri yalnızca yukarıdaki kriter tablosundadır.)_"),
-    ("analitik_dusunme", {2, 3},  "**Analitik Düşünme ve Muhakeme (gözlem → PUAN 2):** (soruyu kavrama, problemi parçalama, neden-sonuç, alternatif kıyaslama, ölçüm/veri kullanımı; somut kanıtlarla)"),
-    ("problem_cozme",  {2, 3},    "**Problem Çözme ve Karar Verme Yaklaşımı (gözlem → PUAN 2):** (izlediği yöntem, seçenekler, riskler, sonuç takibi)"),
-    ("kavrama_iletisim", {2, 3},  "**Kavrama ve İletişim (gözlem → PUAN 2):** (soruyu doğru anlama, cevabı yapılandırma, açıklık, gereksiz dağılma veya güçlü sentez yeteneği)"),
+    ("_cognitive_note", {2, 3},   "_(Aşağıdaki üç başlık NİTELİKSEL gözlemdir; kişisel/bilişsel profil değerlendirmesini besler. Pozisyon kriteri DEĞİLDİR — pozisyon kriterleri yalnızca yukarıdaki kriter tablosundadır.)_"),
+    ("analitik_dusunme", {2, 3},  "**Analitik Düşünme ve Muhakeme (niteliksel gözlem):** (soruyu kavrama, problemi parçalama, neden-sonuç, alternatif kıyaslama, ölçüm/veri kullanımı; somut kanıtlarla)"),
+    ("problem_cozme",  {2, 3},    "**Problem Çözme ve Karar Verme Yaklaşımı (niteliksel gözlem):** (izlediği yöntem, seçenekler, riskler, sonuç takibi)"),
+    ("kavrama_iletisim", {2, 3},  "**Kavrama ve İletişim (niteliksel gözlem):** (soruyu doğru anlama, cevabı yapılandırma, açıklık, gereksiz dağılma veya güçlü sentez yeteneği)"),
     ("tutarlilik_l13", {1},       "**Tutarlılık / Çelişki Analizi:** (çelişki taraması ÜÇ kaynak arasında yapılır: CV ↔ adayın sözlü cevapları ↔ kayıt formu beyanı. Yalnız deneyim yılı, eğitim SEVİYESİ/derece, unvan ve tarihleri KARŞILAŞTIR. E-POSTA ve TELEFON üzerinden çelişki/güvenilirlik değerlendirmesi YAPMA — CV'deki adresler eski işveren/muhasebe ofisi/referans kişilere ait olabilir. Eğitimde ALT KÜME çelişki değildir (ör. 'Ticaret Meslek Lisesi' ⊆ 'Lise'). Yalnız transkriptte veya sistemin verdiği listede AÇIKÇA görünen çelişkiyi yaz; yoksa 'Belirgin çelişki yok' de ve karşılaştırdığın alanları say.)"),
     ("tutarlilik_l2",  {2, 3},    "**Tutarlılık / Çelişki Analizi:** (çelişki taraması ÜÇ kaynak arasında: CV ↔ adayın sözlü cevapları ↔ kayıt formu beyanı. Yalnız deneyim yılı, eğitim SEVİYESİ/derece, unvan ve tarihleri KARŞILAŞTIR. E-POSTA ve TELEFON üzerinden çelişki/güvenilirlik değerlendirmesi YAPMA. Eğitimde ALT KÜME çelişki değildir (ör. 'Ticaret Meslek Lisesi' ⊆ 'Lise'). SADECE sistemin verdiği 'Sistem Alan Karşılaştırması' listesini ve transkriptte açıkça görünen çelişkileri yaz; liste yoksa/çelişki yoksa 'Belirgin çelişki yok' de ve karşılaştırılan alanları say. Aday transkriptte konusu HİÇ geçmeyen bir alan için çelişki UYDURMA.)"),
     ("guclu_yonler_l13", {1},     "**Güçlü Yönler:** ..."),
@@ -2757,6 +2778,7 @@ GENEL:
 - Cevapları CV tutarlılığı, teknik seviye, deneyim, analitik düşünme ve dürüstlük açısından değerlendir. Tek seferlik kısa cevap otomatik düşük puan getirmesin; sadece derinleştirmeye rağmen yetersiz kalan cevap puanı düşürsün.
 - "Serbest Gözlemler" bölümüne: (a) DAVRANIŞ VE TUTUM — agresiflik, sabırsızlık, kabalık, kaçamaklık gözlendiyse dakika + adayın sözüyle SOMUT yaz (davranış tek başına puan düşürmez); (b) POZİSYON UYUMU — aday alanının farklı olduğunu belirttiyse bunu yaz ve değerlendirmenin adayın gerçek alanına göre yapıldığını not et.
 {CRITERION_SCORING_RULE}
+{SCORING_RUBRIC}
 - Sistem kaynaklı eksik ('Değerlendirilemedi (sistem)') kriterleri raporda AYRI listele; bunlara puan verme, toplamı yalnızca puanlanan kriterlerin ağırlığına normalize et.
 - PUAN TAVANI (KESİN): Hiçbir kriter puanı kendi tavanını (ağırlığını) AŞAMAZ ("12/10" ASLA; en fazla "10/10"). TOPLAM PUAN = alınan puanların toplamı; payda = değerlendirilen kriterlerin ağırlık toplamı. Sistem ayrıca doğrular.
 - ÇİFT PUANLAMA (KESİN): Rapor İKİ ayrı puan içerir. **PUAN 1 = TOPLAM PUAN** — yukarıdaki POZİSYON kriterleri; işe alım önerisi (İşe Al / Değerlendirmeye Al / Reddet) YALNIZCA buna göre verilir. **PUAN 2 = PROFİL PUANI** — pozisyondan bağımsız, her adayda aynı olan kişisel/bilişsel profil kriterleri; her satır transkriptten somut örnek + [dk] ile. İki tabloyu ve iki puanı KARIŞTIRMA; profil kriterlerini pozisyon tablosuna, pozisyon kriterlerini profil tablosuna YAZMA.
@@ -2828,18 +2850,35 @@ def extract_profile_score(reply: str):
 # PUAN 1 (pozisyon) bölgesi ile PUAN 2 (profil) bölgesini ayırır — iki kriter tablosu ayrı
 # doğrulansın, _name_score çapraz eşleşmesi olmasın. Ayraç: "### PUAN 2" başlığı ya da (başlık
 # düşmüşse) ilk "PROFİL PUANI" satırı — hangisi önce gelirse.
+# TUR 2 / GÖREV A — PUAN 2 (profil) bölümünün GERÇEK başlangıcını bulur. Eskiden `#{0,4}` (yani
+# HİÇ diyez de olabilir) kullanıldığı için "PUAN 2" ifadesi rapor METNİNDE geçtiği her yerde
+# (ör. bir başlık içinde "(... → PUAN 2)" ya da bir açıklama cümlesinde "... PUAN 2 profilini
+# besler") yanlışlıkla eşleşiyor, splice_profile_region bu noktadan itibaren TÜM prose bölümlerini
+# siliyordu. Artık YALNIZCA gerçek bir başlık kabul edilir:
+#   - `### PUAN 2 ...` (2-4 diyezli markdown başlığı, satır başında)
+#   - `**PUAN 2 — ...**` (kalın başlık, satır başında, hemen ardından tire/çizgi)
+#   - `**PROFİL PUANI: ...**` / `PROFİL PUANI:` satırı (fallback — model başlığı atladıysa)
+_PROFILE_REGION_RE = re.compile(
+    r"(?m)^[ \t]*(?:-{2,}[ \t]*\n[ \t]*)?"
+    r"(?:#{2,4}[ \t]*PUAN[ \t]*2\b"
+    r"|\*{1,3}[ \t]*PUAN[ \t]*2[ \t]*[—–-]"
+    r"|\*{0,3}[ \t]*PROF\wL?[ \t]+PUANI\b)",
+    re.IGNORECASE)
+
+def _profile_region_start(text: str):
+    """PUAN 2 bölümünün başladığı indeks | None. Bir 'PUAN 2' metin-içi geçişi asla eşleşmez."""
+    if not text:
+        return None
+    m = _PROFILE_REGION_RE.search(text)
+    return m.start() if m else None
+
 def split_report_regions(report_body: str):
     if not report_body:
         return report_body or "", ""
-    best = None
-    for pat in (r'(?:^|\n)[ \t]*(?:-{2,}[ \t]*\n[ \t]*)?#{0,4}[ \t]*PUAN[ \t]*2\b',
-                r'(?:^|\n)[ \t]*\*{0,2}[ \t]*PROF\S*[ \t]+PUANI\b'):
-        m = re.search(pat, report_body, re.IGNORECASE)
-        if m and (best is None or m.start() < best):
-            best = m.start()
-    if best is None:
+    idx = _profile_region_start(report_body)
+    if idx is None:
         return report_body, ""
-    return report_body[:best], report_body[best:]
+    return report_body[:idx], report_body[idx:]
 
 def detect_profile_veto(text: str):
     """PUAN 2 veto etiketi: [VETO: <somut gerekçe + dakika>]. Yalnızca modelin açıkça yazdığı,
@@ -4601,10 +4640,15 @@ def sync_recommendation_line(report: str, recommendation: str, score_position=No
     if _DECISION_BLOCK_MARK in report:
         return re.sub(re.escape(_DECISION_BLOCK_MARK) + r"[\s\S]*?(?=\n\s*\n---|\n\s*\n#{1,4}|\n\s*\n\*\*|---RAPORSON---|\Z)",
                       block + "\n", report, count=1)
-    # Anchor: PUAN 2 başlığından hemen ÖNCE (tüm PUAN 1 prose'undan sonra); yoksa ---RAPORSON--- öncesi.
-    m = re.search(r"\n\s*-{2,}\s*\n\s*#{2,4}\s*PUAN\s*2\b", report)
-    if m:
-        return report[:m.start()] + "\n\n" + block + "\n" + report[m.start():]
+    # Anchor: GERÇEK PUAN 2 başlığından hemen ÖNCE (tüm PUAN 1 prose'undan sonra). Metin-içi
+    # "PUAN 2" geçişine değil — _profile_region_start strict regex kullanır.
+    idx = _profile_region_start(report)
+    if idx is not None:
+        # başlıktan hemen önceki '---' ayıracını da bloğun ÜSTÜNE al ki çift '---' olmasın
+        _pre = report[:idx].rstrip()
+        if _pre.endswith("---"):
+            _pre = _pre[:-3].rstrip()
+        return _pre + "\n\n" + block + "\n\n---\n" + report[idx:].lstrip("-").lstrip()
     if "---RAPORSON---" in report:
         return report.replace("---RAPORSON---", block + "\n\n---RAPORSON---", 1)
     return report.rstrip() + "\n\n" + block + "\n"
@@ -4764,6 +4808,47 @@ def _store_interview_json(candidate_id: int, level: int, column: str, value) -> 
 
 _VOICE_CONF_UNANSWERED_RATIO = 0.30   # KALEM 7 — cevapsız tur oranı bu eşiği aşarsa güven otomatik "dusuk"
 
+def _dedup_filter_events(candidate_id: int, level: int, hall_filtered: list) -> None:
+    """TUR 2 / GÖREV E — 'transcription_filtered_server' olaylarını YALNIZCA yeni ts'ler için ekler.
+    Regen her çalıştığında aynı 2 halüsinasyon satırı için tekrar olay yazılıyordu; bu ev_count'u
+    şişirip cevapsız tur sayısını yapay yükseltiyordu."""
+    if not hall_filtered:
+        return
+    try:
+        db = get_db()
+        try:
+            existing = db.execute(
+                "SELECT event_data FROM realtime_events WHERE candidate_id=? AND level=? "
+                "AND event_type IN ('transcription_filtered','transcription_filtered_server')",
+                (candidate_id, level)).fetchall()
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"UYARI (_dedup_filter_events fetch c={candidate_id}): {type(e).__name__}: {e}")
+        existing = []
+    seen_ts = set()
+    for r in existing:
+        try:
+            d = json.loads(r["event_data"] or "{}")
+            if d.get("ts"):
+                seen_ts.add(str(d["ts"]))
+        except Exception:
+            pass
+    fresh = [f for f in hall_filtered if str(f.get("ts") or "") not in seen_ts or not f.get("ts")]
+    # ts'siz kayıt tek seferlik: aynı metin zaten varsa atla
+    seen_txt = set()
+    for r in existing:
+        try:
+            d = json.loads(r["event_data"] or "{}")
+            if d.get("text"):
+                seen_txt.add(str(d["text"])[:80])
+        except Exception:
+            pass
+    fresh = [f for f in fresh if str(f.get("text") or "")[:80] not in seen_txt]
+    if fresh:
+        record_realtime_events(candidate_id, level,
+                               [{"type": "transcription_filtered_server", "data": f, "elapsed_ms": 0} for f in fresh])
+
 def _unanswered_turn_windows(candidate_id: int, level: int) -> dict:
     """KALEM 2/7 — {"windows": [ms...], "count": int}. Cevabı BOŞ / halüsinasyon işaretli turlar.
     İKİ KAYNAK (birleşik, ~2sn içinde tekilleştirilir):
@@ -4851,7 +4936,11 @@ def compute_voice_metrics(candidate_id: int, level: int) -> dict:
     _bad = _unanswered_turn_windows(candidate_id, level)
     bad_windows = _bad.get("windows", [])
     unanswered_turns = _bad.get("count", len(bad_windows))
-    def _near_bad(ms, tol=9000):
+    # TUR 2 / GÖREV E — TOLERANS 9000 → 2500 ms. Eski geniş pencere, bir halüsinasyon/dolgu
+    # anının ±9 sn'sinde biten GERÇEK aday cevaplarını da "cevapsız" sayıyordu (payda küçülüyor,
+    # cevapsız sayısı yapay yükseliyordu). Bir halüsinasyon turunun speech_stop'u, bozduğu turun
+    # bitişine ~2.5 sn içindedir.
+    def _near_bad(ms, tol=2500):
         return any(abs(ms - b) <= tol for b in bad_windows)
 
     starts = [ms for t, ms in evs if t == "input_audio_buffer.speech_started"]
@@ -4865,16 +4954,26 @@ def compute_voice_metrics(candidate_id: int, level: int) -> dict:
         e = next((x for x in stops if x >= s), None)
         if e is not None:
             all_turns.append((s, e))
-    # cevapsız/halüsinasyon turlarını hesaptan çıkar
-    turns = [(a, b) for (a, b) in all_turns if not _near_bad(b)]
+    # TUR 2 / GÖREV E — her BAD WINDOW en fazla BİR turu düşürür (en yakın olanı). Blanket
+    # exclude YOK; düşürülen tur sayısı len(bad_windows) ile sınırlı.
+    _drop_idx = set()
+    for bw in bad_windows:
+        _cands = [(abs(b - bw), i) for i, (a, b) in enumerate(all_turns) if i not in _drop_idx and abs(b - bw) <= 2500]
+        if _cands:
+            _drop_idx.add(min(_cands)[1])
+    turns = [t for i, t in enumerate(all_turns) if i not in _drop_idx]
+    _dropped_turns = [all_turns[i] for i in sorted(_drop_idx)]
     talk_ms = sum(max(0, b - a) for a, b in turns)
     turn_count = len(turns)
     total_turn_count = len(all_turns)
-    # GÖREV 9.1 — DENKLİK: toplam = değerlendirilen + cevapsız/halüsinasyon. Cevapsız sayısı
-    # AYNI kaynaktan (VAD turları) türetilir; ayrı sayaç (_unanswered_turn_windows) yalnız
-    # ek bilgi olarak taşınır, denkleme GİRMEZ.
-    dropped_turn_count = total_turn_count - turn_count
-    considered_denom = max(total_turn_count, turn_count + unanswered_turns)
+    # GÖREV 9.1 — DENKLİK: toplam_tur = hesaba_katilan_tur + cevapsiz_tur_sayisi (AYNI kaynaktan).
+    dropped_turn_count = len(_drop_idx)
+    considered_denom = max(total_turn_count, turn_count + dropped_turn_count)
+    # TUR 2 / GÖREV E.3 — hangi turlar düşürüldü, logla.
+    if _dropped_turns:
+        print(f"[VOICE_METRICS_DROPPED] c={candidate_id} L{level} {dropped_turn_count} tur düşürüldü "
+              f"(bad_windows={len(bad_windows)}): "
+              + "; ".join(f"{a//1000}-{b//1000}sn" for a, b in _dropped_turns))
 
     answer_latencies = []
     for d in ai_done:
@@ -5127,19 +5226,20 @@ def run_report_reviewer(candidate_id: int, level: int, transcript_text: str, fin
 
 Raporu YENİDEN YAZMA. Kararı/puanı DEĞİŞTİREMEZSİN — senin çıktın karara etki etmez, rapora AYRI bir "ikinci değerlendirici görüşü" bloğu olarak eklenir. Görüşünü SERBESTÇE, kısıtsız yaz; birincil değerlendirmeyle aynı fikirde olmak zorunda değilsin, şerh koyabilirsin.
 
-Türkçe, kısa ve madde madde ver:
-1. ABARTILI / KANITSIZ İDDİALAR: raporda transkriptle desteklenmeyen veya aşırı iddialı cümleler (kısa alıntıyla).
-2. EKSİK KANIT: transkriptte olan ama raporun atladığı önemli sinyaller (aday kendi ağzıyla söylediği bilgi eksiklikleri dahil).
-3. PUAN KALİBRASYONU: rapordaki toplam puan ve kriter puanları kanıtlara göre yüksek mi / düşük mü / uygun mu — kısa gerekçe.
-4. GÜVEN DÜZEYİ: (yüksek / orta / düşük) + kısa neden.
-5. KARARA İLİŞKİN GÖRÜŞ: Rapordaki sistem kararına (eşik tablosundan) katılıyor musun? Katılmıyorsan neden — bu yalnızca görüştür, kararı değiştirmez.
-6. KRİTER PUAN TABLOSU (ZORUNLU): Aşağıdaki kriter setinde, AYNI maksimum puanlarla KENDİ puanını ver. Her satırı TAM olarak şu formatta yaz (otomatik ayrıştırılacak):
+Türkçe yaz. Maddeleri TAM OLARAK şu başlıklarla, HER MADDE KENDİ SATIRINDA BAŞLIK + ARDINDAN İÇERİK olacak şekilde ver (başlık ile içeriği aynı satıra yapıştırma, araya boşluk bırak):
+
+1) ABARTILI / KANITSIZ İDDİALAR: raporda transkriptle desteklenmeyen veya aşırı iddialı cümleler (kısa alıntıyla).
+2) EKSİK KANIT: transkriptte olan ama raporun atladığı önemli sinyaller (aday kendi ağzıyla söylediği bilgi eksiklikleri dahil).
+3) PUAN KALİBRASYONU: rapordaki toplam puan ve kriter puanları kanıtlara göre yüksek mi / düşük mü / uygun mu — kısa gerekçe.
+4) GÜVEN DÜZEYİ: (yüksek / orta / düşük) + kısa neden.
+5) KARARA İLİŞKİN GÖRÜŞ: Rapordaki sistem kararına (eşik tablosundan) katılıyor musun? Katılmıyorsan neden — bu yalnızca görüştür, kararı değiştirmez.
+6) KRİTER PUANLARIM: Aşağıdaki kriter setinde, AYNI maksimum puanlarla KENDİ puanını ver. Bu maddenin altına SADECE aşağıdaki formatta satırlar yaz — başka açıklama, başlık veya cümle EKLEME:
 KRITER_PUAN: <kriter adı> = <senin puanın>/<maksimum>
-Önce PUAN 1 kriterleri, sonra PUAN 2 kriterleri. Her kriter için bir satır.
+Önce PUAN 1 kriterleri, sonra PUAN 2 kriterleri; her kriter için tam bir satır.
 
 {_reviewer_criteria_block(position_criteria)}
 
-İLKE: Kanıt yoksa ne lehte ne aleyhte varsayım yapma. Modalite kanıtları (mimik/ses) yalnızca destekleyici. Belirgin bir görüş ayrılığı yoksa "Belirgin bir görüş ayrılığı yok." yaz (kriter puan tablosunu YİNE DE doldur).
+İLKE: Kanıt yoksa ne lehte ne aleyhte varsayım yapma. Modalite kanıtları (mimik/ses) yalnızca destekleyici. Belirgin bir görüş ayrılığı yoksa 1-5 maddelerine "Belirgin bir görüş ayrılığı yok." yaz — ama 6. maddedeki KRITER_PUAN satırlarını YİNE DE eksiksiz doldur.
 
 === TRANSKRİPT ===
 {(transcript_text or '')[:TRANSCRIPT_PROMPT_MAX_CHARS]}
@@ -5174,20 +5274,65 @@ def parse_reviewer_criterion_scores(notes: str) -> dict:
             out[name] = (int(m.group(2)), int(m.group(3)))
     return out
 
+def _format_reviewer_notes(notes: str) -> str:
+    """TUR 2 / GÖREV G — müfettiş serbest metnini rapora eklenebilir temiz biçime getirir:
+      - OZET_TON/DUSUK_PUAN meta etiketleri çıkarılır
+      - KRITER_PUAN: satırları çıkarılır (tablo ayrı basılıyor)
+      - '6) KRİTER PUANLARIM' / '6. KRİTER PUAN TABLOSU' başlığı çıkarılır (biz kendi başlığımızı basıyoruz)
+      - numaralı maddeler (1) / 1. / 1-) kendi satırlarına açılır, başlık↔metin yapışması giderilir
+      - repair_report_spacing ile 'TABLOSUBelirgin' türü birleşmeler onarılır
+      - 'Belirgin bir görüş ayrılığı yok.' kendi yerinde bırakılır (tablo başlığına karışmaz)"""
+    if not notes:
+        return ""
+    t = strip_reviewer_meta_tags(notes)
+    t = re.sub(r"(?m)^\s*KR[İI]TER_PUAN\s*:.*$\n?", "", t)
+    # 6. madde başlığını (metniyle yapışık olsa bile) at — tabloyu biz basıyoruz
+    t = re.sub(r"(?m)^\s*\**\s*6[\.\)\-]?\s*(KR[İI]TER\s+PUAN(?:LARIM|\s+TABLOSU)?)\s*:?\s*\**\s*",
+               "\n", t, flags=re.IGNORECASE)
+    # yalnız numara olan satırı ('4)' / '5.') ardından gelen başlık satırıyla BİRLEŞTİR
+    t = re.sub(r"(?m)^\s*\**\s*([1-5])[\.\)\-]\s*\**\s*\n+\s*", r"\1) ", t)
+    # numaralı madde başlangıcı → önüne çift satır sonu (başlık kendi bloğunda dursun)
+    t = re.sub(r"(?<!\n)\n?[ \t]*(?=(?:\*{0,2})?[1-5][\.\)\-]\s+[A-ZÇĞİÖŞÜ])", "\n\n", t)
+    # 'BAŞLIK:İçerik' → 'BAŞLIK: İçerik' (iki nokta sonrası büyük harfle başlayan uzun metin)
+    t = re.sub(r"(:\*{0,2})[ \t]*(?=[A-ZÇĞİÖŞÜ][a-zçğıöşü])", r"\1 ", t)
+    t = repair_report_spacing(t)
+    # fazla boş satırları tekle
+    t = re.sub(r"\n{3,}", "\n\n", t).strip()
+    return t
+
 def _reviewer_score_tables(reviewer_scores: dict, position_criteria: list, final_report: str) -> str:
     """GÖREV 1.6 — 'Kriter | GPT | Müfettiş | Fark' tabloları (PUAN 1 ayrı, PUAN 2 ayrı).
     GPT puanı NİHAİ rapordaki kriter hücrelerinden okunur. Bu tablo YALNIZ REFERANS — hiçbir
     hesaba girmez."""
     def _gpt_cell(name):
-        # rapordaki "| <kriter> | <p>/<max> ..." satırından GPT'nin verdiği puanı çek
+        # TUR 2 / GÖREV F — rapordaki kriter tablosu satırının PUAN HÜCRESİNİ (2. veri sütunu)
+        # okur; satırdaki ilk '\d/\d' değil (o bir dakika damgası / oran olabilir).
+        nn = _norm_name(name)
+        best = None
         for ln in (final_report or "").splitlines():
-            if "|" in ln and _norm_name(name)[:14] in _norm_name(ln):
-                mm = re.search(r"(\d+)\s*/\s*(\d+)", ln)
-                if mm:
-                    return f"{mm.group(1)}/{mm.group(2)}"
-                if re.search(r"değerlendirilemedi|değerlendirilmedi|yetersiz", ln, re.IGNORECASE):
-                    return "—"
-        return "?"
+            if ln.count("|") < 2:
+                continue
+            cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+            if len(cells) < 2:
+                continue
+            c0 = _norm_name(re.sub(r"[*_`]", "", cells[0]))
+            if len(c0) < 3 or set(cells[0].replace(" ", "")) <= set("-:|"):
+                continue
+            # kriter adı eşleşmesi: tam / güçlü alt-küme
+            score_c0 = _name_score(name, cells[0])
+            if score_c0 < 0.55 and not (nn and nn[:14] in c0):
+                continue
+            puan_cell = cells[1]
+            mm = re.search(r"(?<![\d:/])(\d{1,3})\s*/\s*(\d{1,3})(?![\d:/])", puan_cell)
+            if mm:
+                cand = f"{mm.group(1)}/{mm.group(2)}"
+            elif re.search(r"değerlendiril[a-zçğıöşü]*|yetersiz", puan_cell, re.IGNORECASE):
+                cand = "—"
+            else:
+                continue
+            if best is None or score_c0 > best[0]:
+                best = (score_c0, cand)
+        return best[1] if best else "?"
     def _tbl(title, crit_list):
         rows = [f"_{title}_", "", "| Kriter | Birincil | İkinci değerlendirici | Fark |",
                 "|---|---|---|---|"]
@@ -5236,16 +5381,14 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     if not notes.strip():
         return
     rv_scores = parse_reviewer_criterion_scores(notes)
-    body_notes = strip_reviewer_meta_tags(notes)
-    # kriter puan satırlarını serbest metinden çıkar (tablo ayrı gösteriliyor)
-    body_notes = re.sub(r"(?m)^\s*KR[İI]TER_PUAN\s*:.*$\n?", "", body_notes).strip()
+    body_notes = _format_reviewer_notes(notes)
     tables = _reviewer_score_tables(rv_scores, position_criteria or [], final_report)
     block = (f"\n\n---\n\n{_HEAD}\n\n"
              f"Bu bölüm ikinci bir değerlendiricinin bağımsız görüşüdür. Yukarıdaki puanları, KARAR'ı "
              f"veya rapor metnini DEĞİŞTİRMEZ; birincil değerlendirmeyle farklı yönde olabilir.\n\n"
              f"{body_notes}\n")
     if tables:
-        block += (f"\n**Kriter Puan Karşılaştırması (yalnız referans — hiçbir hesaba girmez):**\n\n{tables}\n")
+        block += (f"\n**6) Kriter Puan Karşılaştırması (yalnız referans — hiçbir hesaba girmez):**\n\n{tables}\n")
     updated = final_report.rstrip() + block
     db = get_db()
     try:
@@ -5352,15 +5495,22 @@ def run_independent_profile_call(candidate_id: int, level: int, provider: str, m
     return None
 
 def splice_profile_region(reply: str, new_profile_text: str) -> str:
-    """reply içindeki '### PUAN 2 ...' → '---RAPORSON---' arası bölümü bağımsız çağrının çıktısıyla
-    değiştirir. Sınır bulunamazsa reply DEĞİŞMEDEN döner."""
+    """reply içindeki GERÇEK '### PUAN 2 ...' başlığından '---RAPORSON---' (yoksa metin sonu) arası
+    bölümü bağımsız çağrının çıktısıyla değiştirir. GERÇEK başlık bulunamazsa reply DEĞİŞMEDEN döner
+    — 'PUAN 2' metin-içi geçişine ASLA splice yapılmaz (TUR 2 / GÖREV A kök nedeni buydu)."""
     if not reply or not new_profile_text:
         return reply
     new_profile_text = re.sub(r'---RAPOR(SON)?---|---STANDARTCV(SON)?---', '', new_profile_text).strip()
-    m = re.search(r"(?:\n-{2,}\s*\n)?\s*#{0,4}\s*PUAN\s*2\b[\s\S]*?(?=\n?---RAPORSON---|\Z)", reply, re.IGNORECASE)
-    if not m:
+    start = _profile_region_start(reply)
+    if start is None:
+        print("[SPLICE_PROFILE] GERÇEK '### PUAN 2' başlığı bulunamadı — splice atlandı, rapor gövdesi korundu.")
         return reply
-    return reply[:m.start()] + "\n\n---\n" + new_profile_text + "\n\n" + reply[m.end():]
+    _rest = reply[start:]
+    _end_rel = _rest.find("---RAPORSON---")
+    end = start + _end_rel if _end_rel >= 0 else len(reply)
+    head = reply[:start].rstrip()
+    tail = reply[end:]
+    return head + "\n\n" + new_profile_text.lstrip() + "\n\n" + tail
 
 # GÖREV 1.2 — reviewer_flagged_criteria / apply_reviewer_score_revision / annotate_revised_criteria_prose
 # ve yardımcıları (_match_strength, _VALUE_JUDGMENT_RE, _ANNOTATE_* , _criterion_fully_mentioned)
@@ -5437,6 +5587,11 @@ def run_deferred_finish_job(candidate_id: int, level: int, regen: bool = False):
             )
             record_anthropic_usage(candidate_id, level, model or "claude-sonnet-4-6", "report_generation_primary", response)
             reply = response.content[0].text
+            # TUR 2 / GÖREV A.3 — gerçek çıktı token'ı + stop_reason her zaman loglanır.
+            _u = getattr(response, "usage", None)
+            print(f"[REPORT_USAGE] c={candidate_id} L{level} provider=claude model={model or 'claude-sonnet-4-6'} "
+                  f"out_tokens={getattr(_u, 'output_tokens', '?')} stop_reason={getattr(response, 'stop_reason', '?')} "
+                  f"max_tokens={REPORT_MAX_TOKENS} bitti={'---STANDARTCVSON---' in reply}")
             # GÖREV 8 — KESİLME → FALLBACK'E DÜŞMEDEN ÖNCE DEVAM ÇAĞRISI (continuation).
             _cont_tries = 0
             while (getattr(response, "stop_reason", None) == "max_tokens" or "---STANDARTCVSON---" not in reply) and _cont_tries < 2:
@@ -5485,6 +5640,11 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "l2_report_generation_deferred", result)
             reply = result["choices"][0]["message"]["content"]
             _fr = (result.get("choices") or [{}])[0].get("finish_reason")
+            # TUR 2 / GÖREV A.3 — gerçek çıktı token'ı + finish_reason her zaman loglanır.
+            _uo = (result.get("usage") or {})
+            print(f"[REPORT_USAGE] c={candidate_id} L{level} provider=openai model={model or OPENAI_REPORT_MODEL} "
+                  f"completion_tokens={_uo.get('completion_tokens', '?')} finish_reason={_fr} "
+                  f"max_tokens={REPORT_MAX_TOKENS} bitti={'---STANDARTCVSON---' in reply}")
             # GÖREV 8 — KESİLME → FALLBACK'E DÜŞMEDEN ÖNCE DEVAM ÇAĞRISI (continuation).
             _cont_tries = 0
             while (_fr == "length" or "---STANDARTCVSON---" not in reply) and _cont_tries < 2:
@@ -5784,6 +5944,22 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     # GÖREV 2.2 — KARAR TEK KAYNAK: yalnız PUAN 1 + eşik tablosundan; GPT prose'una dokunulmaz.
     report = sync_recommendation_line(report, recommendation, score_position, score_profile,
                                      veto_reason=_veto_reason)
+    # TUR 2 / GÖREV B.7 — EŞİK SINIRI UYARISI (bilgilendirme; PUANA/KARARA MÜDAHALE DEĞİL).
+    # score_position eşik değerine (40 veya 80) ±2 içindeyse rapora sistem notu düşülür.
+    try:
+        if score_position is not None and not _veto_reason:
+            _near = next((t for t in (40, 80) if abs(score_position - t) <= 2), None)
+            if _near is not None and _DECISION_BLOCK_MARK in report and "Eşik Sınırı Uyarısı" not in report:
+                _bandnote = (f"**Eşik Sınırı Uyarısı (sistem — bilgilendirme):** PUAN 1 = {score_position}/100, "
+                             f"karar bandı sınırına ({_near}) çok yakın (±2). Bir puanlık oynama kararı "
+                             f"değiştirebilir; nihai karardan önce ikinci bir görüşme veya kanıtların gözden "
+                             f"geçirilmesi önerilir. Bu not puanı veya kararı DEĞİŞTİRMEZ.")
+                report = report.replace(_DECISION_BLOCK_MARK, _bandnote + "\n\n" + _DECISION_BLOCK_MARK, 1)
+                record_system_decision(candidate_id, level, "esik_siniri_uyarisi",
+                                       f"PUAN 1 ({score_position}) karar bandı sınırına ({_near}) ±2 içinde — rapora bilgilendirme notu eklendi.",
+                                       {"score_position": score_position, "band": _near})
+    except Exception as e:
+        print(f"UYARI (finalize_interview eşik sınırı uyarısı c={candidate_id}): {type(e).__name__}: {e}")
     # KALEM 4 — rapor metnindeki "Tarih:" satırı mülakatın GERÇEK tarihi olsun (üretim tarihi değil).
     try:
         _iv_date_str = (_parse_iso(_iv_dates["started_at"]).strftime("%d.%m.%Y")
@@ -5802,6 +5978,8 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     except Exception as e:
         print(f"UYARI (finalize_interview boş bölüm temizliği c={candidate_id}): {type(e).__name__}: {e}")
     # KALEM 5 — token kesilmesi olduysa teknik notu YÖNETİCİYE ayır (müşteri raporuna girmez).
+    # TUR 2 / GÖREV A.5 — COALESCE KALDIRILDI: finalize her çağrıda standard_cv'yi ve _cv_truncated'ı
+    # YENİDEN hesaplar; bu çalıştırmada kesilme YOKSA eski (bayat) teknik not TEMİZLENİR.
     _tech_note = STANDARD_CV_TRUNCATION_NOTE if _cv_truncated else None
 
     if regen:
@@ -5810,7 +5988,7 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         db.execute("""
             UPDATE interviews SET report=?, standard_cv=?, score=?, score_position=?, score_profile=?, recommendation=?,
                    report_regenerated_at=CURRENT_TIMESTAMP,
-                   report_tech_note=COALESCE(?, report_tech_note), processing_status='completed', processing_error=NULL
+                   report_tech_note=?, processing_status='completed', processing_error=NULL
             WHERE candidate_id=? AND level=?
         """, (report, standard_cv, score, score_position, score_profile, recommendation, _tech_note, candidate_id, level))
         db.commit()
@@ -5831,7 +6009,7 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     cur = db.execute("""
         UPDATE interviews SET report=?, standard_cv=?, score=?, score_position=?, score_profile=?, recommendation=?,
                completed_at=COALESCE(interview_ended_at, CURRENT_TIMESTAMP), report_generated_at=CURRENT_TIMESTAMP,
-               report_tech_note=COALESCE(?, report_tech_note), processing_status='completed', processing_error=NULL
+               report_tech_note=?, processing_status='completed', processing_error=NULL
         WHERE candidate_id=? AND level=? AND completed_at IS NULL
     """, (report, standard_cv, score, score_position, score_profile, recommendation, _tech_note, candidate_id, level))
     already_finalized = cur.rowcount == 0
@@ -6732,13 +6910,27 @@ def filter_transcript_hallucinations(transcript_text: str, lang: str = "tr"):
             ts, role, spoken = f"{m.group(1)}:{m.group(2)}", m.group(3), m.group(4)
         elif line.strip().startswith("Aday:"):
             role, spoken, ts = "Aday", line.split(":", 1)[1].strip(), ""
-        if role and role.startswith("Ada") and spoken is not None and is_likely_hallucination(spoken, lang):
+        # TUR 2 / GÖREV C.6 — ZATEN işaretli satırı yeniden işaretleme (idempotent).
+        if role and role.startswith("Ada") and spoken is not None and not is_hallucination_marker_line(line) \
+                and is_likely_hallucination(spoken, lang):
             filtered.append({"ts": ts or "", "text": spoken.strip()[:200]})
             prefix = f"[{ts}] " if ts else ""
             out_lines.append(f'{prefix}Aday: [SİSTEM: bu satır olası transkripsiyon halüsinasyonudur — ADAY CEVABI SAYMA] "{spoken.strip()}"')
         else:
             out_lines.append(line)
     return "\n".join(out_lines), filtered, len(filtered)
+
+def normalize_transcript_for_report(raw_text: str, lang: str = "tr"):
+    """TUR 2 / GÖREV C — RAPOR ÜRETİM YOLUNUN TAMAMINDA kullanılan TEK transkript temizleyici.
+    Sırayla: (1) konuşmacı etiketi / hoparlör yankısı / iç talimat sızıntısı / zaman damgası
+    düzeltmesi (fix_transcript_speaker_and_leaks), (2) Whisper halüsinasyon filtresi.
+    İDEMPOTENT: zaten temiz bir transkripte ikinci kez uygulanması sorun çıkarmaz.
+    Dönüş: (clean_text, speaker_changes[list], hall_filtered[list], hall_n[int])."""
+    if not raw_text or not raw_text.strip():
+        return raw_text or "", [], [], 0
+    spk_fixed, spk_changes = fix_transcript_speaker_and_leaks(raw_text, lang)
+    clean, hall_filtered, hall_n = filter_transcript_hallucinations(spk_fixed, lang)
+    return clean, spk_changes, hall_filtered, hall_n
 
 # ═══ KALEM 2 — Puanlama matematiği doğrulaması (kriter tavanı + normalize) ═══
 def _norm_name(s: str) -> str:
@@ -7174,7 +7366,6 @@ def compute_modality_coverage(candidate_id: int, level: int) -> dict:
         db = get_db()
         iv = db.execute("SELECT voice_metrics_json, started_at, completed_at FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
         mimic_rows = db.execute("SELECT elapsed_ms FROM snapshots WHERE candidate_id=? AND reason='mimic_sample'", (candidate_id,)).fetchall()
-        verify_rows = db.execute("SELECT elapsed_ms, captured_at FROM snapshots WHERE candidate_id=? AND (reason IS NULL OR reason<>'mimic_sample') ORDER BY id ASC", (candidate_id,)).fetchall()
         db.close()
     except Exception as e:
         print(f"UYARI (compute_modality_coverage c={candidate_id}): {type(e).__name__}: {e}")
@@ -7191,16 +7382,24 @@ def compute_modality_coverage(candidate_id: int, level: int) -> dict:
     out["mimik"] = _frame_distribution(sorted(mimic_min), total_min)
     out["mimik"]["n"] = len(mimic_rows)
 
+    # TUR 2 / GÖREV D — DOĞRULAMA kareleri: PDF ile TEK KAYNAK. select_verification_frames
+    # (mimik havuzundan, süreye yayılmış, seviye bazlı) — eski non-mimic snapshot seti DEĞİL.
+    try:
+        _vframes = select_verification_frames(candidate_id, level)
+    except Exception as e:
+        print(f"UYARI (compute_modality_coverage: select_verification_frames c={candidate_id}): {type(e).__name__}: {e}")
+        _vframes = []
     v_min = []
-    for r in verify_rows:
-        if r["elapsed_ms"] is not None:
-            v_min.append(_safe_int(r["elapsed_ms"]) / 60000)
-        elif started:
-            ca = _parse_iso(r["captured_at"])
+    for f in _vframes:
+        if f.get("elapsed_ms") is not None:
+            v_min.append(_safe_int(f["elapsed_ms"]) / 60000)
+        elif started and f.get("captured_at"):
+            ca = _parse_iso(f["captured_at"])
             if ca:
                 v_min.append(max(0.0, (ca - started).total_seconds() / 60))
     out["dogrulama"] = _frame_distribution(sorted(v_min), total_min)
-    out["dogrulama"]["n"] = len(verify_rows)
+    out["dogrulama"]["n"] = len(_vframes)
+    out["dogrulama"]["kaynak"] = "mimik havuzundan, mülakat süresine yayılmış"
 
     try:
         m = json.loads(iv["voice_metrics_json"]) if (iv and iv["voice_metrics_json"]) else {}
@@ -7233,11 +7432,13 @@ def build_modality_coverage_note(candidate_id: int, level: int) -> str:
         if d["n"] == 0:
             return f"- {label}: hiç alınmadı."
         span = f" — mülakatın {d['ilk_dk']}.–{d['son_dk']}. dakikaları arası" if d["ilk_dk"] is not None else ""
+        src = f" ({d['kaynak']})" if d.get("kaynak") else ""
         warn = "  ⚠️ UYARI: kareler dar bir aralıkta toplanmış; oturumun büyük kısmı gözlemsiz." if d["kumelenme"] else ""
-        return f"- {label}: {d['n']} kare{span}.{extra}{warn}"
+        return f"- {label}: {d['n']} kare{span}{src}.{extra}{warn}"
 
-    lines.append(_frame_line("Kamera doğrulama kareleri (panelde/PDF'te görünen)", c["dogrulama"]))
-    lines.append(_frame_line("Mimik analiz kareleri (yalnız AI analizi, panelde gösterilmez)", c["mimik"]))
+    # TUR 2 / GÖREV D — 'dogrulama' artık select_verification_frames çıktısı (PDF ile TEK KAYNAK).
+    lines.append(_frame_line("Kamera doğrulama kareleri (PDF'te gösterilen)", c["dogrulama"]))
+    lines.append(_frame_line("Mimik analiz kareleri (kaynak havuz — yalnız AI analizi)", c["mimik"]))
 
     if c["ses_metrikleri_var"] and c["ses_ozet"]:
         s = c["ses_ozet"]
@@ -7438,6 +7639,7 @@ TEMEL KURALLAR:
 - ADAYIN KENDİ BEYAN ETTİĞİ BİLGİ EKSİKLİKLERİ (GÖREV 9.3): Aday transkriptte kendi ağzıyla bir konuda bilgisi/deneyimi olmadığını söylediyse (ör. "kurumlar vergisi ve e-defter kısmında bilgim yok"), bu İLGİLİ kriterin "Kanıt ve Analiz" hücresinde AÇIKÇA yer alacak ve dakika damgasıyla alıntılanacak. Bu otomatik düşük puan demek değildir — ama kanıtın GÖRÜLMESİ ve analize dahil edilmesi zorunludur; sessizce atlama.
 - Aynı kalıp cümleleri her bölümde tekrar etme. Rapor bu adaya özgü olmalı; somut proje, karar, örnek ve ifadeleri kullan.
 {CRITERION_SCORING_RULE}
+{SCORING_RUBRIC}
 - Toplam puanı yalnızca PUANLANAN kriterlerin ağırlığına göre normalize et. 'Değerlendirilemedi (sistem)' kriterleri hesaba KATMA. Raporda puanlanan ve payda-dışı listeleri AYRI göster.
 - PUAN TAVANI (KESİN): Hiçbir kriter puanı kendi tavanını (ağırlığını) AŞAMAZ. "Uyum 12/10" gibi bir şey ASLA yazma; en fazla "10/10". TOPLAM PUAN = alınan puanların toplamı. Bunu doğru hesapla, sistem ayrıca doğrular.
 - ÇİFT PUANLAMA (KESİN): Rapor İKİ ayrı puan içerir. PUAN 1 = "TOPLAM PUAN" → yukarıdaki POZİSYON kriterleri; işe alım önerisi (İşe Al / Değerlendirmeye Al / Reddet) ve %20 eşiği YALNIZCA buna göredir. PUAN 2 = "PROFİL PUANI" → pozisyondan bağımsız sabit kişisel/bilişsel profil kriterleri; her satır transkriptten SOMUT örnek + [dk] ile, dayanaksız çıkarım yok. İki tabloyu ve iki puanı KARIŞTIRMA. Profil bölümündeki "[VETO: …]" etiketini SADECE kurumsal ortamda çalışmaya engel ciddi bulguda (saldırganlık, hakaret, işbirliğine tam kapalılık, sürdürülen açık düşmanlık) yaz; sıradan düşüklük veto sebebi değildir.
@@ -7526,18 +7728,16 @@ async def create_l2_report(data: RealtimeReportRequest, background_tasks: Backgr
         print(f"UYARI (whisper maliyet kaydı c={effective_candidate_id}): {type(e).__name__}: {e}")
 
     _lang = (candidate["interview_language"] if "interview_language" in candidate.keys() else "tr") or "tr"
-    # GÖREV 4.1+4.2+4.4 — konuşmacı etiketi / yankı / iç talimat sızıntısı / zaman damgası düzeltmesi.
-    _spk_fixed, _spk_changes = fix_transcript_speaker_and_leaks(data.transcript, _lang)
+    # TUR 2 / GÖREV C — TEK transkript temizleyici (konuşmacı etiketi + yankı + sızıntı + damga
+    # + halüsinasyon), rapor üretim yolunun her noktasında AYNI.
+    _clean_transcript, _spk_changes, _hall_filtered, _hall_n = normalize_transcript_for_report(data.transcript, _lang)
     if _spk_changes:
         record_realtime_events(effective_candidate_id, candidate_level,
                                [{"type": "transcript_speaker_fix", "data": ch, "elapsed_ms": _safe_int(ch.get("ts")) * 1000 if ch.get("ts") else 0} for ch in _spk_changes])
         print(f"[TRANSCRIPT_FIX server] c={effective_candidate_id} {len(_spk_changes)} satır düzeltildi/kaldırıldı: "
               + ", ".join(sorted({c['tip'] for c in _spk_changes})))
-    # KALEM 1 — SUNUCU tarafı halüsinasyon filtresi (frontend filtresi tek savunma hattı olmasın).
-    _clean_transcript, _hall_filtered, _hall_n = filter_transcript_hallucinations(_spk_fixed, _lang)
     if _hall_n:
-        record_realtime_events(effective_candidate_id, candidate_level,
-                               [{"type": "transcription_filtered_server", "data": f, "elapsed_ms": 0} for f in _hall_filtered])
+        _dedup_filter_events(effective_candidate_id, candidate_level, _hall_filtered)
         print(f"[HALLUCINATION_FILTER server] c={effective_candidate_id} {_hall_n} aday satırı işaretlendi")
 
     db = get_db()
@@ -8212,12 +8412,22 @@ def regenerate_report(candidate_id: int, background_tasks: BackgroundTasks, leve
     _lang = cand["interview_language"] or "tr"
     _regen_notes = []
 
-    # KALEM 1a — kayıtlı transkript halüsinasyon filtresinden geçsin (canlı akışta atlanmış olabilir).
-    clean_transcript, hall_filtered, hall_n = filter_transcript_hallucinations(transcript_text, _lang)
+    # TUR 2 / GÖREV C.4 — YENİDEN ÜRETİM YOLU da TAM transkript temizleyiciden geçer:
+    # konuşmacı etiketi + hoparlör yankısı + iç talimat sızıntısı + zaman damgası + halüsinasyon.
+    # Eskiden burada YALNIZCA halüsinasyon filtresi vardı; Kader'in ham (etiketleri karışık)
+    # transkripti bu yüzden raporda bozuk basılıyordu.
+    clean_transcript, spk_changes, hall_filtered, hall_n = normalize_transcript_for_report(transcript_text, _lang)
+    _transcript_changed = (clean_transcript.strip() != (transcript_text or "").strip())
+    if spk_changes:
+        _tips = sorted({c["tip"] for c in spk_changes})
+        _regen_notes.append(f"{len(spk_changes)} transkript satırı düzeltildi/kaldırıldı (konuşmacı etiketi / yankı / iç talimat sızıntısı / zaman damgası).")
+        record_realtime_events(candidate_id, level,
+                               [{"type": "transcript_speaker_fix", "data": ch, "elapsed_ms": _safe_int(ch.get("ts")) * 1000 if ch.get("ts") else 0} for ch in spk_changes])
+        print(f"[TRANSCRIPT_FIX regenerate] c={candidate_id} {len(spk_changes)} satır: " + ", ".join(_tips))
     if hall_n:
         _regen_notes.append(f"{hall_n} aday satırı olası transkripsiyon halüsinasyonu olarak işaretlendi (bunlar aday cevabı sayılmadı).")
-        record_realtime_events(candidate_id, level,
-                               [{"type": "transcription_filtered_server", "data": f, "elapsed_ms": 0} for f in hall_filtered])
+        _dedup_filter_events(candidate_id, level, hall_filtered)
+    if _transcript_changed:
         try:
             fixed_msgs = [{"role": "user", "content": clean_transcript}]
             db.execute("UPDATE interviews SET messages=? WHERE candidate_id=? AND level=?",
