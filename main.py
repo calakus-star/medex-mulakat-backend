@@ -2430,7 +2430,7 @@ REPORT_BODY_SECTIONS = [
     ("kategori",       {1},       "**Kategori:** {category}"),
     ("tarih",          {1, 2, 3}, "**Tarih:** {date_str}"),
     ("_blank1",        {1, 2, 3}, ""),
-    ("yonetici_ozeti", {2, 3},    "**Yönetici Özeti:** (adayın genel profili, pozisyona uyumu, en güçlü 2-3 sinyal, en önemli 2-3 risk ve karar önerisi; genel kalıp değil, bu adaya özgü. SON cümle bir KARAR/SONUÇ cümlesi olmalı ve verdiğin Öneri ile AYNI YÖNDE olmalı: Öneri 'Reddet' ise burada 'değerlendirmeye alınabilir / potansiyeli var / uygun' gibi olumlu sonuç ifadesi KULLANMA.)"),
+    ("yonetici_ozeti", {2, 3},    "**Yönetici Özeti:** (adayın genel profili, pozisyona uyumu, en güçlü 2-3 sinyal, en önemli 2-3 risk; genel kalıp değil, bu adaya özgü. Bu senin bağımsız değerlendirici görüşündür — işe alım KARARINI/ÖNERİSİNİ yazma, o ayrı bir bölümde sistem tarafından eşik tablosundan üretilir.)"),
     ("_blank2",        {2, 3},    ""),
     ("toplam_puan",    {1, 2, 3}, "**TOPLAM PUAN: XX/{total_weight}**"),
     ("puanlama_kapsami", {2, 3},  "**Puanlama Kapsamı:** (kaç kriter puanlandı; kaçı 'Değerlendirilemedi (sistem)' olarak PAYDA DIŞI bırakıldı ve HER BİRİNİN gerekçesi — ör. 'İletişim: sistem kaynaklı eksik, sorulan turlarda geçerli aday cevabı alınamadı'; normalize yöntemini kısa açıkla)"),
@@ -2441,8 +2441,8 @@ REPORT_BODY_SECTIONS = [
     ("analitik_dusunme", {2, 3},  "**Analitik Düşünme ve Muhakeme:** (soruyu kavrama, problemi parçalama, neden-sonuç, alternatif kıyaslama, ölçüm/veri kullanımı; somut kanıtlarla)"),
     ("problem_cozme",  {2, 3},    "**Problem Çözme ve Karar Verme Yaklaşımı:** (izlediği yöntem, seçenekler, riskler, sonuç takibi)"),
     ("kavrama_iletisim", {2, 3},  "**Kavrama ve İletişim:** (soruyu doğru anlama, cevabı yapılandırma, açıklık, gereksiz dağılma veya güçlü sentez yeteneği)"),
-    ("tutarlilik_l13", {1},       "**Tutarlılık / Çelişki Analizi:** (çelişki taraması ÜÇ kaynak arasında yapılır: CV ↔ adayın sözlü cevapları ↔ kayıt formu beyanı. Sayısal ve kimlik beyanlarını KARŞILAŞTIR: deneyim yılı, eğitim/derece, unvan, tarihler, e-posta. Gerçek çelişki yoksa 'Belirgin çelişki yok' yaz ve HANGİ alanların karşılaştırıldığını kısaca say — muğlak terimin iki geçerli yorumu çelişki değildir.)"),
-    ("tutarlilik_l2",  {2, 3},    "**Tutarlılık / Çelişki Analizi:** (çelişki taraması ÜÇ kaynak arasında: CV ↔ adayın sözlü cevapları ↔ kayıt formu beyanı. Sayısal ve kimlik beyanlarını KARŞILAŞTIR: deneyim yılı, eğitim/derece, unvan, tarihler, e-posta. Gerçek çelişki yoksa açıkça 'Belirgin çelişki yok' de ve karşılaştırılan alanları kısaca say.)"),
+    ("tutarlilik_l13", {1},       "**Tutarlılık / Çelişki Analizi:** (çelişki taraması ÜÇ kaynak arasında yapılır: CV ↔ adayın sözlü cevapları ↔ kayıt formu beyanı. Yalnız deneyim yılı, eğitim SEVİYESİ/derece, unvan ve tarihleri KARŞILAŞTIR. E-POSTA ve TELEFON üzerinden çelişki/güvenilirlik değerlendirmesi YAPMA — CV'deki adresler eski işveren/muhasebe ofisi/referans kişilere ait olabilir. Eğitimde ALT KÜME çelişki değildir (ör. 'Ticaret Meslek Lisesi' ⊆ 'Lise'). Yalnız transkriptte veya sistemin verdiği listede AÇIKÇA görünen çelişkiyi yaz; yoksa 'Belirgin çelişki yok' de ve karşılaştırdığın alanları say.)"),
+    ("tutarlilik_l2",  {2, 3},    "**Tutarlılık / Çelişki Analizi:** (çelişki taraması ÜÇ kaynak arasında: CV ↔ adayın sözlü cevapları ↔ kayıt formu beyanı. Yalnız deneyim yılı, eğitim SEVİYESİ/derece, unvan ve tarihleri KARŞILAŞTIR. E-POSTA ve TELEFON üzerinden çelişki/güvenilirlik değerlendirmesi YAPMA. Eğitimde ALT KÜME çelişki değildir (ör. 'Ticaret Meslek Lisesi' ⊆ 'Lise'). SADECE sistemin verdiği 'Sistem Alan Karşılaştırması' listesini ve transkriptte açıkça görünen çelişkileri yaz; liste yoksa/çelişki yoksa 'Belirgin çelişki yok' de ve karşılaştırılan alanları say. Aday transkriptte konusu HİÇ geçmeyen bir alan için çelişki UYDURMA.)"),
     ("guclu_yonler_l13", {1},     "**Güçlü Yönler:** ..."),
     ("guclu_yonler_l2", {2, 3},   "**Güçlü Yönler:** (her maddeyi kanıtla)"),
     ("gelisim_l13",    {1},       "**Gelişim Alanları:** ..."),
@@ -2451,16 +2451,14 @@ REPORT_BODY_SECTIONS = [
     ("proje_l2",       {2, 3},    "**Öne Çıkan Proje ve Deneyimler:** (transkriptte anlatılan somut örnekler, adayın kişisel katkısı ve sonuçları)"),
     ("cv_uyum_l13",    {1},       "**CV Tutarlılığı:** ..."),
     ("cv_uyum_l2",     {2, 3},    "**CV ↔ Mülakat ↔ Pozisyon Uyumu:** (CV'deki kıdem/deneyim, mülakatta doğrulananlar, doğrulanamayanlar ve pozisyonla bağlantı)"),
-    ("degerlendirilemeyen", {2, 3}, "**Değerlendirilemeyen Alanlar:** (sorulmamış veya yeterli veri oluşmamış alanlar)"),
+    ("degerlendirilemeyen", {2, 3}, "**Değerlendirilemeyen Alanlar:** (SADECE gerçekten sorulmamış veya yeterli veri oluşmamış kriterleri adıyla listele. Böyle bir kriter YOKSA tam olarak 'Değerlendirilemeyen alan yok.' yaz — 'belirtilen tüm kriterler değerlendirildi' gibi genel/klişe cümle KURMA.)"),
     ("takip_sorulari", {2, 3},    "**Takip Mülakatında Sorulması Önerilen Sorular:** (3-6 adet, bu adaya özgü)"),
     ("dil_gozlemi",    {1, 2, 3}, "**Dil Gözlemi:** (adayın dil tercihi; Türkçe/ilgili dile hâkimiyetine dair somut gözlem; varsa hangi konuda/noktada dil değiştirdiği. Pozisyon bir dil yeterliliği gerektiriyorsa bunun değerlendirmeye etkisini açıkla; gerektirmiyorsa yalnızca bilgi amaçlı gözlem olarak yaz. Gözlem yoksa \"Belirtilecek bir dil gözlemi yok\".)"),
     ("serbest_l13",    {1},       "**Serbest Gözlemler:** ... (kriter dışı sinyaller; yoksa \"Belirtilecek bir gözlem yok\" yaz)"),
     ("serbest_l2",     {2, 3},    "**Serbest Gözlemler:** (kriter dışı ama işle ilgili NİTELİKSEL gözlemler — duruş, mimik, davranış, tutum. Ses metriği SAYILARINI (konuşma süresi, tur uzunluğu, yanıt gecikmesi vb.) BURADA TEKRARLAMA; o sayılar sistem tarafından ayrı 'Modalite Veri Kapsamı' bloğunda veriliyor. Niteliksel bir gözlem yoksa \"Belirtilecek bir gözlem yok\" yaz.)"),
-    ("sonuc_gerekcesi", {1, 2, 3}, "**Sonuç Gerekçesi:** (Mülakat ihlal, teknik sebep veya erken bitişle sonuçlandıysa: NE olduğu, mülakatın KAÇINCI DAKİKASINDA olduğu, DAYANAĞI (transkriptteki ilgili söz / kamera karesi) ve sonuca ETKİSİ açıkça yazılır. \"İhlal tespit edildi\", \"uygunsuz davranış\" gibi genel ifade YASAK — somut olay yaz. Aşağıdaki MODALİTE/OLAY KANITLARI bloğundaki kayıtları esas al. Sorun yoksa \"Mülakat normal tamamlandı, olumsuz bir gözlem yok\".)"),
+    ("sonuc_gerekcesi", {1, 2, 3}, "**Sonuç Gerekçesi:** (SADECE mülakat ihlal, teknik sebep veya erken bitişle sonuçlandıysa doldur: NE olduğu, KAÇINCI DAKİKA, DAYANAĞI (transkriptteki söz / kamera karesi), sonuca ETKİSİ. Aşağıdaki OLAY KANITLARI bloğunu esas al. Böyle bir olay YOKSA bu başlığı ve altını tamamen ATLA — 'Mülakat normal tamamlandı, olumsuz bir gözlem yok' gibi sabit cümle YAZMA; o durumu sistem ayrıca not eder.)"),
     ("genel_kani_l13", {1},       "**Genel Kanı:** ...{note_report_field}"),
     ("genel_kani_l2",  {2, 3},    "**Genel Kanı:** (kanıtların dengeli sentezi){ai_note_report_field}"),
-    ("oneri",          {1, 2, 3}, "**Öneri:** İşe Al / Değerlendirmeye Al / Reddet"),
-    ("oneri_gerekcesi", {2, 3},   "**Öneri Gerekçesi:** (tek paragraf, 'Öneri:' satırının HEMEN ALTINDA — araya tablo/başka bölüm KOYMA. Somut ve kararı DESTEKLEYEN yönde; kararın PUAN 1'e dayandığını belirt. Öneri 'Reddet' ise gerekçe de olumsuz sonuçlanmalı — 'yeterli potansiyele sahip / uygun' gibi kararla çelişen ifade YASAK. Rapordaki nihai puan sistemce normalize edildiği için gerekçede sayısal puan TEKRARLAMA.)"),
     ("_blank_p2a",     {1, 2, 3}, ""),
     ("puan2_baslik",   {1, 2, 3}, "---\n### PUAN 2 — KİŞİSEL VE BİLİŞSEL PROFİL (pozisyondan bağımsız, her aday için sabit)"),
     ("puan2_aciklama", {1, 2, 3}, "(Bu bölüm PUAN 1'den / pozisyon uygunluğundan AYRIDIR ve işe alım kararını TEK BAŞINA belirlemez. Her kriter için transkriptten SOMUT bir örnek ve [dk] dakika damgası ZORUNLU — dayanaksız çıkarım, kişilik teşhisi, IQ/zekâ yorumu YASAK. Eksik kriterde PUAN 1 ile AYNI ayrım: `Değerlendirilmedi (sorulmadı) — <gerekçe>` (paydayı etkilemez) vs `Yetersiz (soruldu, veri alınamadı) — <gerekçe>` (0 puan, paydada kalır).)"),
@@ -4054,6 +4052,36 @@ def _extract_education_from(text: str):
             return label
     return None
 
+# GÖREV 5.3 — eğitim SEVİYE hiyerarşisi. Alt küme / detaylandırma ilişkisi (ör. "Ticaret Meslek
+# Lisesi" ⊆ "Lise") aynı rank'e düşer → ÇELİŞKİ ÜRETMEZ. Yalnız gerçek seviye uyuşmazlığı
+# (ör. Lisans=5 vs Lise=3) çelişkidir.
+_EDU_LEVEL_RANK = [
+    (("doktora", "phd", "ph.d"), 7),
+    (("yüksek lisans", "yuksek lisans", "master", "mba", "m.sc", "msc", "m.a "), 6),
+    (("lisans", "üniversite", "universite", "fakülte", "fakulte", "bachelor", "b.sc", "bsc", "mühendis", "muhendis",
+      "işletme bölüm", "isletme bolum", "iktisat", "hukuk fak"), 5),
+    (("ön lisans", "on lisans", "önlisans", "onlisans", "meslek yüksekokul", "myo", "associate"), 4),
+    (("lise", "high school", "ortaöğretim", "ortaogretim"), 3),   # her tür lise (meslek/anadolu/ticaret/imam hatip/açık) burada
+    (("ortaokul", "middle school"), 2),
+    (("ilkokul", "ilköğretim", "ilkogretim", "primary school"), 1),
+]
+
+def _education_level_rank(text: str):
+    """Eğitim metnini seviye rank'ine çevirir (1=ilkokul … 7=doktora). Bilinmiyorsa None.
+    'lisans okumaktayım / öğrencisiyim' gibi DEVAM EDEN eğitim, tamamlanmış sayılmaz → o ifade
+    varsa lisans rank'i verilmez (yalnız mevcut/tamamlanmış seviye kıyaslanır)."""
+    low = _norm_ws(text or "")
+    if not low:
+        return None
+    ongoing = bool(re.search(r"(okumakta|öğrenci|ogrenci|devam ed|sürdür|surdur|yarım|yarida|terk)", low))
+    for needles, rank in _EDU_LEVEL_RANK:
+        for nd in needles:
+            if nd in low:
+                if rank == 5 and ongoing and not re.search(r"(mezun|bitir|tamamla|derece)", low):
+                    continue  # "açık öğretimden işletme okumaktayım" → lisans SAYMA, lise kalır
+                return rank
+    return None
+
 def extract_cv_fields_heuristic(cv_text: str = "", transcript: str = "") -> dict:
     """SIKI sezgisel çıkarım. Transkript öncelikli; yapışık CV'den çıkarım YOK; birebir doğrulama.
     Dönüş: {education, university, department, experience_years, _cv_readable, _notes[]}."""
@@ -4195,36 +4223,28 @@ def compute_field_discrepancies(candidate: dict, transcript: str = "") -> dict:
     elif cv.strip() and not cv_ok and (form_exp is not None or tr_exp is not None):
         _add("Deneyim yılı", {"CV": "okunamadı"}, "karşılaştırılamadı", "CV metni yapışık/okunamadı")
 
-    # --- e-posta ---
-    form_mail = (c.get("email") or "").strip().lower()
-    _MAIL = r"[a-z0-9][a-z0-9._%+\-]*@[a-z0-9.\-]+\.[a-z]{2,}"
-    cv_mails = set(re.findall(_MAIL, cv.lower())) if cv_ok else set()
-    tr_mails = set(re.findall(_MAIL, tr.lower()))
-    distinct = set()
-    if form_mail:
-        distinct.add(form_mail)
-    distinct |= cv_mails | tr_mails
-    if len(distinct) >= 2:
-        _add("E-posta", {"Kayıt formu": form_mail or "—",
-                         "CV": "; ".join(sorted(cv_mails)) or "—",
-                         "Sözlü/transkript": "; ".join(sorted(tr_mails)) or "—"},
-             "çelişki", "birden fazla farklı e-posta adresi: " + ", ".join(sorted(distinct)))
-    elif cv.strip() and not cv_ok and form_mail:
-        _add("E-posta", {"Kayıt formu": form_mail, "CV": "okunamadı"}, "karşılaştırılamadı", "CV metni yapışık/okunamadı")
+    # --- e-posta / telefon ---
+    # GÖREV 5.1 — KALDIRILDI. CV'deki e-posta/telefon eski işveren, muhasebe ofisi, referans
+    # kişilere ait olabilir; adayın birden fazla numarası olabilir. Bunlar ÇELİŞKİ DEĞİLDİR.
+    # Aday iletişim bilgisi için TEK KAYNAK kayıt formudur (GÖREV 5.2) — hiçbir karşılaştırmaya girmez.
 
-    # --- eğitim ---
+    # --- eğitim (SEVİYE bazlı — GÖREV 5.3) ---
     form_edu = (c.get("education") or "").strip()
     tr_edu = _extract_education_from(tr)
     cv_edu = _extract_education_from(cv) if cv_ok else None
     edu_vals = {k: v for k, v in (("Kayıt formu", form_edu or None), ("Sözlü beyan", tr_edu), ("CV", cv_edu)) if v}
     if len(edu_vals) >= 2:
-        norm = {_norm_ws(v) for v in edu_vals.values()}
-        if len(norm) > 1:
-            _add("Eğitim", edu_vals, "çelişki", " / ".join(f"{k}: {v}" for k, v in edu_vals.items()))
+        levels = {k: _education_level_rank(v) for k, v in edu_vals.items()}
+        known = {k: r for k, r in levels.items() if r is not None}
+        if len(set(known.values())) > 1:
+            # GERÇEK seviye uyuşmazlığı (ör. Lisans vs Lise) — alt küme/detaylandırma DEĞİL
+            _add("Eğitim (seviye)", edu_vals, "çelişki",
+                 "farklı eğitim seviyesi: " + " / ".join(f"{k}: {v}" for k, v in edu_vals.items()))
         else:
-            _add("Eğitim", edu_vals, "tutarlı")
+            _add("Eğitim (seviye)", edu_vals, "tutarlı",
+                 "aynı eğitim seviyesi (biri diğerinin alt kümesi/detayı olabilir — çelişki değil)")
     elif cv.strip() and not cv_ok and (form_edu or tr_edu):
-        _add("Eğitim", {"CV": "okunamadı"}, "karşılaştırılamadı", "CV metni yapışık/okunamadı")
+        _add("Eğitim (seviye)", {"CV": "okunamadı"}, "karşılaştırılamadı", "CV metni yapışık/okunamadı")
 
     return {"rows": rows, "cv_readable": cv_ok,
             "celiski_var": any(r["durum"] == "çelişki" for r in rows),
@@ -4235,9 +4255,10 @@ def render_discrepancy_block(disc: dict, for_prompt: bool = True) -> str:
     rows = (disc or {}).get("rows") or []
     if not rows:
         if for_prompt:
-            return ("SİSTEM ALAN KARŞILAŞTIRMASI: Karşılaştırılabilir sayısal/kimlik alanı (deneyim yılı, "
-                    "eğitim, e-posta) bulunamadı. Bu alanlarda 'tutarlıdır' DEME; yalnız transkriptte "
-                    "açıkça geçen çelişkileri yaz, yoksa 'karşılaştırma için yeterli veri yok' de.")
+            return ("SİSTEM ALAN KARŞILAŞTIRMASI: Karşılaştırılabilir alan (deneyim yılı, eğitim seviyesi) "
+                    "bulunamadı. Bu alanlarda 'tutarlıdır' DEME; yalnız transkriptte açıkça geçen çelişkileri "
+                    "yaz, yoksa 'karşılaştırma için yeterli veri yok' de. E-POSTA/TELEFON üzerinden çelişki "
+                    "veya güvenilirlik değerlendirmesi YAPMA.")
         return ""
     lines = []
     for r in rows:
@@ -4249,8 +4270,9 @@ def render_discrepancy_block(disc: dict, for_prompt: bool = True) -> str:
         return ("SİSTEM ALAN KARŞILAŞTIRMASI (deterministik — HAZIR VERİ; tespiti sen yapma, YALNIZ yorumla):\n"
                 + body +
                 "\n→ 'Tutarlılık / Çelişki Analizi' bölümünde SADECE bu listeyi ve transkriptte açıkça görünen "
-                "başka çelişkileri yaz. Liste 'çelişki' diyorsa bunu çelişki olarak RAPORLA. 'karşılaştırılamadı' "
-                "diyen alan için 'tutarlıdır' DEME.")
+                "başka çelişkileri yaz. Liste 'çelişki' diyorsa bunu çelişki olarak RAPORLA. 'tutarlı' veya "
+                "'karşılaştırılamadı' diyen alan için ÇELİŞKİ UYDURMA. E-POSTA/TELEFON bu karşılaştırmaya "
+                "DAHİL DEĞİLDİR — o alanlar üzerinden çelişki/güvenilirlik yorumu YAPMA.")
     return "**Sistem Alan Karşılaştırması (deterministik):**\n" + body
 
 def build_standard_cv_deterministic(candidate: dict, transcript: str = "") -> str:
@@ -4425,39 +4447,38 @@ def _place_rationale_after_recommendation(report: str) -> str:
     lines.insert(oi + 1, gline)
     return "\n".join(lines)
 
+_DECISION_BLOCK_MARK = "**KARAR (sistem — eşik tablosundan):**"
+
 def sync_recommendation_line(report: str, recommendation: str, score_position=None, score_profile=None,
                              veto_reason=None, summary_tone=None) -> str:
-    """KALEM 1+2 (bu tur) — TEK KAYNAK, KOŞULSUZ:
-      - '**Öneri:** <değer>' satırı DB recommendation ile aynı yapılır.
-      - '**Öneri Gerekçesi:**' cümlesi HER ZAMAN _recommendation_rationale ile değiştirilir;
-        modelin cümlesi ' Model notu: <...>' olarak korunur (bilgi kaybı yok).
-      - Yönetici Özeti sonuç cümlesi öneriyle çelişiyorsa (denetçi tonu, yoksa son çare kelime
-        kontrolü) deterministik karar cümlesiyle değiştirilir.
-    Kelime listesiyle 'çelişki tespiti' KALDIRILDI — yapısal olarak çözmüyordu."""
+    """GÖREV 1.1 + 2.2 — KARAR TEK KAYNAK, GPT METNİNE DOKUNMADAN:
+      - GPT artık 'Öneri:' / 'Öneri Gerekçesi:' üretmiyor (REPORT_BODY_SECTIONS'tan çıkarıldı).
+      - Karar YALNIZCA PUAN 1 (score_position) + sabit eşik tablosundan üretilir ve raporda
+        TEK BİR YERE, kendi başlıklı bloğu olarak eklenir.
+      - GPT'nin Yönetici Özeti / Genel Kanı / hiçbir prose'una DOKUNULMAZ — GPT'nin görüşü ile
+        eşik kararı farklı yönde olabilir, bu bir hata değil (iki ayrı otorite yan yana).
+      - Eski davranıştan farkı: model cümlesi sansürlenmez, özet sonucu yeniden yazılmaz.
+    İdempotent: blok zaten varsa yeniden eklenmez, değeri güncellenir."""
     if not report or not recommendation:
         return report
-    out = re.sub(r"(\**\s*Öneri\s*:\s*\**\s*)(İşe Al|Değerlendirmeye Al|Reddet|Değerlendirilemedi)\b[^\n]*",
-                 lambda m: f"{m.group(1)}{recommendation}", report, count=1, flags=re.IGNORECASE)
-    _det = _recommendation_rationale(recommendation, score_position, score_profile, veto_reason)
-    def _rat_repl(m):
-        orig = _sanitize_model_note(m.group(2) or "")
-        if orig.startswith(_det[:40]):   # idempotent: zaten deterministik yazılmış
-            return m.group(0)
-        model_note = f" Model notu: {orig}" if orig and "Model notu:" not in orig else ""
-        return f"{m.group(1)}{_det}{model_note}"
-    out = re.sub(r"(\**\s*Öneri\s+Gerekçesi\s*:\s*\**\s*)([^\n]*)", _rat_repl, out, count=1, flags=re.IGNORECASE)
-    # KALEM 1 (bu tur) — Öneri Gerekçesi satırı "Öneri:" satırının HEMEN ardında olmalı; model
-    # araya başka bölüm (kriter tablosu vb.) koyduysa deterministik olarak yeniden konumlandır.
-    out = _place_rationale_after_recommendation(out)
-    # Yönetici Özeti sonuç cümlesi:
-    #  - denetçi tonu ÇELİŞKİLİ (OLUMLU↔Reddet / OLUMSUZ↔İşe Al) → modelin son cümlesini DEĞİŞTİR
-    #  - ton alınamadı (denetçi atlandı/patladı) → modelin cümlesine dokunma, sonuna deterministik ekle
-    #  - ton uyumlu → hiç dokunma
-    if _summary_conclusion_conflicts(summary_tone, recommendation):
-        out = _rewrite_summary_conclusion(out, recommendation, score_position, replace_last=True)
-    elif summary_tone is None:
-        out = _rewrite_summary_conclusion(out, recommendation, score_position, replace_last=False)
-    return out
+    # GPT yanlışlıkla bir 'Öneri:' satırı bıraktıysa temizle (karar artık tek blokta).
+    report = re.sub(r"(?m)^\s*\**\s*Öneri(?:\s+Gerekçesi)?\s*:\s*\**.*$\n?", "", report)
+    rationale = _recommendation_rationale(recommendation, score_position, score_profile, veto_reason)
+    block = (f"{_DECISION_BLOCK_MARK} {recommendation}\n\n"
+             f"**Karar Gerekçesi (sistem):** {rationale}\n\n"
+             f"(Bu karar YALNIZCA PUAN 1 — pozisyon uygunluğu puanından ve sabit eşik tablosundan "
+             f"üretilmiştir: <40 → Reddet · 40–79 → Değerlendirmeye Al · ≥80 → İşe Al. Rapor metnindeki "
+             f"değerlendirici görüşü ve ikinci model görüşü bu karardan bağımsızdır ve farklı yönde olabilir.)")
+    if _DECISION_BLOCK_MARK in report:
+        return re.sub(re.escape(_DECISION_BLOCK_MARK) + r"[\s\S]*?(?=\n\s*\n---|\n\s*\n#{1,4}|\n\s*\n\*\*|---RAPORSON---|\Z)",
+                      block + "\n", report, count=1)
+    # Anchor: PUAN 2 başlığından hemen ÖNCE (tüm PUAN 1 prose'undan sonra); yoksa ---RAPORSON--- öncesi.
+    m = re.search(r"\n\s*-{2,}\s*\n\s*#{2,4}\s*PUAN\s*2\b", report)
+    if m:
+        return report[:m.start()] + "\n\n" + block + "\n" + report[m.start():]
+    if "---RAPORSON---" in report:
+        return report.replace("---RAPORSON---", block + "\n\n---RAPORSON---", 1)
+    return report.rstrip() + "\n\n" + block + "\n"
 
 def sync_report_date_line(report: str, date_str: str) -> str:
     """Rapor metnindeki '**Tarih:** ...' satırını mülakatın GERÇEK tarihine sabitler (üretim
@@ -4515,11 +4536,17 @@ def strip_report_system_lines(text: str) -> str:
 
 # KALEM 5 (bu tur) — içeriği "belirtilecek bir şey yok" olan opsiyonel bölümler rapordan
 # TAMAMEN çıkarılır (deterministik, model çağrısı yok). Yalnız şu başlıklar için:
-_EMPTYABLE_SECTIONS = ("dil gözlemi", "serbest gözlemler", "değerlendirilemeyen alanlar")
+_EMPTYABLE_SECTIONS = ("dil gözlemi", "serbest gözlemler", "değerlendirilemeyen alanlar",
+                       "sonuç gerekçesi", "ai notuna uyum")
+# GÖREV 6 — bağlamsız/klişe şablon cümleleri: bu kalıplardan biriyle DOLU bir opsiyonel bölüm
+# "içeriksiz" sayılır ve rapordan tamamen çıkarılır (başlık + gövde).
 _EMPTY_CONTENT_RE = re.compile(
     r"belirtilecek\s+bir\s+.{0,20}?\s*yok|belirtilecek\s+bir\s+şey\s+yok|"
     r"(?:kayda\s+değer|not\s+edilecek|söylenecek|eklenecek)\s+bir\s+.{0,20}?\s*yok|"
-    r"gözlem\s+yok|herhangi\s+bir\s+.{0,30}?\s*(?:yok|bulunmamaktadır|gözlenmemiştir)\.?\s*$",
+    r"gözlem\s+yok|herhangi\s+bir\s+.{0,30}?\s*(?:yok|bulunmamaktadır|gözlenmemiştir)\.?\s*$|"
+    r"mülakat\s+normal\s+tamamland|normal\s+(?:bir\s+)?(?:şekilde\s+)?tamamland|olumsuz\s+bir\s+(?:gözlem|durum|bulgu)\s+(?:yok|bulunma)|"
+    r"belirtilen\s+tüm\s+kriterler\s+değerlendirild|tüm\s+kriterler\s+değerlendirild|değerlendirilemeyen\s+(?:bir\s+)?alan\s+(?:yok|bulunma)|"
+    r"tüm\s+kriterler\s+(?:eksiksiz\s+)?(?:puanland|değerlendirild)",
     re.IGNORECASE)
 
 def strip_empty_report_sections(text: str) -> str:
@@ -4938,35 +4965,50 @@ def _set_reviewer_status(candidate_id: int, level: int, status: str, error: Opti
     except Exception as e:
         print(f"UYARI (_set_reviewer_status c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
-def run_report_reviewer(candidate_id: int, level: int, transcript_text: str, draft_report: str, modality_block: str):
-    """Ortak raporun MUHALİF DENETÇİSİ. Raporu YENİDEN YAZMAZ. Sadece: abartılı/kanıtsız iddialar,
-    eksik kanıt, puan kalibrasyon notu, güven düzeyi döner. Denetçi HER ZAMAN OpenAI'dır
-    (OPENAI_REVIEWER_MODEL) — Claude-primary için 'diğer sağlayıcı', OpenAI-primary için 'ikinci
-    OpenAI modeli'. L2'de Anthropic'e ASLA gitmez.
-    Dönüş: (notes, status, error) — status ∈ {'ok','skipped','failed'}. Hata/atlama halinde
-    notes='' ve rapor denetçisiz tamamlanır, ama durum interviews'a kaydedilir (sessiz düşme yok)."""
+def _reviewer_criteria_block(position_criteria: list) -> str:
+    """GÖREV 1.6 — müfettişe GPT ile AYNI kriter setini ve AYNI maksimum puanları verir."""
+    lines = ["PUAN 1 (pozisyon) kriterleri ve tavanları:"]
+    for c in (position_criteria or []):
+        if c.get("name"):
+            lines.append(f"- {c['name']}: __/{_safe_int(c.get('weight'))}")
+    lines.append("PUAN 2 (kişisel/bilişsel profil) kriterleri ve tavanları:")
+    for pc in PROFILE_CRITERIA:
+        lines.append(f"- {pc['name']}: __/{pc['weight']}")
+    return "\n".join(lines)
+
+def run_report_reviewer(candidate_id: int, level: int, transcript_text: str, final_report: str, modality_block: str,
+                        position_criteria: Optional[list] = None):
+    """GÖREV 1.3-1.6 — BAĞIMSIZ İKİNCİ DEĞERLENDİRİCİ. Artık NİHAİ raporu (basılacak hali:
+    kriter tabloları + KARAR + gerekçe dahil) görür; taslağı değil. Raporu YENİDEN YAZMAZ ve
+    karara/puana ETKİ ETMEZ. Serbestçe, kısıtsız kendi görüşünü yazar — GPT ile farklı görüşte
+    olabilir, şerh koyabilir. Ayrıca GPT ile AYNI kriter setinde KENDİ puanını verir (yalnız
+    referans tablo). Denetçi HER ZAMAN OpenAI (OPENAI_REVIEWER_MODEL); L2'de Anthropic'e gitmez.
+    Dönüş: (notes, status, error). Hata/atlama → notes='' ve rapor DENETÇİSİZ, DEĞİŞMEDEN kalır."""
     if not OPENAI_API_KEY:
         return "", "skipped", "OPENAI_API_KEY tanımlı değil"
-    prompt = f"""Sen bir işe alım raporu DENETÇİSİSİN. Aşağıda bir mülakatın transkripti, birincil modelin yazdığı RAPOR TASLAĞI ve (varsa) modalite kanıtları var.
+    prompt = f"""Sen bir işe alım raporunun BAĞIMSIZ İKİNCİ DEĞERLENDİRİCİSİSİN. Aşağıda bir mülakatın transkripti, sistemin ürettiği NİHAİ RAPOR (basılacak hali) ve (varsa) modalite kanıtları var.
 
-Raporu YENİDEN YAZMA. Sadece şunları Türkçe, kısa ve madde madde ver:
-1. ABARTILI / KANITSIZ İDDİALAR: taslakta transkriptle desteklenmeyen veya aşırı iddialı cümleler (kısa alıntıyla). Bir KRİTER PUANI transkriptteki kanıttan yüksekse o kriterin ADINI açıkça yaz — sistem bu kriterin puanını otomatik düşürür.
-2. EKSİK KANIT: transkriptte olan ama taslağın atladığı önemli sinyaller.
-3. PUAN KALİBRASYONU: Taslaktaki toplam puan kanıtlara göre yüksek mi / düşük mü / uygun mu — tek cümle gerekçe. (Kriter puanları sunucu tarafından tavana göre normalize edilir; sen yalnız kanıt-puan tutarlılığına bak.)
+Raporu YENİDEN YAZMA. Kararı/puanı DEĞİŞTİREMEZSİN — senin çıktın karara etki etmez, rapora AYRI bir "ikinci değerlendirici görüşü" bloğu olarak eklenir. Görüşünü SERBESTÇE, kısıtsız yaz; birincil değerlendirmeyle aynı fikirde olmak zorunda değilsin, şerh koyabilirsin.
+
+Türkçe, kısa ve madde madde ver:
+1. ABARTILI / KANITSIZ İDDİALAR: raporda transkriptle desteklenmeyen veya aşırı iddialı cümleler (kısa alıntıyla).
+2. EKSİK KANIT: transkriptte olan ama raporun atladığı önemli sinyaller (aday kendi ağzıyla söylediği bilgi eksiklikleri dahil).
+3. PUAN KALİBRASYONU: rapordaki toplam puan ve kriter puanları kanıtlara göre yüksek mi / düşük mü / uygun mu — kısa gerekçe.
 4. GÜVEN DÜZEYİ: (yüksek / orta / düşük) + kısa neden.
-5. PUANI FAZLA DÜŞÜK KRİTER(LER): Bir kriterin puanı transkriptteki kanıta göre olması gerekenden DÜŞÜKSE adını yaz. (Sistem yükseltme YAPMAZ; yalnız rapora not düşer.)
+5. KARARA İLİŞKİN GÖRÜŞ: Rapordaki sistem kararına (eşik tablosundan) katılıyor musun? Katılmıyorsan neden — bu yalnızca görüştür, kararı değiştirmez.
+6. KRİTER PUAN TABLOSU (ZORUNLU): Aşağıdaki kriter setinde, AYNI maksimum puanlarla KENDİ puanını ver. Her satırı TAM olarak şu formatta yaz (otomatik ayrıştırılacak):
+KRITER_PUAN: <kriter adı> = <senin puanın>/<maksimum>
+Önce PUAN 1 kriterleri, sonra PUAN 2 kriterleri. Her kriter için bir satır.
 
-Yanıtının EN SONUNA, ayrı satırlarda, TAM OLARAK bu iki etiketi ekle (otomatik ayrıştırılacak):
-OZET_TON: <Taslağın "Yönetici Özeti" bölümünün KARAR/SONUÇ cümlesinin genel tonu — yalnız şu üçünden biri: OLUMLU | NOTR | OLUMSUZ>
-DUSUK_PUAN: <5. maddedeki kriter adları, virgülle; yoksa: yok>
+{_reviewer_criteria_block(position_criteria)}
 
-İLKE: Kanıt yoksa ne lehte ne aleyhte varsayım yapma. Modalite kanıtları (mimik/ses) puanı DEĞİŞTİRMEZ; yalnızca destekleyici. Belirgin bir sorun yoksa "Belirgin bir görüş ayrılığı yok." yaz (etiketleri yine ekle).
+İLKE: Kanıt yoksa ne lehte ne aleyhte varsayım yapma. Modalite kanıtları (mimik/ses) yalnızca destekleyici. Belirgin bir görüş ayrılığı yoksa "Belirgin bir görüş ayrılığı yok." yaz (kriter puan tablosunu YİNE DE doldur).
 
 === TRANSKRİPT ===
 {(transcript_text or '')[:TRANSCRIPT_PROMPT_MAX_CHARS]}
 
-=== RAPOR TASLAĞI ===
-{(draft_report or '')[:12000]}
+=== NİHAİ RAPOR (basılacak hali) ===
+{(final_report or '')[:16000]}
 
 === MODALİTE KANITLARI ===
 {modality_block or 'Yok'}"""
@@ -4974,7 +5016,7 @@ DUSUK_PUAN: <5. maddedeki kriter adları, virgülle; yoksa: yok>
         resp = openai_call(
             "POST", "https://api.openai.com/v1/chat/completions",
             json_body={"model": OPENAI_REVIEWER_MODEL, "messages": [{"role": "user", "content": prompt}],
-                       "max_tokens": 1000, "temperature": 0.1},
+                       "max_tokens": 1400, "temperature": 0.1},
             timeout=60.0, step="report_reviewer", severity="background", retry=False,
             context={"candidate_id": candidate_id, "level": level},
         )
@@ -4984,6 +5026,99 @@ DUSUK_PUAN: <5. maddedeki kriter adları, virgülle; yoksa: yok>
     except Exception as e:
         print(f"UYARI (run_report_reviewer c={candidate_id} L{level}): {type(e).__name__}: {e}")
         return "", "failed", f"{type(e).__name__}: {e}"
+
+def parse_reviewer_criterion_scores(notes: str) -> dict:
+    """GÖREV 1.6 — müfettiş çıktısındaki 'KRITER_PUAN: <ad> = <p>/<max>' satırlarını ayrıştırır.
+    Dönüş: {kriter_adı: (puan, maks)}."""
+    out = {}
+    for m in re.finditer(r"KR[İI]TER_PUAN\s*:\s*(.+?)\s*=\s*(\d+)\s*/\s*(\d+)", notes or "", re.IGNORECASE):
+        name = re.sub(r"[*_`]", "", m.group(1)).strip()
+        if name:
+            out[name] = (int(m.group(2)), int(m.group(3)))
+    return out
+
+def _reviewer_score_tables(reviewer_scores: dict, position_criteria: list, final_report: str) -> str:
+    """GÖREV 1.6 — 'Kriter | GPT | Müfettiş | Fark' tabloları (PUAN 1 ayrı, PUAN 2 ayrı).
+    GPT puanı NİHAİ rapordaki kriter hücrelerinden okunur. Bu tablo YALNIZ REFERANS — hiçbir
+    hesaba girmez."""
+    def _gpt_cell(name):
+        # rapordaki "| <kriter> | <p>/<max> ..." satırından GPT'nin verdiği puanı çek
+        for ln in (final_report or "").splitlines():
+            if "|" in ln and _norm_name(name)[:14] in _norm_name(ln):
+                mm = re.search(r"(\d+)\s*/\s*(\d+)", ln)
+                if mm:
+                    return f"{mm.group(1)}/{mm.group(2)}"
+                if re.search(r"değerlendirilemedi|değerlendirilmedi|yetersiz", ln, re.IGNORECASE):
+                    return "—"
+        return "?"
+    def _tbl(title, crit_list):
+        rows = [f"_{title}_", "", "| Kriter | Birincil | İkinci değerlendirici | Fark |",
+                "|---|---|---|---|"]
+        any_row = False
+        for c in crit_list:
+            nm = c["name"] if isinstance(c, dict) else c
+            gpt = _gpt_cell(nm)
+            rv = reviewer_scores.get(nm)
+            if rv is None:
+                # gevşek eşleşme
+                for k, v in reviewer_scores.items():
+                    if _norm_name(k)[:12] and _norm_name(k)[:12] in _norm_name(nm):
+                        rv = v; break
+            rv_txt = f"{rv[0]}/{rv[1]}" if rv else "—"
+            diff = ""
+            gm = re.match(r"(\d+)/(\d+)", gpt or "")
+            if gm and rv:
+                diff = f"{rv[0] - int(gm.group(1)):+d}"
+            rows.append(f"| {nm} | {gpt} | {rv_txt} | {diff} |")
+            any_row = True
+        return "\n".join(rows) if any_row else ""
+    parts = [p for p in (_tbl("PUAN 1 — pozisyon kriterleri", position_criteria or []),
+                         _tbl("PUAN 2 — kişisel/bilişsel profil", PROFILE_CRITERIA)) if p]
+    return "\n\n".join(parts)
+
+def append_reviewer_section(candidate_id: int, level: int, transcript_text: str, modality_block: str,
+                            position_criteria: Optional[list] = None) -> None:
+    """GÖREV 1 — müfettişi NİHAİ rapor üzerinde çalıştırır ve çıktısını rapora AYRI, tek blok
+    olarak ekler (tüm GPT içeriği + iki kriter tablosu + KARAR'dan SONRA; kamera karelerinden
+    ÖNCE = rapor gövdesinin sonu). Karara/puana ETKİ ETMEZ. Müfettiş atlanır/patlarsa rapor
+    DENETÇİSİZ ve DEĞİŞMEDEN kalır. İdempotent: blok zaten varsa yeniden eklenmez."""
+    db = get_db()
+    try:
+        row = db.execute("SELECT report FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+    finally:
+        db.close()
+    final_report = (row["report"] if row else "") or ""
+    if not final_report.strip():
+        return
+    _HEAD = "**İkinci Değerlendirici Görüşü (bağımsız — karara ve puana ETKİ ETMEZ):**"
+    if _HEAD in final_report:
+        return
+    notes, status, err = run_report_reviewer(candidate_id, level, transcript_text, final_report, modality_block,
+                                             position_criteria=position_criteria)
+    _set_reviewer_status(candidate_id, level, status, err)
+    if not notes.strip():
+        return
+    rv_scores = parse_reviewer_criterion_scores(notes)
+    body_notes = strip_reviewer_meta_tags(notes)
+    # kriter puan satırlarını serbest metinden çıkar (tablo ayrı gösteriliyor)
+    body_notes = re.sub(r"(?m)^\s*KR[İI]TER_PUAN\s*:.*$\n?", "", body_notes).strip()
+    tables = _reviewer_score_tables(rv_scores, position_criteria or [], final_report)
+    block = (f"\n\n---\n\n{_HEAD}\n\n"
+             f"Bu bölüm ikinci bir değerlendiricinin bağımsız görüşüdür. Yukarıdaki puanları, KARAR'ı "
+             f"veya rapor metnini DEĞİŞTİRMEZ; birincil değerlendirmeyle farklı yönde olabilir.\n\n"
+             f"{body_notes}\n")
+    if tables:
+        block += (f"\n**Kriter Puan Karşılaştırması (yalnız referans — hiçbir hesaba girmez):**\n\n{tables}\n")
+    updated = final_report.rstrip() + block
+    db = get_db()
+    try:
+        db.execute("UPDATE interviews SET report=? WHERE candidate_id=? AND level=?", (updated, candidate_id, level))
+        db.commit()
+    finally:
+        db.close()
+    record_system_decision(candidate_id, level, "ikinci_degerlendirici_eklendi",
+                           "İkinci değerlendirici görüşü NİHAİ rapor üzerinde üretildi ve rapora ayrı blok olarak eklendi (karara/puana etkisi yok).",
+                           {"reviewer_status": status})
 
 def parse_reviewer_meta(notes: str) -> dict:
     """Denetçi çıktısının sonundaki 'OZET_TON:' / 'DUSUK_PUAN:' etiketlerini ayrıştırır.
@@ -5022,12 +5157,12 @@ def _insert_report_section(reply: str, section_body: str, pre_note: str = "") ->
         return reply.replace("---STANDARTCV---", block + "\n---STANDARTCV---", 1)
     return reply + block
 
-# ═══ KALEM 9 — Puan bağımsızlığı + ikinci modelin puana etkisi ═══
-# (a) PUAN 2 (kişisel/bilişsel profil) kendi çağrısında, PUAN 1'i GÖRMEDEN üretilir.
-# (b) İkinci model (denetçi) puanlamadan SONRA çalışır ve kriter puanını REVİZE edebilir.
-# (c) Denetçi bir kriter için "kanıtsız iddia" derse o kriterin puanı deterministik düşürülür.
-# (d) Ortalama, revize edilmiş PUAN 1 + PUAN 2 üzerinden hesaplanır (finalize_interview).
-_REVIEWER_HAIRCUT = 0.6   # REVİZYON KURALI: kanıtsız işaretlenen kriter awarded'ı bu oranla çarpılır (=%40 düşüş)
+# ═══ PUAN BAĞIMSIZLIĞI ═══
+# PUAN 2 (kişisel/bilişsel profil) kendi çağrısında, PUAN 1'i GÖRMEDEN üretilir (aşağıda).
+# GÖREV 1.2 — İKİNCİ MODELİN PUANA MÜDAHALESİ TAMAMEN KALDIRILDI: eski _REVIEWER_HAIRCUT (%40),
+# reviewer_flagged_criteria, apply_reviewer_score_revision ve annotate_revised_criteria_prose
+# fonksiyonları silindi. İkinci model artık YALNIZCA nihai rapor üzerinde bağımsız görüş yazar
+# (append_reviewer_section) — puana/karara hiçbir etkisi yoktur.
 
 def build_independent_profile_prompt(candidate: dict, transcript: str) -> str:
     """PUAN 2 bölümünü TEK BAŞINA üreten prompt — pozisyon kriterleri, PUAN 1 puanı veya işe
@@ -5090,200 +5225,9 @@ def splice_profile_region(reply: str, new_profile_text: str) -> str:
         return reply
     return reply[:m.start()] + "\n\n---\n" + new_profile_text + "\n\n" + reply[m.end():]
 
-_REVIEWER_MAX_REVISIONS_PER_TABLE = 2   # KALEM 4 — bir raporda tablo başına en fazla kaç kriter revize edilir
-
-def _match_strength(flag_norm: str, crit_norm: str) -> int:
-    """0=eşleşmez, 1=zayıf (alt-string), 2=güçlü (tam / tüm kelime kapsaması)."""
-    if not flag_norm or not crit_norm:
-        return 0
-    if flag_norm == crit_norm:
-        return 2
-    fw, cw = set(flag_norm.split()), set(crit_norm.split())
-    if fw and (fw <= cw or cw <= fw) and min(len(fw), len(cw)) >= 1 and abs(len(fw) - len(cw)) <= 1:
-        # "iletisim" ⊆ "iletisim ve ifade netligi" → tek kelime, çok kısa fark yok → zayıf sayılır
-        if len(fw) == 1 and len(cw) > 2:
-            return 1
-        return 2
-    if len(flag_norm) >= 6 and (flag_norm in crit_norm or crit_norm in flag_norm):
-        return 1
-    return 0
-
-def reviewer_flagged_criteria(review_notes: str, position_names: list, profile_names: list) -> dict:
-    """KALEM 4 — denetçinin 'ABARTILI / KANITSIZ' maddesinde adı geçen kriterleri hangi TABLOYA
-    ait olduğuyla birlikte sınıflar. Bir ad hem pozisyon hem profil tablosunda GÜÇLÜ eşleşiyorsa
-    (ör. 'İletişim' ↔ 'İletişim ve ifade netliği') AMBİGÜ → hiçbirine uygulanmaz, log düşülür.
-    Dönüş: {'position':[...], 'profile':[...], 'ambiguous':[...], 'dropped':[...]}."""
-    res = {"position": [], "profile": [], "ambiguous": [], "dropped": []}
-    if not review_notes:
-        return res
-    seg = review_notes
-    m = re.search(r"(?:ABART|KANITSIZ|kanıtsız|dayanaksız|desteklenmey|kanıtla\s+desteklen)[\s\S]*?(?=\n\s*\d[\.\)]\s|\Z)",
-                  review_notes, re.IGNORECASE)
-    if m:
-        seg = m.group(0)
-    low = _norm_name(seg)
-    # denetçi metninde geçiş sırasına göre kriterleri topla (önce/açık geçen ≈ daha güçlü gerekçe)
-    ordered_pos, ordered_prof = [], []
-    def _first_pos(cn):
-        n = _norm_name(cn)
-        idx = low.find(n) if n else -1
-        if idx < 0 and len(n.split()) > 1:
-            for w in n.split():
-                if len(w) >= 5:
-                    j = low.find(w)
-                    if j >= 0:
-                        idx = j if idx < 0 else min(idx, j)
-        return idx
-
-    for cn in position_names:
-        idx = _first_pos(cn)
-        if idx >= 0:
-            ordered_pos.append((idx, cn))
-    for cn in profile_names:
-        idx = _first_pos(cn)
-        if idx >= 0:
-            ordered_prof.append((idx, cn))
-    ordered_pos.sort(); ordered_prof.sort()
-    pos_flagged = [cn for _, cn in ordered_pos]
-    prof_flagged = [cn for _, cn in ordered_prof]
-
-    def _keys(cn):
-        n = _norm_name(cn)
-        ks = {w for w in n.split() if len(w) >= 5}
-        if len(n) >= 5 and " " not in n:
-            ks.add(n)
-        return ks
-
-    # ÇAPRAZ EŞLEŞME KORUMASI: bir pozisyon kriteri ile bir profil kriteri ORTAK anlamlı kelime
-    # paylaşıyorsa (ör. 'İletişim' ↔ 'İletişim ve ifade netliği' → 'iletisim'), denetçinin tek
-    # maddesi ikisine birden vurmuş olabilir → HER İKİSİ de ambigü, hiçbirine uygulanmaz.
-    ambiguous = set()
-    for pc in pos_flagged:
-        for fc in prof_flagged:
-            if _keys(pc) & _keys(fc):
-                ambiguous.add(pc); ambiguous.add(fc)
-
-    for cn in pos_flagged:
-        if cn in ambiguous:
-            res["ambiguous"].append(cn)
-        elif len(res["position"]) < _REVIEWER_MAX_REVISIONS_PER_TABLE:
-            res["position"].append(cn)
-        else:
-            res["dropped"].append(cn)
-    for cn in prof_flagged:
-        if cn in ambiguous:
-            if cn not in res["ambiguous"]:
-                res["ambiguous"].append(cn)
-        elif len(res["profile"]) < _REVIEWER_MAX_REVISIONS_PER_TABLE:
-            res["profile"].append(cn)
-        else:
-            res["dropped"].append(cn)
-    return res
-
-def apply_reviewer_score_revision(region_body: str, flagged_names: list):
-    """KALEM 9(c) + KALEM 4 — verilen RAPOR BÖLGESİNDE (yalnız pozisyon VEYA yalnız profil tablosu)
-    flagged_names kriterlerinin hücre puanını deterministik düşürür (awarded *= _REVIEWER_HAIRCUT).
-    Bölge ayrımı çağıranın sorumluluğu — çapraz eşleşme burada olamaz.
-    Dönüş: (yeni_body, [revizyon kayıtları])."""
-    if not region_body or not flagged_names:
-        return region_body, []
-    lines = region_body.splitlines()
-    revisions = []
-    flagged_norm = {_norm_name(f): f for f in flagged_names}
-    for i, ln in enumerate(lines):
-        if ln.count("|") < 2:
-            continue
-        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
-        if len(cells) < 2:
-            continue
-        cname_norm = _norm_name(re.sub(r"[*_`]", "", cells[0]))
-        match = next((orig for fn, orig in flagged_norm.items() if fn and _match_strength(fn, cname_norm) == 2), None)
-        if not match:
-            continue
-        mm = re.search(r"(\d+)\s*/\s*(\d+)", cells[1])
-        if not mm:
-            continue
-        old_a, cap = _safe_int(mm.group(1)), _safe_int(mm.group(2))
-        new_a = int(old_a * _REVIEWER_HAIRCUT)
-        if new_a == old_a:
-            continue
-        new_cell = f"{new_a}/{cap} (ikinci model: kanıtsız iddia — %{int((1-_REVIEWER_HAIRCUT)*100)} düşürüldü)"
-        lines[i] = ln.replace(cells[1], new_cell, 1)
-        revisions.append({"kriter": match, "eski": f"{old_a}/{cap}", "yeni": f"{new_a}/{cap}"})
-    return "\n".join(lines), revisions
-
-# Değer yargısı içeren cümleyi tanıma: kriter adı + değerlendirici sözcük birlikte geçmeli.
-_VALUE_JUDGMENT_RE = re.compile(
-    r"yeterli|yetersiz|güçlü|zayıf|başar[ıi]l[ıi]|iyi\b|kötü|olumlu|olumsuz|net\b|belirsiz|"
-    r"gelişme(?:li| gerek)|geliştirmeli|potansiyel|hakim|hâkim|deneyimli|donan[ıi]ml[ıi]|"
-    r"eksik|sınırlı|üst düzey|vasat|orta düzey|kanıtl", re.IGNORECASE)
-# Anotasyon yapılmayacak bölümler (başlık bazlı): burada kriterle ilgili DEĞER YARGISI yok.
-_ANNOTATE_BLOCK_HEADINGS = (
-    "yönetici özeti", "yonetici ozeti",  # KALEM 4 (bu tur) — Özet için zaten ayrı uyarı satırı var
-    "puanlama kapsamı", "kriter eksiklik", "değerlendirilemeyen", "yanıtsız", "yanitsiz",
-    "takip mülakatında", "modalite veri kapsamı", "sistem alan karşılaştırması", "kriter tablo",
-    "değerlendirilemeyen alanlar", "dil gözlemi", "sonuç gerekçesi", "ikinci model",
-)
-
-# KALEM 3 (bu tur) — kriter adı eşleşmesinde YOK SAYILAN kelimeler (bağlaçlar + kısa/genel sözcükler).
-_ANNOTATE_STOPWORDS = {"ve", "ile", "veya", "ya", "da", "de", "için", "bir",
-                       "karar", "yaklasim", "yaklasimi", "verme", "yonetim", "yonetimi"}
-
-def _criterion_fully_mentioned(crit_norm: str, line_norm: str) -> bool:
-    """KALEM 3 — kriter adının TAMI cümlede geçmeli. Tek kelime / genel sözcük eşleşmesi YETMEZ:
-    kriter adının anlamlı kelimelerinin (>=4 harf, bağlaç değil) HEPSİ satırda geçecek."""
-    if not crit_norm or not line_norm:
-        return False
-    if crit_norm in line_norm:
-        return True
-    meaningful = [w for w in crit_norm.split() if len(w) >= 4 and w not in _ANNOTATE_STOPWORDS]
-    if len(meaningful) < 1:
-        return False
-    return all(w in line_norm for w in meaningful)
-
-def annotate_revised_criteria_prose(report: str, revisions: list) -> str:
-    """KALEM 3+4 (bu tur) — revize edilen kriter HAKKINDA DEĞER YARGISI içeren cümlelere işaret
-    ekler. Eşleşme SIKI: kriter adının tamı ya da tüm anlamlı kelimeleri satırda geçmeli
-    (tek genel kelime — 'karar', 'yeterli' — eşleşmesi yetmez). Başlık/kapsam/Yönetici Özeti
-    satırları HARİÇ. Rapor başına EN FAZLA 2. Eşleşme yoksa HİÇ işaret basılmaz."""
-    if not report or not revisions:
-        return report
-    names = [r.get("kriter") for r in revisions if r.get("kriter")]
-    if not names:
-        return report
-    names_n = [_norm_name(n) for n in names]
-    note = " [İkinci model: bu değerlendirme kanıtla desteklenmiyor — ilgili kriter puanı düşürüldü.]"
-    lines = report.splitlines()
-    cur_heading = ""
-    hit = 0
-    for i, ln in enumerate(lines):
-        s = ln.strip()
-        # başlık: "**Ad:** ..." / "Ad: ..." / "**Ad:**" — iki nokta öncesi/sonrası ** olabilir
-        hm = re.match(r"\**\s*([A-Za-zÇĞİÖŞÜçğıöşü][^:|*\n]{1,58}?)\s*\**\s*:\s*\**\s*(.*)$", s)
-        if hm:
-            cur_heading = _norm_name(hm.group(1))
-        if hit >= 2:
-            break
-        if not s or s.startswith("|") or s.endswith(":") or note in ln:
-            continue
-        if any(b in cur_heading for b in _ANNOTATE_BLOCK_HEADINGS):
-            continue
-        low = _norm_name(ln)
-        if not any(_criterion_fully_mentioned(nn, low) for nn in names_n):
-            continue
-        # kriterin sadece SAYILDIĞI (değer yargısı olmayan) satır mı? → değer yargısı sözcüğü şart
-        if not _VALUE_JUDGMENT_RE.search(ln):
-            continue
-        lines[i] = ln.rstrip() + note
-        hit += 1
-    report = "\n".join(lines)
-    summ = ", ".join(names)
-    warn = (f"\n\n[İkinci model revizyonu: {summ} kriter(ler)inde kanıt–puan tutarsızlığı tespit edildi; "
-            f"ilgili puanlar düşürüldü. Bu bölümdeki olumlu ifadeler bu çerçevede okunmalıdır.]")
-    if "İkinci model revizyonu:" not in report:
-        report = re.sub(r"(\*{0,2}\s*Yönetici Özeti\s*\*{0,2}\s*:\s*[^\n]*)",
-                        lambda m: m.group(1) + warn, report, count=1, flags=re.IGNORECASE)
-    return report
+# GÖREV 1.2 — reviewer_flagged_criteria / apply_reviewer_score_revision / annotate_revised_criteria_prose
+# ve yardımcıları (_match_strength, _VALUE_JUDGMENT_RE, _ANNOTATE_* , _criterion_fully_mentioned)
+# TAMAMEN SİLİNDİ. İkinci model artık puana/metne müdahale etmiyor (bkz. append_reviewer_section).
 
 def run_deferred_finish_job(candidate_id: int, level: int, regen: bool = False):
     """BackgroundTasks'ten (mülakat az önce bitti) VEYA kurtarma taramasından (takılı kalmış eski
@@ -5428,7 +5372,7 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             _pcov = None
         _pcrit = ((get_position(_cand_row["position"]) or {}).get("criteria") or []) if _cand_row else []
 
-        # ═══ KALEM 9(a) — PUAN 2 (profil) BAĞIMSIZ çağrıda, PUAN 1'i görmeden üretilir ═══
+        # ═══ GÖREV 1.6 / bağımsız profil — PUAN 2 (profil) AYRI çağrıda, PUAN 1'i görmeden üretilir ═══
         try:
             if "PUAN 2" in reply or "PROFİL PUANI" in reply:
                 _indep_p2 = run_independent_profile_call(candidate_id, level, provider, model,
@@ -5440,115 +5384,28 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
                         record_system_decision(candidate_id, level, "profil_bagimsiz_uretildi",
                                                "PUAN 2 (kişisel/bilişsel profil) ayrı çağrıda, PUAN 1 sonucundan bağımsız üretildi.", {})
         except Exception as e:
-            print(f"UYARI (KALEM9 bağımsız profil c={candidate_id}): {type(e).__name__}: {e}")
+            print(f"UYARI (bağımsız profil c={candidate_id}): {type(e).__name__}: {e}")
 
-        # ═══ FAZ D — MUHALİF DENETÇİ (ikinci model) — PUANLAMADAN ÖNCE (KALEM 9b) ═══
-        # Artık denetçi ham taslağı görür ve çıktısı puanı REVİZE edebilir. Denetçi HER ZAMAN
-        # OpenAI (L2'de bile Anthropic'e gidilmez).
-        try:
-            review_notes, rv_status, rv_err = run_report_reviewer(candidate_id, level, transcript_text, reply, modality_block)
-        except Exception as e:
-            review_notes, rv_status, rv_err = "", "failed", f"{type(e).__name__}: {e}"
-            print(f"UYARI (denetçi c={candidate_id} L{level}): {type(e).__name__}: {e}")
-        _set_reviewer_status(candidate_id, level, rv_status, rv_err)
-        _rmeta = parse_reviewer_meta(review_notes)
-        review_notes_clean = strip_reviewer_meta_tags(review_notes)
+        # ═══ GÖREV 1.2 — MÜFETTİŞİN PUANA MÜDAHALESİ KALDIRILDI ═══
+        # Eskiden burada müfettiş (ikinci model) ham taslağı görüp _REVIEWER_HAIRCUT (%40) ile
+        # kriter puanı düşürüyordu; "kanıtsız iddia" (ters yön) ile "puanı fazla düşük" (ters yön)
+        # listeleri aynı düşürme fonksiyonuna giriyordu (bozuk eşleştirme). BU TÜM YOL SİLİNDİ.
+        # Puan = GPT'nin ham puanı. Sunucu YALNIZCA aritmetik bütünlük uygular (finalize_interview
+        # içindeki recompute_and_fix_score: kriter tavanını aşan puanı sabitler, TOPLAM = kriter
+        # toplamı yapar, normalize eder — bu bir YARGI revizyonu değildir).
 
-        # ═══ KALEM 9(c) + KALEM 4 — denetçinin "kanıtsız" dediği kriterlerin puanı deterministik düşürülür.
-        # Çapraz eşleşme YOK: pozisyon maddesi yalnız PUAN 1 tablosunda, profil maddesi yalnız PUAN 2
-        # tablosunda eşleşir; ait olduğu tablo belirsizse HİÇBİRİNE uygulanmaz. Tablo başına ≤2 revizyon.
-        _revisions = []
-        try:
-            if review_notes and "---RAPOR---" in reply:
-                _pos_names = [c.get("name") for c in _pcrit if c.get("name")]
-                _prof_names = [pc["name"] for pc in PROFILE_CRITERIA]
-                _cls = reviewer_flagged_criteria(review_notes, _pos_names, _prof_names)
-                if _cls["ambiguous"] or _cls["dropped"]:
-                    print(f"[KALEM4] c={candidate_id} L{level} revizyon uygulanmadı — ambigü: {_cls['ambiguous']} · sınır aşımıyla bırakılan: {_cls['dropped']}")
-                _m_rb0 = re.search(r'---RAPOR---([\s\S]*?)(?:---RAPORSON---|---STANDARTCV---|\Z)', reply)
-                if _m_rb0 and (_cls["position"] or _cls["profile"]):
-                    _full_rb = _m_rb0.group(1)
-                    _p1r, _p2r = split_report_regions(_full_rb)
-                    _rev_all = []
-                    if _cls["position"] and _p1r:
-                        _p1r, _rp = apply_reviewer_score_revision(_p1r, _cls["position"])
-                        _rev_all += [dict(x, tablo="PUAN 1") for x in _rp]
-                    if _cls["profile"] and _p2r:
-                        _p2r, _rp = apply_reviewer_score_revision(_p2r, _cls["profile"])
-                        _rev_all += [dict(x, tablo="PUAN 2") for x in _rp]
-                    if _rev_all:
-                        _new_rb = (_p1r.rstrip() + "\n\n" + _p2r.strip() + "\n") if _p2r else _p1r
-                        reply = reply.replace(_full_rb, _new_rb, 1)
-                        _revisions = _rev_all
-                    if _cls["ambiguous"]:
-                        record_system_decision(candidate_id, level, "denetci_revizyon_ambigu",
-                                               f"İkinci model maddesi hangi tabloya ait belirlenemedi, revizyon uygulanmadı: {', '.join(_cls['ambiguous'])}", {})
-        except Exception as e:
-            print(f"UYARI (KALEM9c/KALEM4 revizyon c={candidate_id}): {type(e).__name__}: {e}")
-
-        # ═══ Puanlama doğrulaması (revizyondan SONRA — normalize skor revize hücrelerden hesaplanır) ═══
-        try:
-            if "---RAPOR---" in reply and _pcrit:
-                m_rb = re.search(r'---RAPOR---([\s\S]*?)(?:---RAPORSON---|---STANDARTCV---|\Z)', reply)
-                if m_rb:
-                    _orig_rb = m_rb.group(1)
-                    fb, fscore, fwarn = recompute_and_fix_score(_orig_rb, _pcrit, extract_score(reply),
-                                                                criteria_coverage=_pcov, transcript=transcript_text,
-                                                                candidate_id=candidate_id, level=level)
-                    _p1r, _p2r = split_report_regions(fb)
-                    _pfscore = None
-                    if _p2r:
-                        _fp2, _pfscore, _pfw = recompute_profile_section(_p2r, transcript=transcript_text, criteria_coverage=_pcov,
-                                                                        candidate_id=candidate_id, level=level)
-                        fb = _p1r.rstrip() + "\n\n" + _fp2.strip() + "\n"
-                        fwarn = list(fwarn) + list(_pfw)
-                    if fb != _orig_rb:
-                        reply = reply.replace(_orig_rb, fb, 1)
-                    if fwarn or _revisions:
-                        _rev_warn = [f"İkinci model revizyonu ({r.get('tablo','?')}): '{r['kriter']}' {r['eski']} → {r['yeni']} (kanıtsız iddia)." for r in _revisions]
-                        record_system_decision(candidate_id, level, "puanlama_duzeltildi",
-                                               "Sunucu puanlama doğrulaması + ikinci model revizyonu uygulandı; normalize skor revize edilmiş puanlardan hesaplandı.",
-                                               {"final_score": fscore, "profile_score": _pfscore, "revisions": _revisions},
-                                               warnings=list(fwarn) + _rev_warn)
-        except Exception as e:
-            print(f"UYARI (puanlama doğrulaması c={candidate_id}): {type(e).__name__}: {e}")
-
-        # KALEM 6 (bu tur) — denetçi bir kriterin puanını FAZLA DÜŞÜK bulduysa: yükseltme YAPMA,
-        # ama tespit kaybolmasın — denetçi bölümüne deterministik not eklenir. Çapraz eşleşme önlenir.
-        _low_flags = []
-        try:
-            if _rmeta["dusuk_puan"] and _pcrit:
-                _lc = reviewer_flagged_criteria("KANITSIZ: " + ", ".join(_rmeta["dusuk_puan"]),
-                                                [c.get("name") for c in _pcrit if c.get("name")],
-                                                [pc["name"] for pc in PROFILE_CRITERIA])
-                _low_flags = _lc["position"] + _lc["profile"]
-                if _low_flags:
-                    review_notes_clean = (review_notes_clean.rstrip()
-                        + "\n\nDüşük bulunan puanlar (yükseltme sistemce UYGULANMADI): "
-                        + "; ".join(f"{n} — ikinci model bu kriterin puanını kanıta göre düşük buldu"
-                                    for n in _low_flags) + ".")
-                    record_system_decision(candidate_id, level, "denetci_dusuk_puan_tespiti",
-                                           f"İkinci model şu kriter(ler)in puanını düşük buldu (yükseltme kapsam dışı): {', '.join(_low_flags)}", {})
-        except Exception as e:
-            print(f"UYARI (KALEM6 düşük puan notu c={candidate_id}): {type(e).__name__}: {e}")
-
-        if _revisions or _rmeta["ozet_ton"]:
-            try:
-                _dbr = get_db()
-                _dbr.execute("UPDATE interviews SET reviewer_score_revision_json=COALESCE(?, reviewer_score_revision_json), "
-                             "reviewer_summary_tone=? WHERE candidate_id=? AND level=?",
-                             (json.dumps(_revisions, ensure_ascii=False)[:4000] if _revisions else None,
-                              _rmeta["ozet_ton"], candidate_id, level))
-                _dbr.commit(); _dbr.close()
-            except Exception as e:
-                print(f"UYARI (revizyon/ton kaydı c={candidate_id}): {type(e).__name__}: {e}")
-
-        # denetçi notlarını rapora ekle — başına "revizyon öncesi puanlar" uyarısı (KALEM 5, bu tur).
-        reply = _insert_report_section(
-            reply, review_notes_clean,
-            pre_note="Not: Aşağıdaki değerlendirme, sunucu puanlama doğrulaması ve olası revizyon UYGULANMADAN önceki taslak puanlar üzerinden yapılmıştır; bölümde geçen sayısal puanlar rapordaki nihai değerlerden farklı olabilir.")
-
+        # ═══ GÖREV 1.3 — NİHAİ RAPORU ÜRET (karar + tüm deterministik düzenleme burada biter) ═══
         finalize_interview(candidate_id, reply, terminated_reason=terminated_reason, level=level, regen=regen)
+
+        # ═══ GÖREV 1.3-1.6 — MÜFETTİŞ (ikinci model) EN SONDA, NİHAİ BELGE ÜZERİNDE ═══
+        # Müfettiş artık taslağı DEĞİL, basılacak nihai raporu (kriter tabloları + KARAR + gerekçe
+        # dahil) görür. Çıktısı karara/puana ETKİ ETMEZ; rapora ayrı, tek blok olarak eklenir.
+        # Müfettiş atlanır/patlarsa rapor DENETÇİSİZ ve DEĞİŞMEDEN kalır — basım engellenmez.
+        try:
+            append_reviewer_section(candidate_id, level, transcript_text, modality_block, _pcrit)
+        except Exception as e:
+            print(f"UYARI (müfettiş bölümü ekleme c={candidate_id} L{level}): {type(e).__name__}: {e}")
+
         print(f"[PROCESSING_DONE] candidate_id={candidate_id} level={level} regen={regen}")
     except AIError as e:
         # openai_call zaten error_logs'a yazdı + kritik e-postayı tetikledi.
@@ -5746,19 +5603,12 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     except Exception as e:
         print(f"UYARI (finalize_interview çelişki bloğu c={candidate_id}): {type(e).__name__}: {e}")
 
-    # KALEM 5 (2. tur) — bir kriter ikinci model tarafından revize edildiyse, o kritere değinen
-    # RAPOR METNİ cümlelerine denetçi notu eklenir; tablo ile metin çelişmesin.
-    try:
-        _revs = json.loads(_iv_dates["reviewer_score_revision_json"]) if (_iv_dates and _iv_dates["reviewer_score_revision_json"]) else []
-    except Exception:
-        _revs = []
-    if _revs:
-        report = annotate_revised_criteria_prose(report, _revs)
+    # GÖREV 1.2 — ikinci modelin puan revizyonu KALDIRILDIĞI için burada rapor metnine
+    # "denetçi notu" enjeksiyonu da YAPILMAZ. (Eski annotate_revised_criteria_prose çağrısı silindi.)
 
-    # KALEM 1+2 (öneri gerekçesi tek kaynak + Yönetici Özeti sonuç cümlesi hizalı) + KALEM 3 (öneri satırı).
-    _summary_tone = (_iv_dates["reviewer_summary_tone"] if (_iv_dates and "reviewer_summary_tone" in _iv_dates.keys()) else None)
+    # GÖREV 2.2 — KARAR TEK KAYNAK: yalnız PUAN 1 + eşik tablosundan; GPT prose'una dokunulmaz.
     report = sync_recommendation_line(report, recommendation, score_position, score_profile,
-                                     veto_reason=_veto_reason, summary_tone=_summary_tone)
+                                     veto_reason=_veto_reason)
     # KALEM 4 — rapor metnindeki "Tarih:" satırı mülakatın GERÇEK tarihi olsun (üretim tarihi değil).
     try:
         _iv_date_str = (_parse_iso(_iv_dates["started_at"]).strftime("%d.%m.%Y")
