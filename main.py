@@ -4675,7 +4675,9 @@ _EMPTY_CONTENT_RE = re.compile(
     r"gözlem\s+yok|herhangi\s+bir\s+.{0,30}?\s*(?:yok|bulunmamaktadır|gözlenmemiştir)\.?\s*$|"
     r"mülakat\s+normal\s+tamamland|normal\s+(?:bir\s+)?(?:şekilde\s+)?tamamland|olumsuz\s+bir\s+(?:gözlem|durum|bulgu)\s+(?:yok|bulunma)|"
     r"belirtilen\s+tüm\s+kriterler\s+değerlendirild|tüm\s+kriterler\s+değerlendirild|değerlendirilemeyen\s+(?:bir\s+)?alan\s+(?:yok|bulunma)|"
-    r"tüm\s+kriterler\s+(?:eksiksiz\s+)?(?:puanland|değerlendirild)",
+    r"tüm\s+kriterler\s+(?:eksiksiz\s+)?(?:puanland|değerlendirild)|"
+    # GÖREV 6.c — "AI Notuna Uyum" için içeriksiz klişe: somut alıntı/dakika yok, sadece 'irdelendi/yetersiz'
+    r"^(?:aday[ıi]n\s+)?.{0,40}\b(?:irdelen(?:miş|di)|ele\s+al[ıi]n(?:m[ıi][şs]|d[ıi]))\b.{0,80}\b(?:yetersiz|eksik)\s+kal",
     re.IGNORECASE)
 
 def strip_empty_report_sections(text: str) -> str:
@@ -6633,13 +6635,18 @@ def fix_transcript_speaker_and_leaks(transcript_text: str, lang: str = "tr"):
             if echo:
                 changes.append({"tip": "hoparlor_yankisi", "ts": p["secs"], "text": txt[:160]})
                 continue
-        # 4.1 — yanlış etiket: 'aday' ama mülakatçı ağzından
-        if p["role"] == "aday" and low:
+        # 4.1 — yanlış etiket (İKİ YÖNLÜ): işaret sayısı net üstünse ve ters işaret yoksa çevir
+        if p["role"] in ("aday", "mulakatci") and low and len(low.split()) >= 3:
             im = sum(1 for pat in _INTERVIEWER_MARKERS if re.search(pat, low))
             am = sum(1 for pat in _ANSWER_MARKERS if re.search(pat, low))
-            if im >= 2 and am == 0:
+            # tek başına güçlü sinyal: soru yönergesiyle biten cümle ("... diye sorayım / soruyorum")
+            _q_directive_end = bool(re.search(r"(sor[ae]y[ıi]m|soruyorum|sorar[ıi]m|soral[ıi]m)\s*\.?\s*$", low))
+            if p["role"] == "aday" and am == 0 and (im >= 2 or (im >= 1 and _q_directive_end)):
                 changes.append({"tip": "etiket_duzeltildi_aday->mulakatci", "ts": p["secs"], "text": txt[:160]})
                 p = dict(p, role="mulakatci")
+            elif p["role"] == "mulakatci" and am >= 2 and im == 0:
+                changes.append({"tip": "etiket_duzeltildi_mulakatci->aday", "ts": p["secs"], "text": txt[:160]})
+                p = dict(p, role="aday")
         kept.append(p)
 
     # 4.4 — kararlı sıralama + damga çakışması + ardışık tekrar
