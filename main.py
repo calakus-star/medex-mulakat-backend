@@ -1831,7 +1831,43 @@ def _pdf_strategies(content: bytes):
         from pdfminer.high_level import extract_text as _mt
         from pdfminer.layout import LAParams
         return (_mt(io.BytesIO(content), laparams=LAParams(char_margin=1.5, word_margin=0.2, line_margin=0.4)) or "").strip()
+    def _plumber_columns():
+        # GÖREV 7.2 — KOLON-DUYARLI okuma. Sayfadaki kelimeleri x konumuna göre kümeleyip
+        # net bir dikey boşluk (gutter) varsa SOL kolonu tam okur, sonra SAĞ kolonu — satır
+        # satır iç içe geçirmez. Tek kolonlu CV'de tek küme çıkar, davranış değişmez.
+        import pdfplumber
+        out_pages = []
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for page in pdf.pages:
+                words = page.extract_words(x_tolerance=1.5, y_tolerance=3, keep_blank_chars=False)
+                if not words:
+                    continue
+                pw = float(page.width or 0) or max((w["x1"] for w in words), default=1)
+                # aday kolon sınırı: sayfa ortası çevresinde, hiç kelimenin KESMEDİĞİ bir x var mı?
+                mid_lo, mid_hi = pw * 0.40, pw * 0.60
+                crossing = [w for w in words if w["x0"] < mid_hi and w["x1"] > mid_lo]
+                two_col = len(crossing) <= max(2, len(words) * 0.04)
+                def _emit(ws):
+                    ws = sorted(ws, key=lambda w: (round(w["top"] / 6), w["x0"]))
+                    lines, cur, cur_top = [], [], None
+                    for w in ws:
+                        if cur_top is None or abs(w["top"] - cur_top) <= 6:
+                            cur.append(w["text"]); cur_top = w["top"] if cur_top is None else cur_top
+                        else:
+                            lines.append(" ".join(cur)); cur = [w["text"]]; cur_top = w["top"]
+                    if cur:
+                        lines.append(" ".join(cur))
+                    return "\n".join(lines)
+                if two_col:
+                    split_x = pw * 0.5
+                    left = [w for w in words if (w["x0"] + w["x1"]) / 2 < split_x]
+                    right = [w for w in words if (w["x0"] + w["x1"]) / 2 >= split_x]
+                    out_pages.append(_emit(left) + "\n\n" + _emit(right))
+                else:
+                    out_pages.append(_emit(words))
+        return "\n\n".join(out_pages).strip()
     return [
+        ("pdfplumber-columns", _plumber_columns),   # GÖREV 7.2 — önce kolon-duyarlı dene
         ("pdfplumber", lambda: _plumber()),
         ("pdfplumber-xtol1", lambda: _plumber(x_tol=1)),
         ("pdfplumber-layout", lambda: _plumber(layout=True)),
@@ -2488,9 +2524,10 @@ REPORT_BODY_SECTIONS = [
     ("kriter_tablosu_l13", {1},   "{table_template}"),
     ("kriter_tablosu_l2", {2, 3}, "{criteria_table_filled}\n(YUKARIDAKİ TABLOYU AYNEN KULLAN: satır ekleme/çıkarma/yeniden adlandırma YOK, tavanı AŞMA.)\n" + CRITERION_SCORING_RULE),
     ("_blank4",        {1, 2, 3}, ""),
-    ("analitik_dusunme", {2, 3},  "**Analitik Düşünme ve Muhakeme:** (soruyu kavrama, problemi parçalama, neden-sonuç, alternatif kıyaslama, ölçüm/veri kullanımı; somut kanıtlarla)"),
-    ("problem_cozme",  {2, 3},    "**Problem Çözme ve Karar Verme Yaklaşımı:** (izlediği yöntem, seçenekler, riskler, sonuç takibi)"),
-    ("kavrama_iletisim", {2, 3},  "**Kavrama ve İletişim:** (soruyu doğru anlama, cevabı yapılandırma, açıklık, gereksiz dağılma veya güçlü sentez yeteneği)"),
+    ("_cognitive_note", {2, 3},   "_(Aşağıdaki üç başlık NİTELİKSEL gözlemdir ve PUAN 2 — kişisel/bilişsel profil değerlendirmesini besler; PUAN 1 pozisyon kriteri DEĞİLDİR. PUAN 1 kriterleri yalnızca yukarıdaki kriter tablosundadır.)_"),
+    ("analitik_dusunme", {2, 3},  "**Analitik Düşünme ve Muhakeme (gözlem → PUAN 2):** (soruyu kavrama, problemi parçalama, neden-sonuç, alternatif kıyaslama, ölçüm/veri kullanımı; somut kanıtlarla)"),
+    ("problem_cozme",  {2, 3},    "**Problem Çözme ve Karar Verme Yaklaşımı (gözlem → PUAN 2):** (izlediği yöntem, seçenekler, riskler, sonuç takibi)"),
+    ("kavrama_iletisim", {2, 3},  "**Kavrama ve İletişim (gözlem → PUAN 2):** (soruyu doğru anlama, cevabı yapılandırma, açıklık, gereksiz dağılma veya güçlü sentez yeteneği)"),
     ("tutarlilik_l13", {1},       "**Tutarlılık / Çelişki Analizi:** (çelişki taraması ÜÇ kaynak arasında yapılır: CV ↔ adayın sözlü cevapları ↔ kayıt formu beyanı. Yalnız deneyim yılı, eğitim SEVİYESİ/derece, unvan ve tarihleri KARŞILAŞTIR. E-POSTA ve TELEFON üzerinden çelişki/güvenilirlik değerlendirmesi YAPMA — CV'deki adresler eski işveren/muhasebe ofisi/referans kişilere ait olabilir. Eğitimde ALT KÜME çelişki değildir (ör. 'Ticaret Meslek Lisesi' ⊆ 'Lise'). Yalnız transkriptte veya sistemin verdiği listede AÇIKÇA görünen çelişkiyi yaz; yoksa 'Belirgin çelişki yok' de ve karşılaştırdığın alanları say.)"),
     ("tutarlilik_l2",  {2, 3},    "**Tutarlılık / Çelişki Analizi:** (çelişki taraması ÜÇ kaynak arasında: CV ↔ adayın sözlü cevapları ↔ kayıt formu beyanı. Yalnız deneyim yılı, eğitim SEVİYESİ/derece, unvan ve tarihleri KARŞILAŞTIR. E-POSTA ve TELEFON üzerinden çelişki/güvenilirlik değerlendirmesi YAPMA. Eğitimde ALT KÜME çelişki değildir (ör. 'Ticaret Meslek Lisesi' ⊆ 'Lise'). SADECE sistemin verdiği 'Sistem Alan Karşılaştırması' listesini ve transkriptte açıkça görünen çelişkileri yaz; liste yoksa/çelişki yoksa 'Belirgin çelişki yok' de ve karşılaştırılan alanları say. Aday transkriptte konusu HİÇ geçmeyen bir alan için çelişki UYDURMA.)"),
     ("guclu_yonler_l13", {1},     "**Güçlü Yönler:** ..."),
@@ -2520,8 +2557,8 @@ REPORT_BODY_SECTIONS = [
     ("standartcv_baslangic", {1, 2, 3}, "---STANDARTCV---"),
     ("ad_soyad",       {1, 2, 3}, "**AD SOYAD:** {candidate_name}"),
     ("cv_pozisyon",    {1, 2, 3}, "**POZİSYON:** {position_name}"),
-    ("egitim",         {1, 2, 3}, "**EĞİTİM:** ..."),
-    ("deneyim",        {1, 2, 3}, "**DENEYİM:** ..."),
+    ("egitim",         {1, 2, 3}, "**EĞİTİM:** (GÖREV 7.4 — CV'de yoksa ama aday MÜLAKATTA sözlü söylediyse onu yaz ve kaynağı belirt: 'Ticaret Meslek Lisesi mezunu; Açık Öğretim İşletme (devam ediyor) — kaynak: sözlü beyan'. CV'de de yoksa mülakatta da geçmiyorsa '—')"),
+    ("deneyim",        {1, 2, 3}, "**DENEYİM:** (CV + mülakatta anlatılan iş deneyimi; sözlü beyandan geleni işaretle)"),
     ("teknik_yetkinlikler", {1, 2, 3}, "**TEKNİK YETKİNLİKLER:** ..."),
     ("is_sektor_yetkinlikleri", {2, 3}, "**İŞ / SEKTÖR YETKİNLİKLERİ:** ..."),
     ("dil_becerileri", {1, 2, 3}, "**DİL BECERİLERİ:** ..."),
@@ -2825,6 +2862,33 @@ def strip_markdown(value: str) -> str:
     value = value.replace('**', '')
     value = re.sub(r'^\s*[-*]\s+', '• ', value, flags=re.MULTILINE)
     return value.strip()
+
+_TR_L = "a-zçğıöşü"
+_TR_U = "A-ZÇĞİÖŞÜ"
+
+def repair_report_spacing(text: str, glue_terms=None) -> str:
+    """GÖREV 9.2 — string birleştirme kaynaklı boşluk kayıplarını deterministik onarır:
+      - noktalama sonrası boşluk: 'nedenle,adayın' → 'nedenle, adayın'
+        (ondalık sayı '3.5', kısaltma 'vb.', URL, saat '08:47' KORUNUR)
+      - küçük→BÜYÜK harf geçişinde birleşmiş cümle/başlık: 'sorgulatmaktadır.Öne' zaten
+        yukarıda ayrılır; noktasız 'düzeydeGüçlü' gibi geçişlere de boşluk ekler
+      - bilinen terimlerin (kriter adları) boşluksuz hâli metinde geçiyorsa yeniden boşluklar
+    Sadece rapor METNİ / CV özeti için — transkripte/koda dokunmaz."""
+    if not text:
+        return text
+    # noktalama + hemen ardından harf/rakam → araya boşluk (ondalık sayı ve saat ':' hariç)
+    text = re.sub(rf"(?<=[{_TR_L}{_TR_U}])([,;!?])(?=[{_TR_L}{_TR_U}0-9])", r"\1 ", text)
+    text = re.sub(rf"(?<=[{_TR_L}])\.(?=[{_TR_U}])", ". ", text)                  # cümle sonu + Büyük harf: 'değildi.Öne'
+    text = re.sub(rf"(?<=[{_TR_L}]{{2}})\.(?=[{_TR_L}]{{3,}})", ". ", text)       # 'değildi.somut' (kısaltma vb. korunur: 'vb.x' 2 harf öncesi yetmez)
+    for term in (glue_terms or []):
+        if not term or " " not in term:
+            continue
+        glued = term.replace(" ", "")
+        if len(glued) >= 8 and glued.lower() in text.lower():
+            text = re.sub(re.escape(glued), term, text, flags=re.IGNORECASE)
+    # çift boşlukları tekle (satır başı girintisi korunur)
+    text = re.sub(r"(?<=\S)  +(?=\S)", " ", text)
+    return text
 
 def parse_markdown_table(lines):
     rows = []
@@ -4187,6 +4251,21 @@ def extract_cv_fields_heuristic(cv_text: str = "", transcript: str = "") -> dict
                 if pre:
                     out["department"] = " ".join(pre) + " " + kw.group(1)
                     break
+        # GÖREV 7.4 — sözlü beyanda yaygın alan adı + "bölüm/program okuyorum/mezunuyum" kalıbı
+        # (küçük harfli alan adları: 'açık öğretimden işletme bölüm okumaktayım')
+        if out["department"] is None:
+            dm = re.search(r"\b(işletme|iktisat|muhasebe|maliye|ekonomi|hukuk|psikoloji|sosyoloji|"
+                           r"mühendislik|bilgisayar|endüstri|kimya|makine|elektrik|inşaat|istatistik|"
+                           r"uluslararası ilişkiler|kamu yönetimi|iş idaresi|bankacılık|finans)\s+"
+                           r"(?:bölüm|program|okul)", txt, re.IGNORECASE)
+            if dm:
+                _d = dm.group(1).strip()
+                # Türkçe-duyarlı ilk harf büyütme (i→İ)
+                out["department"] = (_d[0].replace("i", "İ").upper() + _d[1:]) if _d else _d
+                out["_notes"].append(f"Bölüm '{out['department']}' adayın sözlü beyanından alındı.")
+        if out["university"] is None and re.search(r"açık ?öğretim|açık ?üniversite|aö[fl]\b", txt, re.IGNORECASE):
+            out["university"] = "Açık Öğretim"
+            out["_notes"].append("Üniversite 'Açık Öğretim' adayın sözlü beyanından alındı.")
     return out
 
 def _verbatim_in_edu(label: str, source: str) -> bool:
@@ -4789,6 +4868,10 @@ def compute_voice_metrics(candidate_id: int, level: int) -> dict:
     talk_ms = sum(max(0, b - a) for a, b in turns)
     turn_count = len(turns)
     total_turn_count = len(all_turns)
+    # GÖREV 9.1 — DENKLİK: toplam = değerlendirilen + cevapsız/halüsinasyon. Cevapsız sayısı
+    # AYNI kaynaktan (VAD turları) türetilir; ayrı sayaç (_unanswered_turn_windows) yalnız
+    # ek bilgi olarak taşınır, denkleme GİRMEZ.
+    dropped_turn_count = total_turn_count - turn_count
     considered_denom = max(total_turn_count, turn_count + unanswered_turns)
 
     answer_latencies = []
@@ -4830,7 +4913,9 @@ def compute_voice_metrics(candidate_id: int, level: int) -> dict:
         "tur_sayisi": turn_count,
         "hesaba_katilan_tur": turn_count,
         "toplam_tur": total_turn_count,
-        "cevapsiz_tur_sayisi": unanswered_turns,
+        # GÖREV 9.1 — bu sayı VAD turlarından türetilir: toplam_tur = hesaba_katilan_tur + cevapsiz_tur_sayisi
+        "cevapsiz_tur_sayisi": dropped_turn_count,
+        "cevapsiz_tur_ek_isaret": unanswered_turns,  # transkript kaynaklı ayrı sinyal (denkleme girmez)
         "ortalama_tur_uzunlugu_sn": round((talk_ms / turn_count) / 1000, 1) if turn_count else 0,
         "yanit_gecikmesi_ort_sn": _avg_sn(answer_latencies),
         "yanit_gecikmesi_ornek_sayisi": len(answer_latencies),
@@ -5335,28 +5420,41 @@ def run_deferred_finish_job(candidate_id: int, level: int, regen: bool = False):
             print(f"UYARI (deferred olay bloğu c={candidate_id}): {type(e).__name__}: {e}")
         primary_payload = payload if not extra_blocks else (payload + "\n\n" + "\n\n".join(extra_blocks))
 
-        # KALEM 5 — rapor gövdesi + kriter tablosu + iki puan tablosu + görüş ayrılıkları bir arada
-        # 3800/4000 token'a sığmıyor, çıktı ---STANDARTCVSON--- öncesi kesiliyordu. 8000'e çıkarıldı
-        # (Claude sonnet ve gpt-4o çıktı sınırının çok altında; gerçek rapor ~2500-4500 token).
-        REPORT_MAX_TOKENS = 8000
+        # GÖREV 8 — rapor çıktı token tavanı 8000 → 16000 (Claude Sonnet ve gpt-4o çıktı sınırının
+        # altında; tam rapor + iki tablo + görüş ayrılıkları rahatça sığar). NOT: bu, önceki turda
+        # eklenen REALTIME_MAX_RESPONSE_TOKENS (realtime YANIT tavanı) ile İLGİSİZDİR.
+        REPORT_MAX_TOKENS = 16000
         if provider == "claude":
             if not ANTHROPIC_API_KEY:
                 raise RuntimeError("ANTHROPIC_API_KEY tanımlı değil")
-            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=90.0)
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=120.0)
             response = client.messages.create(
                 model=model or "claude-sonnet-4-6", max_tokens=REPORT_MAX_TOKENS,
                 system=cached_system(system) if system else anthropic.NOT_GIVEN,
                 messages=[{"role": "user", "content": primary_payload}]
             )
-            # FAZ D: birincil rapor çağrısı panelde AYRI KALEM olsun — add_token_usage yerine
-            # record_anthropic_usage (ai_usage_logs'a satır + interviews.total_* BİR KEZ artış).
             record_anthropic_usage(candidate_id, level, model or "claude-sonnet-4-6", "report_generation_primary", response)
             reply = response.content[0].text
+            # GÖREV 8 — KESİLME → FALLBACK'E DÜŞMEDEN ÖNCE DEVAM ÇAĞRISI (continuation).
+            _cont_tries = 0
+            while (getattr(response, "stop_reason", None) == "max_tokens" or "---STANDARTCVSON---" not in reply) and _cont_tries < 2:
+                _cont_tries += 1
+                print(f"[REPORT_CONTINUATION] c={candidate_id} L{level} deneme {_cont_tries}")
+                _cont = client.messages.create(
+                    model=model or "claude-sonnet-4-6", max_tokens=REPORT_MAX_TOKENS,
+                    system=cached_system(system) if system else anthropic.NOT_GIVEN,
+                    messages=[{"role": "user", "content": primary_payload},
+                              {"role": "assistant", "content": reply},
+                              {"role": "user", "content": "Kaldığın yerden AYNEN devam et; hiçbir şeyi tekrar etme, başa dönme. Raporu ---STANDARTCVSON--- ile bitir."}]
+                )
+                record_anthropic_usage(candidate_id, level, model or "claude-sonnet-4-6", "report_generation_continuation", _cont)
+                reply = reply + _cont.content[0].text
+                response = _cont
             if getattr(response, "stop_reason", None) == "max_tokens" or "---STANDARTCVSON---" not in reply:
-                print(f"[REPORT_TRUNCATED] c={candidate_id} L{level} stop_reason={getattr(response,'stop_reason',None)}")
+                print(f"[REPORT_TRUNCATED] c={candidate_id} L{level} stop_reason={getattr(response,'stop_reason',None)} (devam çağrıları yetmedi)")
                 record_system_decision(candidate_id, level, "rapor_kesildi",
-                                       "Rapor üretimi token sınırına takıldı; eksik bölümler deterministik tamamlandı.",
-                                       {"stop_reason": getattr(response, "stop_reason", None)},
+                                       "Rapor üretimi token sınırına takıldı; devam çağrıları da tamamlayamadı, eksik bölümler deterministik tamamlandı.",
+                                       {"stop_reason": getattr(response, "stop_reason", None), "continuation_tries": _cont_tries},
                                        warnings=["Rapor üretimi token sınırına takıldı (bkz. report_tech_note)."])
             # Normal kapanış çağrısı bile [ADAY_CIKIS_TALEBI] üretebilir (mevcut senkron
             # interview_chat akışıyla aynı davranış) — öyleyse ikinci bir "gerçek bitiş" çağrısı yap.
@@ -5374,21 +5472,36 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
                 reply = exit_response.content[0].text
                 terminated_reason = terminated_reason or "Aday talebiyle erken sonlandırıldı"
         elif provider == "openai":
+            _msgs = [{"role": "user", "content": primary_payload}]
             resp = openai_call(
                 "POST", "https://api.openai.com/v1/chat/completions",
-                json_body={"model": model or OPENAI_REPORT_MODEL, "messages": [{"role": "user", "content": primary_payload}], "max_tokens": REPORT_MAX_TOKENS, "temperature": 0.1},
-                timeout=120.0, step="report_generation", severity="user", retry=True,
+                json_body={"model": model or OPENAI_REPORT_MODEL, "messages": _msgs, "max_tokens": REPORT_MAX_TOKENS, "temperature": 0.1},
+                timeout=150.0, step="report_generation", severity="user", retry=True,
                 context={"candidate_id": candidate_id, "level": level},
             )
             result = resp.json()
             record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "l2_report_generation_deferred", result)
             reply = result["choices"][0]["message"]["content"]
             _fr = (result.get("choices") or [{}])[0].get("finish_reason")
+            # GÖREV 8 — KESİLME → FALLBACK'E DÜŞMEDEN ÖNCE DEVAM ÇAĞRISI (continuation).
+            _cont_tries = 0
+            while (_fr == "length" or "---STANDARTCVSON---" not in reply) and _cont_tries < 2:
+                _cont_tries += 1
+                print(f"[REPORT_CONTINUATION] c={candidate_id} L{level} deneme {_cont_tries}")
+                _cmsgs = _msgs + [{"role": "assistant", "content": reply},
+                                  {"role": "user", "content": "Kaldığın yerden AYNEN devam et; hiçbir şeyi tekrar etme, başa dönme. Raporu ---STANDARTCVSON--- ile bitir."}]
+                _cr = openai_call("POST", "https://api.openai.com/v1/chat/completions",
+                                  json_body={"model": model or OPENAI_REPORT_MODEL, "messages": _cmsgs, "max_tokens": REPORT_MAX_TOKENS, "temperature": 0.1},
+                                  timeout=150.0, step="report_continuation", severity="user", retry=True,
+                                  context={"candidate_id": candidate_id, "level": level}).json()
+                record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "l2_report_continuation", _cr)
+                reply = reply + (_cr["choices"][0]["message"]["content"] or "")
+                _fr = (_cr.get("choices") or [{}])[0].get("finish_reason")
             if _fr == "length" or "---STANDARTCVSON---" not in reply:
-                print(f"[REPORT_TRUNCATED] c={candidate_id} L{level} finish_reason={_fr}")
+                print(f"[REPORT_TRUNCATED] c={candidate_id} L{level} finish_reason={_fr} (devam çağrıları yetmedi)")
                 record_system_decision(candidate_id, level, "rapor_kesildi",
-                                       "Rapor üretimi token sınırına takıldı; eksik bölümler deterministik tamamlandı.",
-                                       {"finish_reason": _fr},
+                                       "Rapor üretimi token sınırına takıldı; devam çağrıları da tamamlayamadı, eksik bölümler deterministik tamamlandı.",
+                                       {"finish_reason": _fr, "continuation_tries": _cont_tries},
                                        warnings=["Rapor üretimi token sınırına takıldı (bkz. report_tech_note)."])
         else:
             raise RuntimeError(f"Bilinmeyen pending_finish_provider: {provider!r}")
@@ -5621,6 +5734,16 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     report = report_match.group(1).strip() if report_match else ""
     if not report or len(strip_markdown(report)) < 60:
         report = build_fallback_report(dict(candidate) if candidate else {}, messages, score, recommendation, "AI rapor bloğu eksik/bozuk geldi")
+
+    # GÖREV 9.2 — boşluk kaybı onarımı (kriter adları glue_terms olarak verilir)
+    try:
+        _pos_now = get_position(candidate["position"]) if candidate else None
+        _glue = [c.get("name") for c in ((_pos_now or {}).get("criteria") or []) if c.get("name")] + \
+                [pc["name"] for pc in PROFILE_CRITERIA]
+        report = repair_report_spacing(report, glue_terms=_glue)
+        standard_cv = repair_report_spacing(standard_cv, glue_terms=_glue)
+    except Exception as e:
+        print(f"UYARI (finalize_interview boşluk onarımı c={candidate_id}): {type(e).__name__}: {e}")
 
     # KALEM 3: modalite veri kapsamı (kamera karesi sayısı/dağılımı + ses metrikleri var/yok)
     # rapora DETERMİNİSTİK olarak eklenir — model atlamış olsa bile görünür.
@@ -6415,7 +6538,131 @@ _HALLUCINATION_PHRASES = {
     "mhm", "uh-huh", "okay", "ok", "o.k.", "switch", "switch.", "uh", "um", "hmm", "hm",
     "yeah", "yep", "yes", "see you", "see you later", "thanks for watching", "please subscribe",
     "amara.org", "altyazı m.k.", "i'm sorry", "sorry", "the end", "okay.", "so", "right",
+    # GÖREV 4.3 — Kader raporunda görülen sessizlik halüsinasyonları + yaygın altyazı imzaları
+    "i'll see you", "i'll see you.", "see you next time", "see you soon", "please do that",
+    "please do that.", "please do", "you're welcome", "thank you for watching", "subscribe",
+    "like and subscribe", "don't forget to subscribe", "altyazı m.k", "altyazi m.k.",
+    "altyazi m.k", "türkçe altyazı", "çeviri", "www", ".com", "have a nice day", "take care",
+    "good luck", "here we go", "let's go", "come on",
 }
+
+# GÖREV 4.2 — Realtime akışına sızabilen İÇ TALİMAT kalıpları. Bunlar seslendirilmeyen, modele
+# verilen yönlendirmelerdir; transkripte GİRMEMELİDİR. (Kısa + soru işareti YOK + emir kipiyle biten.)
+_PROMPT_LEAK_RE = re.compile(
+    r"^\s*(burada|şimdi|sıradaki|bir sonraki|devam(ında)?|ardından)?\s*[\wçğıöşüİ ,]{0,30}?"
+    r"\b(sor|sorun|sorabilirsin|geç|geçebilirsin|aç|kapat|derinleştir|netleştir|kontrol et|not al|yokla|teyit et|onayla|doğrula)\.?\s*$"
+    r"|^\s*\[?(talimat|not|sistem|iç not|instruction|reminder|hatırlatma)\s*[:\]]"
+    r"|^\s*(kriteri?|konuyu|bu konuyu)\s+(derinleştir|aç|kapat|geç|atla)\.?\s*$",
+    re.IGNORECASE)
+
+# GÖREV 4.1 — mülakatçı ağzından konuşma işaretleri (yüksek güven). Bir satır "Aday" etiketli
+# ama bu işaretlerden 2+ taşıyorsa ve cevap niteliği yoksa → yanlış etiket / yankı.
+# (Transkript Türkçe ama halüsinasyon/ascii ihtimaline karşı ı/i, ü/u toleransı var.)
+_INTERVIEWER_MARKERS = [
+    r"sor[uy](yorum|yu|muz)", r"sor[ae]y[ıi]m\b", r"sor[ae]l[ıi]m\b", r"soracağ[ıi]m\b",
+    r"diyelim ki", r"senaryo", r"sadele[şs]tir(iyorum|elim|iyorum)", r"netle[şs]tir(elim|eyim|elim)",
+    r"ge[çc](elim|iyorum)\b", r"[şs]imdi (farkl[ıi]|ba[şs]ka|[çc]ok k[ıi]sa|zorlay[ıi]c[ıi])",
+    r"yetkinlik alan[ıi]na", r"son (olarak|bir)", r"te[şs]ekk[üu]r ederim.{0,30}(g[öo]r[üu][şs]me|m[üu]lakat)",
+    r"eklemek.{0,20}ister misiniz", r"[öo]rnek ver(ir misiniz|in)\b", r"anlat[ıi]r m[ıi]s[ıi]n[ıi]z",
+    r"\bne yapar(s[ıi]n[ıi]z|d[ıi]n[ıi]z)\b", r"nas[ıi]l (yakla[şs][ıi]r|ilerlersin)",
+]
+_ANSWER_MARKERS = [
+    r"\bben\b", r"\bbizde\b", r"\byapt[ıi]m\b", r"\bettim\b", r"\bderim\b", r"\b[şs][öo]yle\b",
+    r"\b[öo]nce\b.{0,30}\bsonra\b", r"\bkontrol eder", r"\bbakar[ıi]m\b", r"\bevet\b", r"\bhay[ıi]r\b",
+    r"\bmezunuyum\b", r"\b[çc]al[ıi][şs]t[ıi]m\b", r"\bde[ğg]ilim\b", r"\bbilmiyorum\b", r"\bsan[ıi]r[ıi]m\b",
+]
+
+def _norm_line_text(s: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\wçğıöşüİ ]", "", (s or "").lower())).strip()
+
+def fix_transcript_speaker_and_leaks(transcript_text: str, lang: str = "tr"):
+    """GÖREV 4.1 + 4.2 + 4.4 — sesli mülakat transkriptinde:
+      - iç talimat sızıntısı satırlarını KALDIRIR (4.2)
+      - hoparlör YANKISI (aday mikrofonuna karışan AI sesi) satırlarını KALDIRIR: bir 'Aday'
+        satırı, ±20 sn içindeki bir 'Mülakatçı' satırının metniyle ≈ aynıysa → yankı (4.1)
+      - hâlâ 'Aday' etiketli ama mülakatçı ağzından (2+ işaret, cevap niteliği yok) satırları
+        'Mülakatçı'ya çevirir (4.1)
+      - satırları zaman damgasına göre KARARLI sıralar; aynı damgayı iki farklı konuşmacıya
+        vermez (ikinciyi +1 sn iter); ardışık birebir tekrarları eler (4.4)
+    Dönüş: (duzeltilmis_metin, [{tip, ts, text}] kaldırılan/değiştirilen kayıtlar)."""
+    if not transcript_text or not transcript_text.strip():
+        return transcript_text or "", []
+    parsed = []
+    for ln in transcript_text.splitlines():
+        raw = ln.rstrip()
+        if not raw.strip():
+            continue
+        m = _VOICE_LINE_RE.match(raw)
+        if m:
+            secs = int(m.group(1)) * 60 + int(m.group(2))
+            role = "aday" if m.group(3).startswith("Ada") else "mulakatci"
+            parsed.append({"secs": secs, "role": role, "text": m.group(4).strip(), "had_ts": True})
+        elif raw.strip().startswith(("Aday:", "Mülakatçı:")):
+            role = "aday" if raw.strip().startswith("Aday:") else "mulakatci"
+            parsed.append({"secs": None, "role": role, "text": raw.split(":", 1)[1].strip(), "had_ts": False})
+        else:
+            parsed.append({"secs": None, "role": None, "text": raw.strip(), "had_ts": False})
+    if not parsed:
+        return transcript_text, []
+
+    changes = []
+    kept = []
+    for i, p in enumerate(parsed):
+        txt, low = p["text"], _norm_line_text(p["text"])
+        # 4.2 — iç talimat sızıntısı: kısa + soru işareti YOK + emir kipiyle biten yönerge
+        if "?" not in txt and len(low.split()) <= 8 and _PROMPT_LEAK_RE.search(txt):
+            changes.append({"tip": "prompt_sizintisi", "ts": p["secs"], "text": txt[:160]})
+            continue
+        # 4.1 — hoparlör yankısı: bu bir 'aday' satırı ve yakınında ≈aynı metinli bir 'mulakatci' satırı var
+        if p["role"] == "aday" and low and len(low) >= 12:
+            echo = False
+            for j in range(max(0, i - 4), min(len(parsed), i + 5)):
+                q = parsed[j]
+                if j == i or q["role"] != "mulakatci":
+                    continue
+                if p["secs"] is not None and q["secs"] is not None and abs(p["secs"] - q["secs"]) > 20:
+                    continue
+                ql = _norm_line_text(q["text"])
+                if not ql:
+                    continue
+                # bir metin diğerini kapsıyor ya da >0.7 kelime örtüşmesi → yankı
+                a, b = set(low.split()), set(ql.split())
+                if low in ql or ql in low or (a and len(a & b) / max(1, min(len(a), len(b))) >= 0.7):
+                    echo = True
+                    break
+            if echo:
+                changes.append({"tip": "hoparlor_yankisi", "ts": p["secs"], "text": txt[:160]})
+                continue
+        # 4.1 — yanlış etiket: 'aday' ama mülakatçı ağzından
+        if p["role"] == "aday" and low:
+            im = sum(1 for pat in _INTERVIEWER_MARKERS if re.search(pat, low))
+            am = sum(1 for pat in _ANSWER_MARKERS if re.search(pat, low))
+            if im >= 2 and am == 0:
+                changes.append({"tip": "etiket_duzeltildi_aday->mulakatci", "ts": p["secs"], "text": txt[:160]})
+                p = dict(p, role="mulakatci")
+        kept.append(p)
+
+    # 4.4 — kararlı sıralama + damga çakışması + ardışık tekrar
+    for idx, p in enumerate(kept):
+        p["_ord"] = idx
+    kept.sort(key=lambda p: (p["secs"] if p["secs"] is not None else 10**9, p["_ord"]))
+    out_lines, last_sig, last_secs_by_role = [], None, {}
+    for p in kept:
+        sig = (p["role"], _norm_line_text(p["text"]))
+        if sig == last_sig:
+            continue
+        last_sig = sig
+        secs = p["secs"]
+        role_label = "Aday" if p["role"] == "aday" else ("Mülakatçı" if p["role"] == "mulakatci" else "Aday")
+        if secs is not None:
+            # aynı saniyeyi aynı konuşmacıya birden çok, ya da diğer konuşmacıyla çakışma → +1 sn it
+            while last_secs_by_role.get(secs) not in (None, p["role"]):
+                secs += 1
+            last_secs_by_role[secs] = p["role"]
+            out_lines.append(f"[{secs // 60}:{secs % 60:02d}] {role_label}: {p['text']}")
+        else:
+            out_lines.append(f"{role_label}: {p['text']}")
+    return "\n".join(out_lines), changes
 
 def is_likely_hallucination(text: str, lang: str = "tr") -> bool:
     """Sesli mülakatta sessizlik/gürültü anlarında transkripsiyon modelinin uydurduğu İngilizce
@@ -6438,6 +6685,16 @@ def is_likely_hallucination(text: str, lang: str = "tr") -> bool:
     ascii_only = re.fullmatch(r"[a-z0-9\s'.\-]+", norm) is not None
     if ascii_only and len(words) <= 2 and len(letters) <= 6:
         return True
+    # GÖREV 4.3 — TR oturumunda saf İngilizce KISA segment (Türkçe harf yok, ≤6 kelime) ve içinde
+    # meslek/teknik terim yoksa → sessizlik halüsinasyonu. Yaygın Whisper kalıpları (see/thank/
+    # please/subscribe/watching/welcome) varsa kelime sayısına bakma.
+    _EN_HALL_HINT = re.compile(r"\b(see you|thank|thanks|please|subscribe|watching|welcome|bye|goodbye|next time|take care|good luck|nice day|the end)\b")
+    _TECH_KEEP = re.compile(r"\b(sap|erp|excel|sql|kdv|sgk|ifrs|iso|api|crm|hr|it|pdf|word|logo|netsis|mikro|luca|zirve)\b")
+    if ascii_only and not _TECH_KEEP.search(norm):
+        if _EN_HALL_HINT.search(norm):
+            return True
+        if len(words) <= 4 and re.fullmatch(r"[a-z'\-. ]+", norm) and re.search(r"\b(i|you|we|the|is|are|was|will|would|do|does|did|see|me|my|it|that|this)\b", norm):
+            return True
     # KALEM 3: cümle, bilinen halüsinasyon kalıplarının tekrarından ibaret mi?
     # Noktalama ile parçalara ayır; her parça (boşluk normalize) bilinen bir kalıpsa → halüsinasyon.
     if ascii_only:
@@ -6979,10 +7236,11 @@ def build_modality_coverage_note(candidate_id: int, level: int) -> str:
         s = c["ses_ozet"]
         def _n(x, unit=""):
             return f"{x}{unit}" if x is not None else "—"
-        _tur_txt = _n(s['hesaba_katilan_tur'] if s.get('hesaba_katilan_tur') is not None else s['tur_sayisi'])
-        _tot = s.get('toplam_tur')
+        _ev = s.get('hesaba_katilan_tur') if s.get('hesaba_katilan_tur') is not None else s.get('tur_sayisi')
         _cevapsiz = s.get('cevapsiz_tur_sayisi')
-        _basis = f"{_tur_txt}" + (f" (toplam {_tot} turun {_tur_txt}'i üzerinden; cevapsız/halüsinasyon tur: {_n(_cevapsiz)})" if _tot else "")
+        # GÖREV 9.1 — DENKLİK: toplam = değerlendirilen + cevapsız (aynı kaynaktan türetilir)
+        _tot = (_ev + _cevapsiz) if (_ev is not None and _cevapsiz is not None) else s.get('toplam_tur')
+        _basis = f"{_n(_ev)}" + (f" (toplam {_tot} ses turu = {_n(_ev)} değerlendirilen + {_n(_cevapsiz)} cevapsız/halüsinasyon)" if _tot is not None else "")
         lines.append(
             "- Ses metrikleri (tur bazlı, cevapsız turlar hariç): "
             f"hesaba katılan tur {_basis}, "
@@ -7166,6 +7424,7 @@ TEMEL KURALLAR:
 - Yalnızca adayın gerçekten söylediği sözler mülakat kanıtıdır. Mülakatçının açıklamalarını adaya mal etme.
 - CV bilgisi ile mülakat kanıtını ayır: “CV'de belirtilmiştir” ve “mülakatta doğrulanmıştır/doğrulanamamıştır” ifadelerini açık kullan.
 - Adayın söylemediği deneyim, beceri, sonuç, motivasyon veya kişilik özelliği uydurma.
+- ADAYIN KENDİ BEYAN ETTİĞİ BİLGİ EKSİKLİKLERİ (GÖREV 9.3): Aday transkriptte kendi ağzıyla bir konuda bilgisi/deneyimi olmadığını söylediyse (ör. "kurumlar vergisi ve e-defter kısmında bilgim yok"), bu İLGİLİ kriterin "Kanıt ve Analiz" hücresinde AÇIKÇA yer alacak ve dakika damgasıyla alıntılanacak. Bu otomatik düşük puan demek değildir — ama kanıtın GÖRÜLMESİ ve analize dahil edilmesi zorunludur; sessizce atlama.
 - Aynı kalıp cümleleri her bölümde tekrar etme. Rapor bu adaya özgü olmalı; somut proje, karar, örnek ve ifadeleri kullan.
 {CRITERION_SCORING_RULE}
 - Toplam puanı yalnızca PUANLANAN kriterlerin ağırlığına göre normalize et. 'Değerlendirilemedi (sistem)' kriterleri hesaba KATMA. Raporda puanlanan ve payda-dışı listeleri AYRI göster.
@@ -7255,9 +7514,16 @@ async def create_l2_report(data: RealtimeReportRequest, background_tasks: Backgr
     except Exception as e:
         print(f"UYARI (whisper maliyet kaydı c={effective_candidate_id}): {type(e).__name__}: {e}")
 
-    # KALEM 1 — SUNUCU tarafı halüsinasyon filtresi (frontend filtresi tek savunma hattı olmasın).
     _lang = (candidate["interview_language"] if "interview_language" in candidate.keys() else "tr") or "tr"
-    _clean_transcript, _hall_filtered, _hall_n = filter_transcript_hallucinations(data.transcript, _lang)
+    # GÖREV 4.1+4.2+4.4 — konuşmacı etiketi / yankı / iç talimat sızıntısı / zaman damgası düzeltmesi.
+    _spk_fixed, _spk_changes = fix_transcript_speaker_and_leaks(data.transcript, _lang)
+    if _spk_changes:
+        record_realtime_events(effective_candidate_id, candidate_level,
+                               [{"type": "transcript_speaker_fix", "data": ch, "elapsed_ms": _safe_int(ch.get("ts")) * 1000 if ch.get("ts") else 0} for ch in _spk_changes])
+        print(f"[TRANSCRIPT_FIX server] c={effective_candidate_id} {len(_spk_changes)} satır düzeltildi/kaldırıldı: "
+              + ", ".join(sorted({c['tip'] for c in _spk_changes})))
+    # KALEM 1 — SUNUCU tarafı halüsinasyon filtresi (frontend filtresi tek savunma hattı olmasın).
+    _clean_transcript, _hall_filtered, _hall_n = filter_transcript_hallucinations(_spk_fixed, _lang)
     if _hall_n:
         record_realtime_events(effective_candidate_id, candidate_level,
                                [{"type": "transcription_filtered_server", "data": f, "elapsed_ms": 0} for f in _hall_filtered])
