@@ -7278,8 +7278,12 @@ def build_modality_coverage_note(candidate_id: int, level: int) -> str:
 _QREPEAT_OVERLAP_THRESHOLD = 0.55   # ardışık mülakatçı soruları arasında anlamlı kelime Jaccard eşiği
 _QREPEAT_MIN_RUN = 3               # "2 denemeyi aşan" = aynı sorunun 3+ kez sorulması
 
+# (eski _ANNOTATE_STOPWORDS GÖREV 1.2'de silindi; soru-tekrarı tespiti için gereken küçük küme burada)
+_QREPEAT_STOPWORDS = {"ve", "ile", "veya", "ya", "da", "de", "için", "bir",
+                      "karar", "yaklasim", "yaklasimi", "verme", "yonetim", "yonetimi"}
+
 def _q_keywords(text: str) -> set:
-    return {w for w in _norm_name(text).split() if len(w) >= 4 and w not in _ANNOTATE_STOPWORDS}
+    return {w for w in _norm_name(text).split() if len(w) >= 4 and w not in _QREPEAT_STOPWORDS}
 
 def _stem_overlap(a: set, b: set) -> int:
     """Türkçe eklerini yok saymak için kaba kök eşleşmesi: iki kelimeden biri diğerinin >=5
