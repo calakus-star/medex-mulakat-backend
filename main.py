@@ -6000,10 +6000,10 @@ def run_deferred_finish_job(candidate_id: int, level: int, regen: bool = False):
             _u = getattr(response, "usage", None)
             print(f"[REPORT_USAGE] c={candidate_id} L{level} provider=claude model={model or 'claude-sonnet-4-6'} "
                   f"out_tokens={getattr(_u, 'output_tokens', '?')} stop_reason={getattr(response, 'stop_reason', '?')} "
-                  f"max_tokens={REPORT_MAX_TOKENS} bitti={'---STANDARTCVSON---' in reply}")
+                  f"max_tokens={REPORT_MAX_TOKENS} bitti={'---RAPORSON---' in reply}")
             # GÖREV 8 — KESİLME → FALLBACK'E DÜŞMEDEN ÖNCE DEVAM ÇAĞRISI (continuation).
             _cont_tries = 0
-            while (getattr(response, "stop_reason", None) == "max_tokens" or "---STANDARTCVSON---" not in reply) and _cont_tries < 2:
+            while (getattr(response, "stop_reason", None) == "max_tokens" or "---RAPORSON---" not in reply) and _cont_tries < 2:
                 _cont_tries += 1
                 print(f"[REPORT_CONTINUATION] c={candidate_id} L{level} deneme {_cont_tries}")
                 _cont = client.messages.create(
@@ -6011,12 +6011,12 @@ def run_deferred_finish_job(candidate_id: int, level: int, regen: bool = False):
                     system=cached_system(system) if system else anthropic.NOT_GIVEN,
                     messages=[{"role": "user", "content": primary_payload},
                               {"role": "assistant", "content": reply},
-                              {"role": "user", "content": "Kaldığın yerden AYNEN devam et; hiçbir şeyi tekrar etme, başa dönme. Raporu ---STANDARTCVSON--- ile bitir."}]
+                              {"role": "user", "content": "Kaldığın yerden AYNEN devam et; hiçbir şeyi tekrar etme, başa dönme. Raporu ---RAPORSON--- ile bitir."}]
                 )
                 record_anthropic_usage(candidate_id, level, model or "claude-sonnet-4-6", "report_generation_continuation", _cont)
                 reply = reply + _cont.content[0].text
                 response = _cont
-            if getattr(response, "stop_reason", None) == "max_tokens" or "---STANDARTCVSON---" not in reply:
+            if getattr(response, "stop_reason", None) == "max_tokens" or "---RAPORSON---" not in reply:
                 print(f"[REPORT_TRUNCATED] c={candidate_id} L{level} stop_reason={getattr(response,'stop_reason',None)} (devam çağrıları yetmedi)")
                 record_system_decision(candidate_id, level, "rapor_kesildi",
                                        "Rapor üretimi token sınırına takıldı; devam çağrıları da tamamlayamadı, eksik bölümler deterministik tamamlandı.",
@@ -6053,14 +6053,14 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             _uo = (result.get("usage") or {})
             print(f"[REPORT_USAGE] c={candidate_id} L{level} provider=openai model={model or OPENAI_REPORT_MODEL} "
                   f"completion_tokens={_uo.get('completion_tokens', '?')} finish_reason={_fr} "
-                  f"max_tokens={REPORT_MAX_TOKENS} bitti={'---STANDARTCVSON---' in reply}")
+                  f"max_tokens={REPORT_MAX_TOKENS} bitti={'---RAPORSON---' in reply}")
             # GÖREV 8 — KESİLME → FALLBACK'E DÜŞMEDEN ÖNCE DEVAM ÇAĞRISI (continuation).
             _cont_tries = 0
-            while (_fr == "length" or "---STANDARTCVSON---" not in reply) and _cont_tries < 2:
+            while (_fr == "length" or "---RAPORSON---" not in reply) and _cont_tries < 2:
                 _cont_tries += 1
                 print(f"[REPORT_CONTINUATION] c={candidate_id} L{level} deneme {_cont_tries}")
                 _cmsgs = _msgs + [{"role": "assistant", "content": reply},
-                                  {"role": "user", "content": "Kaldığın yerden AYNEN devam et; hiçbir şeyi tekrar etme, başa dönme. Raporu ---STANDARTCVSON--- ile bitir."}]
+                                  {"role": "user", "content": "Kaldığın yerden AYNEN devam et; hiçbir şeyi tekrar etme, başa dönme. Raporu ---RAPORSON--- ile bitir."}]
                 _cr = openai_call("POST", "https://api.openai.com/v1/chat/completions",
                                   json_body={"model": model or OPENAI_REPORT_MODEL, "messages": _cmsgs, "max_tokens": REPORT_MAX_TOKENS, "temperature": 0},  # GÖREV 4.4
                                   timeout=150.0, step="report_continuation", severity="user", retry=True,
@@ -6068,7 +6068,7 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
                 record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "l2_report_continuation", _cr)
                 reply = reply + (_cr["choices"][0]["message"]["content"] or "")
                 _fr = (_cr.get("choices") or [{}])[0].get("finish_reason")
-            if _fr == "length" or "---STANDARTCVSON---" not in reply:
+            if _fr == "length" or "---RAPORSON---" not in reply:
                 print(f"[REPORT_TRUNCATED] c={candidate_id} L{level} finish_reason={_fr} (devam çağrıları yetmedi)")
                 record_system_decision(candidate_id, level, "rapor_kesildi",
                                        "Rapor üretimi token sınırına takıldı; devam çağrıları da tamamlayamadı, eksik bölümler deterministik tamamlandı.",
@@ -6879,25 +6879,36 @@ async def create_realtime_session(payload=Depends(verify_token)):
 
 def build_l2_short_report(candidate_name: str, position_name: str, reason: str) -> str:
     """Minimum tamamlanma şartı sağlanmadığında (yarım mülakat / veri yetersizliği)
-    OpenAI'a HİÇ istek atmadan, ücretsiz bir şablon raporla direkt döner."""
+    OpenAI'a HİÇ istek atmadan, ücretsiz bir şablon raporla direkt döner. 2026-09 rapor
+    yeniden tasarımı — ===BAŞLIK=== formatına güncellendi (eski ---STANDARTCV--- bloğu ve
+    düz **Aday:**/**Öneri:** satırları artık parse_llm_report_sections'ın tanıdığı bir
+    şey DEĞİL; bu şablon eski kalırsa finalize_interview onu sessizce build_fallback_report'a
+    düşürüp bu fonksiyonun verdiği SOMUT nedeni kaybediyordu — kök neden, GÖREV: rapor
+    yeniden üretimi çalışmıyor teşhisi sırasında yakalandı)."""
     return f"""[MÜLAKATBİTTİ]
 ---RAPOR---
-**Aday:** {candidate_name}
-**Pozisyon:** {position_name}
-**Tarih:** {datetime.now().strftime('%d.%m.%Y')}
-
-**TOPLAM PUAN: Değerlendirilemedi**
-
+===YÖNETİCİ ÖZETİ===
 {reason}
 
-**Öneri:** Değerlendirilemedi
----RAPORSON---
+===POZİSYON YETKİNLİKLERİ===
+YOK
 
----STANDARTCV---
-**AD SOYAD:** {candidate_name}
-**POZİSYON:** {position_name}
-**MÜLAKAT NOTU:** {reason}
----STANDARTCVSON---"""
+===KİŞİSEL VE BİLİŞSEL PROFİL===
+YOK
+
+===GÜÇLÜ YÖNLER===
+YOK
+
+===GELİŞİM ALANLARI===
+YOK
+
+===CV ÖZETİ===
+YOK
+
+===TAKİP MÜLAKATI SORULARI===
+YOK
+===BÖLÜM SONU===
+---RAPORSON---"""
 
 @app.post("/api/realtime/sync")
 async def sync_realtime_progress(data: RealtimeSyncRequest, request: Request):
