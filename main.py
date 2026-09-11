@@ -8260,7 +8260,12 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     styles.add(ParagraphStyle(name="Section", parent=styles["Heading2"], fontName=font_bold, fontSize=13, leading=16, textColor=rl_colors.HexColor("#1e3a5f"), spaceBefore=12, spaceAfter=8))
     styles.add(ParagraphStyle(name="Small", parent=styles["BodyText"], fontName=font_regular, fontSize=8, leading=10, textColor=rl_colors.HexColor("#64748b")))
     styles.add(ParagraphStyle(name="BodyWrap", parent=styles["BodyText"], fontName=font_regular, fontSize=9.2, leading=12.5, textColor=rl_colors.HexColor("#0f172a"), wordWrap="CJK"))
-    styles.add(ParagraphStyle(name="Metric", parent=styles["BodyText"], fontName=font_bold, fontSize=18, leading=22, alignment=TA_CENTER, textColor=rl_colors.HexColor("#1e3a5f")))
+    # EK GÖREV 8.3/8.4 — dört özet hücresi (PUAN 1/2, ORTALAMA, ÖNERİ) AYNI, KÜÇÜLTÜLMÜŞ boyut;
+    # kelime-ortası bölme kapalı ("Değerlendirmeye Al" gibi uzun metin hücreyi taşırmasın).
+    _metric_style = ParagraphStyle(name="Metric", parent=styles["BodyText"], fontName=font_bold, fontSize=13, leading=16, alignment=TA_CENTER, textColor=rl_colors.HexColor("#1e3a5f"))
+    _metric_style.splitLongWords = 0
+    _metric_style.wordWrap = None
+    styles.add(_metric_style)
     styles.add(ParagraphStyle(name="MiniHeading", parent=styles["BodyText"], fontName=font_bold, fontSize=9.5, leading=12, textColor=rl_colors.HexColor("#92400e"), spaceBefore=2, spaceAfter=4))
 
     story = []
@@ -8276,6 +8281,12 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     s_pos = interview.get("score_position")
     s_prof = interview.get("score_profile")
 
+    # EK GÖREV 8.1/8.2 — bu kısaltma YALNIZ başlık özet tablosu içindir; rapor GÖVDESİNDEKİ
+    # KARAR bloğu ve gerekçesi (sync_recommendation_line ile yazılan) tam hâliyle KALIR.
+    _REC_SHORT = {"Reddet": "Reddet", "Değerlendirmeye Al": "Değerlendir", "İşe Al": "İşe Al",
+                 "Değerlendirilemedi": "Değerlendirilemedi"}
+    recommendation_short = _REC_SHORT.get(recommendation, recommendation)
+
     if s_prof is not None:
         metric_table = Table([
             [Paragraph("PUAN 1 — POZİSYON", styles["Small"]), Paragraph("PUAN 2 — PROFİL", styles["Small"]),
@@ -8283,12 +8294,12 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
             [Paragraph(ptxt("-" if s_pos is None else f"{s_pos}/100"), styles["Metric"]),
              Paragraph(ptxt(f"{s_prof}/100"), styles["Metric"]),
              Paragraph(ptxt(score_display), styles["Metric"]),
-             Paragraph(ptxt(recommendation), styles["Metric"])],
+             Paragraph(ptxt(recommendation_short), styles["Metric"])],
         ], colWidths=[4.2*cm, 4.2*cm, 4.2*cm, 4.2*cm])
     else:
         metric_table = Table([
             [Paragraph("SKOR", styles["Small"]), Paragraph("ÖNERİ", styles["Small"])],
-            [Paragraph(ptxt(score_display), styles["Metric"]), Paragraph(ptxt(recommendation), styles["Metric"])],
+            [Paragraph(ptxt(score_display), styles["Metric"]), Paragraph(ptxt(recommendation_short), styles["Metric"])],
         ], colWidths=[8.4*cm, 8.4*cm])
     metric_table.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,-1), rl_colors.HexColor("#f8fafc")),
