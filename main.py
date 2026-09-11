@@ -529,6 +529,7 @@ def init_db():
         ("interviews", "reviewer_score_revision_json", "TEXT"),  # KALEM 9 — ikinci modelin tetiklediği kriter puan revizyonları
         ("interviews", "reviewer_summary_tone", "TEXT"),  # denetçinin Yönetici Özeti sonuç tonu değerlendirmesi (OLUMLU/NOTR/OLUMSUZ)
         ("interviews", "raw_report", "TEXT"),  # rapor üreten model çağrısının İŞLENMEMİŞ çıktısı (yalnız admin panel; ≤20000 kr)
+        ("interviews", "technical_annex", "TEXT"),  # TUR 3 / GÖREV 5 — ham metrikler/JSON; rapor gövdesinden AYRI, PDF'te en sonda "Teknik Ek (yalnızca yönetici)"
         ("candidates", "person_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("candidates", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         ("positions", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
@@ -2563,7 +2564,7 @@ REPORT_BODY_SECTIONS = [
     ("takip_sorulari", {2, 3},    "**Takip Mülakatında Sorulması Önerilen Sorular:** (3-6 adet, bu adaya özgü)"),
     ("dil_gozlemi",    {1, 2, 3}, "**Dil Gözlemi:** (adayın dil tercihi; Türkçe/ilgili dile hâkimiyetine dair somut gözlem; varsa hangi konuda/noktada dil değiştirdiği. Pozisyon bir dil yeterliliği gerektiriyorsa bunun değerlendirmeye etkisini açıkla; gerektirmiyorsa yalnızca bilgi amaçlı gözlem olarak yaz. Gözlem yoksa \"Belirtilecek bir dil gözlemi yok\".)"),
     ("serbest_l13",    {1},       "**Serbest Gözlemler:** ... (kriter dışı sinyaller; yoksa \"Belirtilecek bir gözlem yok\" yaz)"),
-    ("serbest_l2",     {2, 3},    "**Serbest Gözlemler:** (kriter dışı ama işle ilgili NİTELİKSEL gözlemler — duruş, mimik, davranış, tutum. Ses metriği SAYILARINI (konuşma süresi, tur uzunluğu, yanıt gecikmesi vb.) BURADA TEKRARLAMA; o sayılar sistem tarafından ayrı 'Modalite Veri Kapsamı' bloğunda veriliyor. Niteliksel bir gözlem yoksa \"Belirtilecek bir gözlem yok\" yaz.)"),
+    ("serbest_l2",     {2, 3},    "**Serbest Gözlemler:** (SADECE transkriptten çıkan, işle ilgili NİTELİKSEL davranış/tutum gözlemi — ör. gerekçeli itiraz, sabırsızlık, konudan kopma. Görüntü/ses/mimik gözlemi ve HİÇBİR metrik SAYISI buraya YAZILMAZ; sistem onları ayrı 'Görüntü ve Ses Gözlemi' bölümünde ekliyor. Niteliksel bir gözlem yoksa \"Belirtilecek bir gözlem yok\" yaz.)"),
     ("sonuc_gerekcesi", {1, 2, 3}, "**Sonuç Gerekçesi:** (SADECE mülakat ihlal, teknik sebep veya erken bitişle sonuçlandıysa doldur: NE olduğu, KAÇINCI DAKİKA, DAYANAĞI (transkriptteki söz / kamera karesi), sonuca ETKİSİ. Aşağıdaki OLAY KANITLARI bloğunu esas al. Böyle bir olay YOKSA bu başlığı ve altını tamamen ATLA — 'Mülakat normal tamamlandı, olumsuz bir gözlem yok' gibi sabit cümle YAZMA; o durumu sistem ayrıca not eder.)"),
     ("genel_kani_l13", {1},       "**Genel Kanı:** ...{note_report_field}"),
     ("genel_kani_l2",  {2, 3},    "**Genel Kanı:** (kanıtların dengeli sentezi){ai_note_report_field}"),
@@ -4720,8 +4721,18 @@ _EMPTY_CONTENT_RE = re.compile(
     r"mülakat\s+normal\s+tamamland|normal\s+(?:bir\s+)?(?:şekilde\s+)?tamamland|olumsuz\s+bir\s+(?:gözlem|durum|bulgu)\s+(?:yok|bulunma)|"
     r"belirtilen\s+tüm\s+kriterler\s+değerlendirild|tüm\s+kriterler\s+değerlendirild|değerlendirilemeyen\s+(?:bir\s+)?alan\s+(?:yok|bulunma)|"
     r"tüm\s+kriterler\s+(?:eksiksiz\s+)?(?:puanland|değerlendirild)|"
-    # GÖREV 6.c — "AI Notuna Uyum" için içeriksiz klişe: somut alıntı/dakika yok, sadece 'irdelendi/yetersiz'
-    r"^(?:aday[ıi]n\s+)?.{0,40}\b(?:irdelen(?:miş|di)|ele\s+al[ıi]n(?:m[ıi][şs]|d[ıi]))\b.{0,80}\b(?:yetersiz|eksik)\s+kal",
+    # TUR 3 / GÖREV 6.2 — "AI Notuna Uyum" klişesi HER İKİ KUTUPTA: 'detaylı irdelendi + (yeterli/yetersiz)'
+    # gibi mekanizmasız genel cümle. (Dakika damgaları önce ayıklanır, bkz. strip_empty_report_sections.)
+    r"\b(?:detayl[ıi]\s+(?:bir\s+)?(?:şekilde\s+)?)?(?:irdelen(?:miş|di)|ele\s+al[ıi]n(?:m[ıi][şs]|d[ıi])|değinilmiş|incelen(?:miş|di))\b"
+    r".{0,90}\b(?:yeterli\s+(?:bilgiye\s+sahip|olduğunu)|yetersiz\s+kal|eksik\s+kal|başar[ıi]l[ıi]\s+(?:olduğunu|bir)|"
+    r"gösterm(?:iştir|iş)|sahip\s+olduğunu\s+göster)",
+    re.IGNORECASE)
+
+# TUR 3 / GÖREV 6 — "AI Notuna Uyum" bölümü için EK kontrol: gerçek bir mekanizma (soru/cevap/
+# alıntı) referansı YOKSA → içeriksiz. Sadece dakika damgası koymak bölümü kurtarmaz.
+_AI_NOTE_MECHANISM_RE = re.compile(
+    r"\bsor(?:uldu|du|ulmuş|ması|ya)\b|\bsoru(?:yla|nun|su|ları)\b|\bcevab|\byan[ıi]t(?:lad|ıyla)?\b|"
+    r"\bdedi\b|\bbelirtti\b|\bifade\s+etti\b|\bsöyled|\baçıkça\s+(?:söyled|belirtti)|[\"“].{4,}[\"”]",
     re.IGNORECASE)
 
 def strip_empty_report_sections(text: str) -> str:
@@ -4736,6 +4747,7 @@ def strip_empty_report_sections(text: str) -> str:
     while i < n:
         hm = _head.match(lines[i])
         if hm and _norm_name(hm.group(1)) in _EMPTYABLE_SECTIONS:
+            _sec_norm = _norm_name(hm.group(1))
             # bu bölümün gövdesini topla
             body = [hm.group(2).strip()] if hm.group(2).strip() else []
             j = i + 1
@@ -4747,8 +4759,14 @@ def strip_empty_report_sections(text: str) -> str:
                 body.append(lines[j].strip())
                 j += 1
             joined = " ".join(body).strip()
-            if not joined or _EMPTY_CONTENT_RE.search(joined):
-                # bölümü ve ardındaki tek boş satırı atla
+            # TUR 3 / GÖREV 6.2 — dakika damgalarını + kriter puanlarını ayıkla, KLİŞE kontrolü ondan sonra
+            _bare = re.sub(r"\[\s*\d{1,3}\s*:\s*\d{2}\s*\]|\b\d{1,3}\s*/\s*\d{1,3}\b", " ", joined)
+            _bare = re.sub(r"\s+", " ", _bare).strip()
+            _is_empty = (not joined) or _EMPTY_CONTENT_RE.search(_bare)
+            # "AI Notuna Uyum": gerçek bir mekanizma (soru/cevap/alıntı) referansı yoksa da içeriksiz
+            if not _is_empty and _sec_norm == "ai notuna uyum" and not _AI_NOTE_MECHANISM_RE.search(joined):
+                _is_empty = True
+            if _is_empty:
                 i = j
                 if i < n and not lines[i].strip():
                     i += 1
@@ -5055,6 +5073,118 @@ def extract_voice_observations(candidate_id: int, level: int) -> list:
         })
     return out
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TUR 3 / GÖREV 4+5 — MODALİTE BULGULARI: İNSAN DİLİYLE RAPOR + AYRI TEKNİK EK
+# ══════════════════════════════════════════════════════════════════════════════
+def _read_modality_json(candidate_id: int, level: int):
+    """interviews.*_json kolonlarından mimik/ses/gözlem verisini + kapsamı okur."""
+    mimic, metrics, obs = {}, {}, []
+    try:
+        db = get_db()
+        row = db.execute("SELECT mimic_analysis_json, voice_metrics_json, voice_observations_json "
+                         "FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+        db.close()
+        if row:
+            if row["mimic_analysis_json"]:
+                mimic = json.loads(row["mimic_analysis_json"]) or {}
+            if row["voice_metrics_json"]:
+                metrics = json.loads(row["voice_metrics_json"]) or {}
+            if row["voice_observations_json"]:
+                obs = json.loads(row["voice_observations_json"]) or []
+    except Exception as e:
+        print(f"UYARI (_read_modality_json c={candidate_id}): {type(e).__name__}: {e}")
+    return mimic, metrics, obs
+
+def build_modality_prose(candidate_id: int, level: int) -> str:
+    """TUR 3 / GÖREV 4.5 + 5.1 — mimik + ses + mülakatçı gözlemlerinden İNSAN DİLİYLE, ham sayı
+    içermeyen bir 'Görüntü ve Ses Gözlemi' bölümü üretir. Rapor GÖVDESİNE eklenir.
+    Ham sayılar bu bölüme GİRMEZ — onlar build_technical_annex()'te. Puanı ETKİLEMEZ (gözlem)."""
+    cov = compute_modality_coverage(candidate_id, level)
+    mimic, metrics, obs = _read_modality_json(candidate_id, level)
+    total_min = cov.get("toplam_dk")
+    parts = []
+
+    # ── Kamera / görüntü ──
+    dg = cov.get("dogrulama") or {}
+    if dg.get("n"):
+        _span = ""
+        if dg.get("ilk_dk") is not None and dg.get("son_dk") is not None:
+            _span = f" mülakatın {dg['ilk_dk']:.0f}. ve {dg['son_dk']:.0f}. dakikaları arasına yayılmış "
+        cam = f"Aday kamera görüntüsü{(' ' + str(dg['n']) + ' ayrı noktadan') if dg['n'] else ''}{_span}doğrulandı"
+        if not dg.get("kumelenme"):
+            cam += "; kareler oturuma dengeli dağıldığı için görüntü kapsamı yeterli."
+        else:
+            cam += ". Kareler dar bir aralıkta toplandığı için oturumun bir bölümü görüntüyle gözlemlenemedi."
+        parts.append(cam)
+    if isinstance(mimic, dict) and mimic and mimic.get("durum") != "yetersiz_kare":
+        _mm = []
+        if mimic.get("genel_durus"):
+            _mm.append(str(mimic["genel_durus"]).strip().rstrip("."))
+        if mimic.get("goz_temasi_egilimi") and "kestiril" not in str(mimic["goz_temasi_egilimi"]).lower():
+            _mm.append("göz teması eğilimi: " + str(mimic["goz_temasi_egilimi"]).strip().rstrip("."))
+        if _mm:
+            parts.append("Duruş ve genel görünüm — " + "; ".join(_mm) + ".")
+        _anlar = [a for a in (mimic.get("belirgin_anlar") or []) if isinstance(a, dict) and a.get("gozlem")]
+        for a in _anlar[:3]:
+            _t = a.get("t_sn")
+            _when = f"[{int(_t)//60}:{int(_t)%60:02d}] " if isinstance(_t, (int, float)) else ""
+            _yr = f" ({str(a['yorum']).strip()})" if a.get("yorum") and str(a["yorum"]).lower() not in ("nötr", "notr") else ""
+            parts.append(f"{_when}{str(a['gozlem']).strip().rstrip('.')}{_yr}.")
+        if mimic.get("genel_izlenim"):
+            parts.append("Görüntü genel izlenimi: " + str(mimic["genel_izlenim"]).strip())
+    elif isinstance(mimic, dict) and mimic.get("durum") == "yetersiz_kare":
+        parts.append("Görüntü analizi için yeterli kare toplanamadı.")
+
+    # ── Ses / konuşma ──
+    if metrics and _safe_int(metrics.get("tur_sayisi")) > 0:
+        talk = metrics.get("aday_konusma_toplam_sn")
+        _pct = None
+        if talk is not None and total_min:
+            _pct = round(100 * (talk / 60.0) / total_min)
+        s_sentence = "Aday"
+        if _pct is not None:
+            _lab = "sürenin yarısından fazlasında" if _pct >= 50 else (f"sürenin yaklaşık %{_pct}'inde" if _pct >= 25 else "sürenin küçük bir bölümünde")
+            s_sentence += f" mülakat {_lab} konuştu"
+        avg_turn = metrics.get("ortalama_tur_uzunlugu_sn")
+        if avg_turn is not None:
+            _tl = "kısa ve öz" if avg_turn < 20 else ("orta uzunlukta" if avg_turn < 45 else "uzun ve ayrıntılı")
+            s_sentence += f"; cevapları ortalama {_tl}."
+        else:
+            s_sentence += "."
+        parts.append(s_sentence)
+        lat = metrics.get("yanit_gecikmesi_ort_sn")
+        if lat is not None:
+            if lat < 3:
+                parts.append("Sorulara hızlı yanıt vermiş, belirgin bir düşünme duraklaması gözlenmemiş.")
+            elif lat <= 9:
+                parts.append("Sorulardan sonra cevap vermeden önce belirgin bir düşünme süresi almış — aceleci cevaptan kaçınıyor.")
+            else:
+                parts.append("Bazı sorulardan sonra uzun duraklamalar olmuş; bu teknik gecikmeden de kaynaklanmış olabilir.")
+        sk = _safe_int(metrics.get("soz_kesme_sayisi"))
+        if sk >= 4:
+            parts.append(f"Mülakatçıyla üst üste konuşma {sk} noktada olmuş (sık).")
+        elif sk >= 1:
+            parts.append(f"Mülakatçıyla üst üste konuşma {sk} noktada olmuş.")
+        _cev = _safe_int(metrics.get("cevapsiz_tur_sayisi"))
+        if _cev >= 2:
+            parts.append(f"{_cev} soru turunda geçerli bir aday cevabı alınamadı (sessizlik / transkripsiyon gürültüsü).")
+        if (metrics.get("guven") or "").lower() == "dusuk":
+            parts.append("Ses metriklerinin güveni düşük — olay kaydında boşluklar var; bu gözlemler temkinli okunmalı.")
+    elif metrics is not None and not metrics:
+        parts.append("Ses metrikleri toplanamadı (konuşma başlangıç/bitiş olayı kaydedilmemiş).")
+
+    # ── Mülakatçının anlık ses gözlemleri ──
+    for o in (obs or [])[:4]:
+        if o.get("gozlem"):
+            _ems = _safe_int(o.get("elapsed_ms"))
+            _w = f"[{_ems//60000}:{(_ems//1000)%60:02d}] " if _ems else ""
+            parts.append(f"{_w}Mülakatçı gözlemi: {str(o['gozlem']).strip()}")
+
+    if not parts:
+        return ""
+    body = " ".join(p if p.endswith((".", "!", "?", ":")) else p + "." for p in parts)
+    return ("**Görüntü ve Ses Gözlemi (sistem — niteliksel, puana etki etmez):**\n" + body).strip()
+
 MIMIC_ANALYSIS_PROMPT = """Aşağıda bir iş mülakatı sırasında adayın web kamerasından ~45 saniye arayla alınmış kareler var; her karenin öncesinde [t=SANİYE] etiketi bulunur. Bu kareler DÜŞÜK çözünürlüklüdür ve seyrektir.
 
 Görevin: yalnızca karelerde GÖZLENEBİLEN şeyleri, GÖZLEM olarak (teşhis/duygu/kişilik hükmü DEĞİL) yaz. Emin olmadığın hiçbir şeyi yazma. Duygu okuması, IQ, samimiyet/yalan değerlendirmesi YAPMA.
@@ -5170,24 +5300,22 @@ def build_modality_evidence_block(candidate_id: int, level: int) -> str:
     if mimic:
         parts.append("MİMİK / GÖRÜNTÜ GÖZLEMLERİ:\n" + json.dumps(mimic, ensure_ascii=False, indent=1))
     if metrics:
-        parts.append("SES METRİKLERİ (tur bazlı — cevap gecikmesi, tur uzunluğu, düşünme süresi, söz kesme). Bu SAYILARI raporun 'Serbest Gözlemler' bölümüne SOMUT yaz:\n" + json.dumps(metrics, ensure_ascii=False, indent=1))
+        parts.append("SES METRİKLERİ (tur bazlı):\n" + json.dumps(metrics, ensure_ascii=False, indent=1))
     else:
-        # KALEM 2/3: ses metrikleri yoksa SESSİZCE ATLAMA — rapora açıkça yaz.
-        parts.append("SES METRİKLERİ: TOPLANAMADI — realtime_events'te konuşma başlangıç/bitiş olayı yok "
-                     "(cevap gecikmesi, duraklama, konuşma/sessizlik oranı, söz kesme sayısı ölçülemedi). "
-                     "Raporun 'Serbest Gözlemler' bölümünde 'ses verisi toplanamadı' diye AÇIKÇA belirt.")
+        parts.append("SES METRİKLERİ: TOPLANAMADI — realtime_events'te konuşma başlangıç/bitiş olayı yok.")
     if obs:
         parts.append("MÜLAKATÇI SES GÖZLEMLERİ (mülakat anında kaydedildi):\n" + json.dumps(obs, ensure_ascii=False, indent=1))
-    # KALEM 1/3: kamera karesi kapsamı (İKİ set ayrı) — deterministik, her zaman eklenir.
     _cov = compute_modality_coverage(candidate_id, level)
-    parts.append("KAMERA KARESİ KAPSAMI (deterministik — 'dogrulama'=panel/PDF galerisi, 'mimik'=yalnız AI):\n" + json.dumps(_cov, ensure_ascii=False))
+    parts.append("KAMERA KARESİ KAPSAMI:\n" + json.dumps(_cov, ensure_ascii=False))
     if not parts:
         return ""
-    return ("=== MODALİTE KANITLARI (DESTEKLEYİCİ) ===\n"
-            "Aşağıdaki görüntü/ses sinyalleri YALNIZCA destekleyici gözlemdir. Toplam puanı ve "
-            "İşe Al / Değerlendirmeye Al / Reddet kararını DEĞİŞTİRMEZLER. Yalnızca 'Serbest Gözlemler' "
-            "bölümünü zenginleştirmek için, temkinli ve 'gözlem — teşhis değil' diliyle kullan. "
-            "Bunlar duygu tespiti, kişilik hükmü veya yalan analizi DEĞİLDİR. Sinyal zayıf/eksikse yok say.\n\n"
+    # TUR 3 / GÖREV 5 — bu blok yalnızca BAĞLAM'dır. Model bu SAYILARI rapora YAZMAYACAK; sistem
+    # zaten insan diliyle 'Görüntü ve Ses Gözlemi' bölümünü + ayrı 'Teknik Ek'i deterministik ekler.
+    return ("=== MODALİTE BAĞLAMI (yalnızca senin bilgin için — RAPORA SAYI/METRİK YAZMA) ===\n"
+            "Aşağıdaki görüntü/ses sinyalleri YALNIZCA destekleyici bağlamdır. Toplam puanı ve kararı "
+            "DEĞİŞTİRMEZLER. Bu bloktaki SAYILARI, metrik adlarını veya JSON'u rapora KOPYALAMA — "
+            "sistem modalite gözlemini insan diliyle ayrıca ekliyor. Yalnızca transkriptteki bir "
+            "gözlemi doğruluyor/çürütüyorsa dikkate al. Duygu/kişilik/yalan analizi DEĞİLDİR.\n\n"
             + "\n\n".join(parts))
 
 def _set_reviewer_status(candidate_id: int, level: int, status: str, error: Optional[str]) -> None:
@@ -5222,24 +5350,30 @@ def run_report_reviewer(candidate_id: int, level: int, transcript_text: str, fin
     Dönüş: (notes, status, error). Hata/atlama → notes='' ve rapor DENETÇİSİZ, DEĞİŞMEDEN kalır."""
     if not OPENAI_API_KEY:
         return "", "skipped", "OPENAI_API_KEY tanımlı değil"
-    prompt = f"""Sen bir işe alım raporunun BAĞIMSIZ İKİNCİ DEĞERLENDİRİCİSİSİN. Aşağıda bir mülakatın transkripti, sistemin ürettiği NİHAİ RAPOR (basılacak hali) ve (varsa) modalite kanıtları var.
+    # TUR 3 / GÖREV 2+3 — SERBEST METİN. Sabit 6-başlık şablonu KALDIRILDI (model, boş şablonu
+    # doldurmak için "Belirgin bir görüş ayrılığı yok." klişesini 5 kez tekrarlıyordu). Artık:
+    # yalnızca gerçekten SÖYLEYECEK bir şeyi varsa yazar; yoksa "GÖRÜŞ YOK" der ve bölüm hiç basılmaz.
+    prompt = f"""Sen bir işe alım raporunun BAĞIMSIZ İKİNCİ DEĞERLENDİRİCİSİSİN. Aşağıda bir mülakatın transkripti, sistemin ürettiği NİHAİ RAPOR ve (varsa) modalite kanıtları var.
 
-Raporu YENİDEN YAZMA. Kararı/puanı DEĞİŞTİREMEZSİN — senin çıktın karara etki etmez, rapora AYRI bir "ikinci değerlendirici görüşü" bloğu olarak eklenir. Görüşünü SERBESTÇE, kısıtsız yaz; birincil değerlendirmeyle aynı fikirde olmak zorunda değilsin, şerh koyabilirsin.
+Görevin: birincil değerlendirmeyi transkript karşısında DENETLEMEK. Kararı veya puanı DEĞİŞTİREMEZSİN — çıktın rapora ayrı bir "ikinci değerlendirici görüşü" bloğu olarak eklenir (yoksa hiç eklenmez).
 
-Türkçe yaz. Maddeleri TAM OLARAK şu başlıklarla, HER MADDE KENDİ SATIRINDA BAŞLIK + ARDINDAN İÇERİK olacak şekilde ver (başlık ile içeriği aynı satıra yapıştırma, araya boşluk bırak):
+SERBEST METİN yaz — sabit başlık, numaralı madde, şablon YOK. Yalnızca GERÇEKTEN kayda değer, somut gözlemlerini yaz:
+- Raporda transkriptle desteklenmeyen / aşırı iddialı bir cümle görüyorsan: kısa alıntıyla belirt.
+- Transkriptte olan ama raporun atladığı önemli bir sinyal varsa (aday kendi ağzıyla söylediği eksiklik dahil): yaz.
+- Bir kriter puanı kanıta göre belirgin şekilde yüksek/düşükse: hangi kriter, neden.
+- Sistem kararına (eşik tablosundan) katılmıyorsan: neden — bu yalnızca görüştür.
+- Genel güven düzeyin (yüksek/orta/düşük) düşükse ve nedeni varsa: kısaca.
 
-1) ABARTILI / KANITSIZ İDDİALAR: raporda transkriptle desteklenmeyen veya aşırı iddialı cümleler (kısa alıntıyla).
-2) EKSİK KANIT: transkriptte olan ama raporun atladığı önemli sinyaller (aday kendi ağzıyla söylediği bilgi eksiklikleri dahil).
-3) PUAN KALİBRASYONU: rapordaki toplam puan ve kriter puanları kanıtlara göre yüksek mi / düşük mü / uygun mu — kısa gerekçe.
-4) GÜVEN DÜZEYİ: (yüksek / orta / düşük) + kısa neden.
-5) KARARA İLİŞKİN GÖRÜŞ: Rapordaki sistem kararına (eşik tablosundan) katılıyor musun? Katılmıyorsan neden — bu yalnızca görüştür, kararı değiştirmez.
-6) KRİTER PUANLARIM: Aşağıdaki kriter setinde, AYNI maksimum puanlarla KENDİ puanını ver. Bu maddenin altına SADECE aşağıdaki formatta satırlar yaz — başka açıklama, başlık veya cümle EKLEME:
+UZUNLUK: söyleyeceğin kadar. Bir cümle de olur, üç paragraf da. SAYFA DOLDURMA. Klişe cümle ("genel olarak yeterli", "belirgin bir sorun yok", "değerlendirme uygun") KURMA.
+
+SÖYLEYECEK SOMUT BİR ŞEYİN YOKSA — birincil değerlendirmede ciddi bir sorun görmüyorsan — yanıtın SADECE şu iki kelime olsun: GÖRÜŞ YOK
+
+Ayrıca, görüşünün olup olmamasından BAĞIMSIZ olarak, yanıtının EN SONUNA şu bloğu ekle (kendi bağımsız puanların — rapordaki puanları KOPYALAMA, transkripte göre KENDİ değerlendirmeni yap):
+=== KRİTER PUANLARI ===
 KRITER_PUAN: <kriter adı> = <senin puanın>/<maksimum>
-Önce PUAN 1 kriterleri, sonra PUAN 2 kriterleri; her kriter için tam bir satır.
+(önce PUAN 1 kriterleri, sonra PUAN 2 kriterleri; her kriter için bir satır)
 
 {_reviewer_criteria_block(position_criteria)}
-
-İLKE: Kanıt yoksa ne lehte ne aleyhte varsayım yapma. Modalite kanıtları (mimik/ses) yalnızca destekleyici. Belirgin bir görüş ayrılığı yoksa 1-5 maddelerine "Belirgin bir görüş ayrılığı yok." yaz — ama 6. maddedeki KRITER_PUAN satırlarını YİNE DE eksiksiz doldur.
 
 === TRANSKRİPT ===
 {(transcript_text or '')[:TRANSCRIPT_PROMPT_MAX_CHARS]}
@@ -5253,19 +5387,25 @@ KRITER_PUAN: <kriter adı> = <senin puanın>/<maksimum>
         resp = openai_call(
             "POST", "https://api.openai.com/v1/chat/completions",
             json_body={"model": OPENAI_REVIEWER_MODEL, "messages": [{"role": "user", "content": prompt}],
-                       "max_tokens": 1400, "temperature": 0.1},
+                       "max_tokens": 1400, "temperature": 0.3},
             timeout=60.0, step="report_reviewer", severity="background", retry=False,
             context={"candidate_id": candidate_id, "level": level},
         )
         result = resp.json()
         record_openai_chat_usage(candidate_id, level, OPENAI_REVIEWER_MODEL, "report_reviewer", result)
-        return (result["choices"][0]["message"]["content"] or "").strip(), "ok", ""
+        raw_out = (result["choices"][0]["message"]["content"] or "").strip()
+        # TUR 3 / GÖREV 2.1 — HAM çıktıyı (parse öncesi) logla + system_decision'a kalıcı iz.
+        print(f"[REVIEWER_RAW] c={candidate_id} L{level} len={len(raw_out)}\n{raw_out[:1500]}")
+        record_system_decision(candidate_id, level, "mufettis_ham_cikti",
+                               "İkinci değerlendiricinin parse ÖNCESİ ham çıktısı (teşhis için).",
+                               {"raw": raw_out[:4000]})
+        return raw_out, "ok", ""
     except Exception as e:
         print(f"UYARI (run_report_reviewer c={candidate_id} L{level}): {type(e).__name__}: {e}")
         return "", "failed", f"{type(e).__name__}: {e}"
 
 def parse_reviewer_criterion_scores(notes: str) -> dict:
-    """GÖREV 1.6 — müfettiş çıktısındaki 'KRITER_PUAN: <ad> = <p>/<max>' satırlarını ayrıştırır.
+    """Müfettiş çıktısındaki 'KRITER_PUAN: <ad> = <p>/<max>' satırlarını ayrıştırır.
     Dönüş: {kriter_adı: (puan, maks)}."""
     out = {}
     for m in re.finditer(r"KR[İI]TER_PUAN\s*:\s*(.+?)\s*=\s*(\d+)\s*/\s*(\d+)", notes or "", re.IGNORECASE):
@@ -5274,29 +5414,54 @@ def parse_reviewer_criterion_scores(notes: str) -> dict:
             out[name] = (int(m.group(2)), int(m.group(3)))
     return out
 
-def _format_reviewer_notes(notes: str) -> str:
-    """TUR 2 / GÖREV G — müfettiş serbest metnini rapora eklenebilir temiz biçime getirir:
-      - OZET_TON/DUSUK_PUAN meta etiketleri çıkarılır
-      - KRITER_PUAN: satırları çıkarılır (tablo ayrı basılıyor)
-      - '6) KRİTER PUANLARIM' / '6. KRİTER PUAN TABLOSU' başlığı çıkarılır (biz kendi başlığımızı basıyoruz)
-      - numaralı maddeler (1) / 1. / 1-) kendi satırlarına açılır, başlık↔metin yapışması giderilir
-      - repair_report_spacing ile 'TABLOSUBelirgin' türü birleşmeler onarılır
-      - 'Belirgin bir görüş ayrılığı yok.' kendi yerinde bırakılır (tablo başlığına karışmaz)"""
-    if not notes:
+# TUR 3 / GÖREV 3 — müfettiş "susmuş" (yalnızca klişe / boş) mu? Bu kalıplar ve <40 kr → sus.
+_REVIEWER_EMPTY_RE = re.compile(
+    r"g[öo]r[üu][şs]\s*yok|belirgin\s+bir\s+(?:g[öo]r[üu][şs]\s+ayr[ıi]l[ıi][ğg][ıi]|sorun|farkl[ıi]l[ıi]k|eksik|hata)\s*(?:yok|bulunma|g[öo]r[üu]lme)|"
+    r"genel\s+olarak\s+(?:yeterli|uygun|tutarl[ıi]|olumlu|ba[şs]ar[ıi]l[ıi])|"
+    r"de[ğg]erlendirme\s+(?:uygun|yeterli|tutarl[ıi])|kal[ıi]brasyon\s+uygun|katmayacak\s+bir\s+[şs]ey",
+    re.IGNORECASE)
+
+def _split_reviewer_output(raw: str):
+    """Ham müfettiş çıktısını (serbest metin, kriter puanları bloğu) ayırır.
+    Dönüş: (serbest_metin, kriter_puan_bloğu_metni)."""
+    if not raw:
+        return "", ""
+    raw = strip_reviewer_meta_tags(raw)
+    m = re.search(r"(?im)^[ \t=*#-]*KR[İI]TER\s+PUANLARI[ \t=*#-]*$", raw)
+    if m:
+        return raw[:m.start()].strip(), raw[m.end():].strip()
+    # başlık yoksa: ilk KRITER_PUAN satırından böl
+    m2 = re.search(r"(?im)^\s*KR[İI]TER_PUAN\s*:", raw)
+    if m2:
+        return raw[:m2.start()].strip(), raw[m2.start():].strip()
+    return raw.strip(), ""
+
+def reviewer_has_substance(free_text: str) -> bool:
+    """TUR 3 / GÖREV 3.3 — müfettişin serbest metni RAPORA basılmaya değer mi?
+    'GÖRÜŞ YOK' / yalnızca klişe / çok kısa → HAYIR (bölüm hiç basılmaz)."""
+    t = (free_text or "").strip()
+    if not t:
+        return False
+    # sadece klişe cümlelerden mi ibaret?
+    _stripped = re.sub(r"[\s\.\,\;\:\!\?\-–—\*_]", "", t.lower())
+    if len(_stripped) < 25:
+        return False
+    # cümlelere böl; klişe olmayan en az bir cümle var mı?
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", t) if s.strip() and len(s.strip()) > 8]
+    real = [s for s in sents if not _REVIEWER_EMPTY_RE.search(s)]
+    return len(real) >= 1 and sum(len(s) for s in real) >= 40
+
+def _format_reviewer_notes(free_text: str) -> str:
+    """TUR 3 / GÖREV 3 — SERBEST METİN temizliği (sabit şablon YOK). Meta etiketler + KRITER_PUAN
+    satırları zaten _split_reviewer_output ile ayrıldı; burada yalnızca biçim onarımı."""
+    t = (free_text or "").strip()
+    if not t:
         return ""
-    t = strip_reviewer_meta_tags(notes)
     t = re.sub(r"(?m)^\s*KR[İI]TER_PUAN\s*:.*$\n?", "", t)
-    # 6. madde başlığını (metniyle yapışık olsa bile) at — tabloyu biz basıyoruz
-    t = re.sub(r"(?m)^\s*\**\s*6[\.\)\-]?\s*(KR[İI]TER\s+PUAN(?:LARIM|\s+TABLOSU)?)\s*:?\s*\**\s*",
-               "\n", t, flags=re.IGNORECASE)
-    # yalnız numara olan satırı ('4)' / '5.') ardından gelen başlık satırıyla BİRLEŞTİR
-    t = re.sub(r"(?m)^\s*\**\s*([1-5])[\.\)\-]\s*\**\s*\n+\s*", r"\1) ", t)
-    # numaralı madde başlangıcı → önüne çift satır sonu (başlık kendi bloğunda dursun)
-    t = re.sub(r"(?<!\n)\n?[ \t]*(?=(?:\*{0,2})?[1-5][\.\)\-]\s+[A-ZÇĞİÖŞÜ])", "\n\n", t)
-    # 'BAŞLIK:İçerik' → 'BAŞLIK: İçerik' (iki nokta sonrası büyük harfle başlayan uzun metin)
+    # eski turlardan kalma numaralı başlık kalıntısı gelirse sadeleştir
+    t = re.sub(r"(?m)^\s*\**\s*[1-6][\.\)]\s*\**\s*", "", t)
     t = re.sub(r"(:\*{0,2})[ \t]*(?=[A-ZÇĞİÖŞÜ][a-zçğıöşü])", r"\1 ", t)
     t = repair_report_spacing(t)
-    # fazla boş satırları tekle
     t = re.sub(r"\n{3,}", "\n\n", t).strip()
     return t
 
@@ -5380,15 +5545,39 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     _set_reviewer_status(candidate_id, level, status, err)
     if not notes.strip():
         return
-    rv_scores = parse_reviewer_criterion_scores(notes)
-    body_notes = _format_reviewer_notes(notes)
+
+    free_raw, scores_raw = _split_reviewer_output(notes)
+    rv_scores = parse_reviewer_criterion_scores(scores_raw or notes)
+    has_view = reviewer_has_substance(free_raw)
     tables = _reviewer_score_tables(rv_scores, position_criteria or [], final_report)
-    block = (f"\n\n---\n\n{_HEAD}\n\n"
-             f"Bu bölüm ikinci bir değerlendiricinin bağımsız görüşüdür. Yukarıdaki puanları, KARAR'ı "
-             f"veya rapor metnini DEĞİŞTİRMEZ; birincil değerlendirmeyle farklı yönde olabilir.\n\n"
-             f"{body_notes}\n")
+
+    # TUR 3 / GÖREV 3.3 — SÖYLEYECEK BİR ŞEY YOKSA bölüm HİÇ BASILMAZ (ne başlık, ne boş satır).
+    # Ancak müfettiş bağımsız kriter puanı verdiyse ve bunlar birincilden GERÇEKTEN farklıysa,
+    # sadece kısa bir karşılaştırma tablosu bloğu eklenir (görüş metni olmadan).
+    _diff_rows = 0
+    for _ln in (tables or "").splitlines():
+        _fk = re.search(r"\|\s*([+-]\d+)\s*\|\s*$", _ln)
+        if _fk and _fk.group(1) not in ("+0", "-0"):
+            _diff_rows += 1
+
+    if not has_view and _diff_rows == 0:
+        record_system_decision(candidate_id, level, "ikinci_degerlendirici_atlandi",
+                               "İkinci değerlendirici somut bir görüş bildirmedi ve kriter puanları birincille örtüşüyor — bölüm rapora eklenmedi.",
+                               {"reviewer_status": status, "free_len": len(free_raw or "")})
+        return
+
+    body_notes = _format_reviewer_notes(free_raw) if has_view else ""
+    block = f"\n\n---\n\n{_HEAD}\n\n"
+    block += ("Bu bölüm ikinci bir değerlendiricinin bağımsız görüşüdür. Yukarıdaki puanları, KARAR'ı "
+              "veya rapor metnini DEĞİŞTİRMEZ; birincil değerlendirmeyle farklı yönde olabilir.\n\n")
+    if body_notes:
+        block += body_notes + "\n"
+    elif _diff_rows:
+        block += ("Birincil değerlendirmede metinle ilgili ciddi bir sorun görülmedi; ancak ikinci "
+                  "değerlendiricinin bağımsız kriter puanları bazı kriterlerde farklılık gösteriyor "
+                  "(aşağıdaki tabloya bakınız).\n")
     if tables:
-        block += (f"\n**6) Kriter Puan Karşılaştırması (yalnız referans — hiçbir hesaba girmez):**\n\n{tables}\n")
+        block += (f"\n**Bağımsız Kriter Puanı Karşılaştırması (birincil ↔ ikinci değerlendirici — yalnız referans, hesaba girmez):**\n\n{tables}\n")
     updated = final_report.rstrip() + block
     db = get_db()
     try:
@@ -5398,7 +5587,7 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
         db.close()
     record_system_decision(candidate_id, level, "ikinci_degerlendirici_eklendi",
                            "İkinci değerlendirici görüşü NİHAİ rapor üzerinde üretildi ve rapora ayrı blok olarak eklendi (karara/puana etkisi yok).",
-                           {"reviewer_status": status})
+                           {"reviewer_status": status, "gorus_var": has_view, "puan_fark_satiri": _diff_rows})
 
 def parse_reviewer_meta(notes: str) -> dict:
     """Denetçi çıktısının sonundaki 'OZET_TON:' / 'DUSUK_PUAN:' etiketlerini ayrıştırır.
@@ -5907,14 +6096,14 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     except Exception as e:
         print(f"UYARI (finalize_interview boşluk onarımı c={candidate_id}): {type(e).__name__}: {e}")
 
-    # KALEM 3: modalite veri kapsamı (kamera karesi sayısı/dağılımı + ses metrikleri var/yok)
-    # rapora DETERMİNİSTİK olarak eklenir — model atlamış olsa bile görünür.
+    # TUR 3 / GÖREV 4+5 — modalite: HAM metrikler AYRI teknik eke; gövdeye insan diliyle gözlem
+    # (aşağıda, sync_recommendation_line'dan SONRA yerleştirilir — KARAR bloğunun konumu belli olsun).
+    _technical_annex = None
     try:
-        _mcov_note = build_modality_coverage_note(candidate_id, level)
-        if _mcov_note and "Modalite Veri Kapsamı" not in report:
-            report = report.rstrip() + "\n" + _mcov_note + "\n"
+        _technical_annex = build_technical_annex(candidate_id, level)
     except Exception as e:
-        print(f"UYARI (finalize_interview modalite notu c={candidate_id}): {type(e).__name__}: {e}")
+        print(f"UYARI (finalize_interview teknik ek c={candidate_id}): {type(e).__name__}: {e}")
+        _technical_annex = None
 
     _cv_truncated = False
     if not standard_cv or len(strip_markdown(standard_cv)) < 30:
@@ -5944,6 +6133,19 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     # GÖREV 2.2 — KARAR TEK KAYNAK: yalnız PUAN 1 + eşik tablosundan; GPT prose'una dokunulmaz.
     report = sync_recommendation_line(report, recommendation, score_position, score_profile,
                                      veto_reason=_veto_reason)
+
+    # TUR 3 / GÖREV 4.5 + 5.1 — GÖRÜNTÜ VE SES GÖZLEMİ (insan diliyle, ham sayı YOK) — KARAR
+    # bloğundan HEMEN ÖNCE, niteliksel bölümlerin devamı olarak. Ham sayılar Teknik Ek'te.
+    try:
+        _mprose = build_modality_prose(candidate_id, level)
+        if _mprose and "Görüntü ve Ses Gözlemi" not in report:
+            if _DECISION_BLOCK_MARK in report:
+                report = report.replace(_DECISION_BLOCK_MARK, _mprose + "\n\n" + _DECISION_BLOCK_MARK, 1)
+            else:
+                report = report.rstrip() + "\n\n" + _mprose + "\n"
+    except Exception as e:
+        print(f"UYARI (finalize_interview modalite prose c={candidate_id}): {type(e).__name__}: {e}")
+
     # TUR 2 / GÖREV B.7 — EŞİK SINIRI UYARISI (bilgilendirme; PUANA/KARARA MÜDAHALE DEĞİL).
     # score_position eşik değerine (40 veya 80) ±2 içindeyse rapora sistem notu düşülür.
     try:
@@ -5972,6 +6174,14 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     # token-kesilme teknik notu). Modele giden interviews.messages DEĞİŞMEZ.
     report = strip_report_system_lines(report)
     standard_cv = strip_report_system_lines(standard_cv)
+    # TUR 3 / GÖREV 6.1 — gerçek bir AI notu YOKSA "AI Notuna Uyum" bölümü hiç basılmaz.
+    try:
+        _has_ai_note = bool(candidate and (candidate["ai_note"] or "").strip())
+        if not _has_ai_note and re.search(r"(?im)^\s*\**\s*AI\s+Notuna\s+Uyum\s*\**\s*:", report):
+            report = re.sub(r"(?is)\n?\s*\**\s*AI\s+Notuna\s+Uyum\s*\**\s*:.*?(?=\n\s*\n|\n\s*\**\s*[A-ZÇĞİÖŞÜ][^\n:]{2,40}\s*\**\s*:|\Z)",
+                            "\n", report, count=1)
+    except Exception as e:
+        print(f"UYARI (finalize_interview AI notu bölümü c={candidate_id}): {type(e).__name__}: {e}")
     # KALEM 5 (bu tur) — içeriği "belirtilecek bir şey yok" olan opsiyonel bölümleri tamamen kaldır.
     try:
         report = strip_empty_report_sections(report)
@@ -5987,10 +6197,10 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         # rapor üretim zamanı ayrı alanda (report_regenerated_at). completed_at IS NULL guard'ı yok.
         db.execute("""
             UPDATE interviews SET report=?, standard_cv=?, score=?, score_position=?, score_profile=?, recommendation=?,
-                   report_regenerated_at=CURRENT_TIMESTAMP,
+                   report_regenerated_at=CURRENT_TIMESTAMP, technical_annex=?,
                    report_tech_note=?, processing_status='completed', processing_error=NULL
             WHERE candidate_id=? AND level=?
-        """, (report, standard_cv, score, score_position, score_profile, recommendation, _tech_note, candidate_id, level))
+        """, (report, standard_cv, score, score_position, score_profile, recommendation, _technical_annex, _tech_note, candidate_id, level))
         db.commit()
         db.close()
         record_system_decision(candidate_id, level, "rapor_yeniden_uretildi",
@@ -6009,9 +6219,9 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     cur = db.execute("""
         UPDATE interviews SET report=?, standard_cv=?, score=?, score_position=?, score_profile=?, recommendation=?,
                completed_at=COALESCE(interview_ended_at, CURRENT_TIMESTAMP), report_generated_at=CURRENT_TIMESTAMP,
-               report_tech_note=?, processing_status='completed', processing_error=NULL
+               technical_annex=?, report_tech_note=?, processing_status='completed', processing_error=NULL
         WHERE candidate_id=? AND level=? AND completed_at IS NULL
-    """, (report, standard_cv, score, score_position, score_profile, recommendation, _tech_note, candidate_id, level))
+    """, (report, standard_cv, score, score_position, score_profile, recommendation, _technical_annex, _tech_note, candidate_id, level))
     already_finalized = cur.rowcount == 0
     # candidates.status sadece adayın O AN İÇİN AKTİF OLDUĞU level tamamlandığında güncellenir
     # (adayın current level'ı değiştiyse, bu eski bir çağrı olabilir — dokunma).
@@ -6755,35 +6965,55 @@ _ANSWER_MARKERS = [
 def _norm_line_text(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^\wçğıöşüİ ]", "", (s or "").lower())).strip()
 
+def _infer_line_role(low: str):
+    """Damgasız/etiketsiz bir satırın rolünü işaretlerden tahmin eder. Belirsizse None."""
+    if not low or len(low.split()) < 3:
+        return None
+    im = sum(1 for pat in _INTERVIEWER_MARKERS if re.search(pat, low))
+    am = sum(1 for pat in _ANSWER_MARKERS if re.search(pat, low))
+    _q_end = bool(re.search(r"(sor[ae]y[ıi]m|soruyorum|sorar[ıi]m|soral[ıi]m)\s*\.?\s*$", low))
+    if am == 0 and (im >= 2 or (im >= 1 and _q_end)):
+        return "mulakatci"
+    if im == 0 and am >= 2:
+        return "aday"
+    return None
+
 def fix_transcript_speaker_and_leaks(transcript_text: str, lang: str = "tr"):
-    """GÖREV 4.1 + 4.2 + 4.4 — sesli mülakat transkriptinde:
+    """TUR 1 GÖREV 4.1/4.2/4.4 + TUR 3 GÖREV 1 — sesli mülakat transkriptinde:
       - iç talimat sızıntısı satırlarını KALDIRIR (4.2)
-      - hoparlör YANKISI (aday mikrofonuna karışan AI sesi) satırlarını KALDIRIR: bir 'Aday'
-        satırı, ±20 sn içindeki bir 'Mülakatçı' satırının metniyle ≈ aynıysa → yankı (4.1)
-      - hâlâ 'Aday' etiketli ama mülakatçı ağzından (2+ işaret, cevap niteliği yok) satırları
-        'Mülakatçı'ya çevirir (4.1)
-      - satırları zaman damgasına göre KARARLI sıralar; aynı damgayı iki farklı konuşmacıya
-        vermez (ikinciyi +1 sn iter); ardışık birebir tekrarları eler (4.4)
-    Dönüş: (duzeltilmis_metin, [{tip, ts, text}] kaldırılan/değiştirilen kayıtlar)."""
+      - hoparlör YANKISI satırlarını KALDIRIR (4.1)
+      - 'Aday'↔'Mülakatçı' yanlış etiketleri çevirir; DAMGASIZ satırlara da uygular (1.4)
+      - TUR 3: DAMGASIZ satır bir üstteki damgalı satırın damgasını DEVRALIR ve ORİJİNAL
+        SIRASINI korur — hiçbir satır transkriptin sonuna atılmaz (1.1/1.2/1.3)
+      - aynı damgayı iki farklı konuşmacıya vermez; ardışık birebir tekrarları eler (4.4)
+    Dönüş: (duzeltilmis_metin, [{tip, ts, text}] değişiklik kayıtları)."""
     if not transcript_text or not transcript_text.strip():
         return transcript_text or "", []
     parsed = []
+    _last_secs = None
+    _line_no = 0
     for ln in transcript_text.splitlines():
         raw = ln.rstrip()
         if not raw.strip():
             continue
+        _line_no += 1
         m = _VOICE_LINE_RE.match(raw)
         if m:
             secs = int(m.group(1)) * 60 + int(m.group(2))
             role = "aday" if m.group(3).startswith("Ada") else "mulakatci"
-            parsed.append({"secs": secs, "role": role, "text": m.group(4).strip(), "had_ts": True})
+            _last_secs = secs
+            parsed.append({"secs": secs, "role": role, "text": m.group(4).strip(), "had_ts": True, "_ord": _line_no})
         elif raw.strip().startswith(("Aday:", "Mülakatçı:")):
             role = "aday" if raw.strip().startswith("Aday:") else "mulakatci"
-            parsed.append({"secs": None, "role": role, "text": raw.split(":", 1)[1].strip(), "had_ts": False})
+            # TUR 3 / GÖREV 1.1 — üstteki damgayı DEVRAL (yoksa None; sıralamada _ord korur)
+            parsed.append({"secs": _last_secs, "role": role, "text": raw.split(":", 1)[1].strip(),
+                           "had_ts": False, "inherited_ts": _last_secs is not None, "_ord": _line_no})
         else:
-            parsed.append({"secs": None, "role": None, "text": raw.strip(), "had_ts": False})
+            parsed.append({"secs": _last_secs, "role": None, "text": raw.strip(),
+                           "had_ts": False, "inherited_ts": _last_secs is not None, "_ord": _line_no})
     if not parsed:
         return transcript_text, []
+    in_count = len(parsed)
 
     changes = []
     kept = []
@@ -6793,7 +7023,7 @@ def fix_transcript_speaker_and_leaks(transcript_text: str, lang: str = "tr"):
         if "?" not in txt and len(low.split()) <= 8 and _PROMPT_LEAK_RE.search(txt):
             changes.append({"tip": "prompt_sizintisi", "ts": p["secs"], "text": txt[:160]})
             continue
-        # 4.1 — hoparlör yankısı: bu bir 'aday' satırı ve yakınında ≈aynı metinli bir 'mulakatci' satırı var
+        # 4.1 — hoparlör yankısı
         if p["role"] == "aday" and low and len(low) >= 12:
             echo = False
             for j in range(max(0, i - 4), min(len(parsed), i + 5)):
@@ -6805,7 +7035,6 @@ def fix_transcript_speaker_and_leaks(transcript_text: str, lang: str = "tr"):
                 ql = _norm_line_text(q["text"])
                 if not ql:
                     continue
-                # bir metin diğerini kapsıyor ya da >0.7 kelime örtüşmesi → yankı
                 a, b = set(low.split()), set(ql.split())
                 if low in ql or ql in low or (a and len(a & b) / max(1, min(len(a), len(b))) >= 0.7):
                     echo = True
@@ -6813,24 +7042,59 @@ def fix_transcript_speaker_and_leaks(transcript_text: str, lang: str = "tr"):
             if echo:
                 changes.append({"tip": "hoparlor_yankisi", "ts": p["secs"], "text": txt[:160]})
                 continue
-        # 4.1 — yanlış etiket (İKİ YÖNLÜ): işaret sayısı net üstünse ve ters işaret yoksa çevir
-        if p["role"] in ("aday", "mulakatci") and low and len(low.split()) >= 3:
-            im = sum(1 for pat in _INTERVIEWER_MARKERS if re.search(pat, low))
-            am = sum(1 for pat in _ANSWER_MARKERS if re.search(pat, low))
-            # tek başına güçlü sinyal: soru yönergesiyle biten cümle ("... diye sorayım / soruyorum")
-            _q_directive_end = bool(re.search(r"(sor[ae]y[ıi]m|soruyorum|sorar[ıi]m|soral[ıi]m)\s*\.?\s*$", low))
-            if p["role"] == "aday" and am == 0 and (im >= 2 or (im >= 1 and _q_directive_end)):
-                changes.append({"tip": "etiket_duzeltildi_aday->mulakatci", "ts": p["secs"], "text": txt[:160]})
-                p = dict(p, role="mulakatci")
-            elif p["role"] == "mulakatci" and am >= 2 and im == 0:
-                changes.append({"tip": "etiket_duzeltildi_mulakatci->aday", "ts": p["secs"], "text": txt[:160]})
-                p = dict(p, role="aday")
+        # 1.4 — yanlış/eksik etiket (İKİ YÖNLÜ, DAMGASIZ dahil): işaretlerden çıkar
+        _inf = _infer_line_role(low)
+        if p["role"] is None and _inf:
+            changes.append({"tip": f"etiket_atandi_->{ _inf}", "ts": p["secs"], "text": txt[:160]})
+            p = dict(p, role=_inf)
+        elif p["role"] == "aday" and _inf == "mulakatci":
+            changes.append({"tip": "etiket_duzeltildi_aday->mulakatci", "ts": p["secs"], "text": txt[:160]})
+            p = dict(p, role="mulakatci")
+        elif p["role"] == "mulakatci" and _inf == "aday":
+            changes.append({"tip": "etiket_duzeltildi_mulakatci->aday", "ts": p["secs"], "text": txt[:160]})
+            p = dict(p, role="aday")
+        elif p["role"] is None:
+            # rol çıkarılamadı — bir üstteki satırın rolünü devral (konuşma sürüyor varsayımı)
+            p = dict(p, role=(kept[-1]["role"] if kept else "aday"))
         kept.append(p)
 
-    # 4.4 — kararlı sıralama + damga çakışması + ardışık tekrar
-    for idx, p in enumerate(kept):
-        p["_ord"] = idx
-    kept.sort(key=lambda p: (p["secs"] if p["secs"] is not None else 10**9, p["_ord"]))
+    # TUR 3 / GÖREV 1 (KURTARMA) — önceki turun HATASI: damgasız satırlar transkriptin SONUNA
+    # atılmıştı. Bunlar giriş dosyasında SON damgalı satırdan sonra gelen damgasız satırlardır.
+    # Q/A alternasyonundan yararlanarak omurgadaki boşluklara geri yerleştirmeyi dener.
+    _ts_ords = [p["_ord"] for p in kept if p.get("had_ts")]
+    _max_ts_ord = max(_ts_ords) if _ts_ords else -1
+    _trailing = [p for p in kept if not p.get("had_ts") and p["_ord"] > _max_ts_ord and p["role"] in ("aday", "mulakatci")]
+    if len(_trailing) >= 2 and _max_ts_ord > 0:
+        _trail_ids = {id(p) for p in _trailing}
+        backbone = sorted((p for p in kept if id(p) not in _trail_ids),
+                          key=lambda p: (p["secs"] if p["secs"] is not None else -1, p["_ord"]))
+        orphans = list(_trailing)   # giriş sırası (_ord zaten sıralı)
+        _bb_max_secs = max((p["secs"] for p in backbone if p["secs"] is not None), default=0)
+        new_seq = []
+        for b in backbone:
+            # bir önceki omurga satırıyla AYNI ROL ise (Q/A alternasyonunda boşluk) → ters rol
+            # bir orphan varsa araya sok
+            if new_seq and new_seq[-1]["role"] == b["role"] and orphans:
+                want = "mulakatci" if b["role"] == "aday" else "aday"
+                _cand = next((k for k in range(len(orphans)) if orphans[k]["role"] == want), None)
+                if _cand is not None:
+                    o = orphans.pop(_cand)
+                    o = dict(o, secs=(new_seq[-1]["secs"] if new_seq[-1]["secs"] is not None else b["secs"]),
+                             _ord=new_seq[-1]["_ord"] + 0.5, _reinserted=True)
+                    new_seq.append(o)
+                    changes.append({"tip": "damgasiz_geri_yerlestirildi", "ts": o["secs"], "text": o["text"][:160]})
+            new_seq.append(b)
+        # yerleşmeyen orphanlar → sona, omurganın son damgasıyla
+        for o in orphans:
+            new_seq.append(dict(o, secs=_bb_max_secs, _reinserted=False))
+        if any(c["tip"] == "damgasiz_geri_yerlestirildi" for c in changes):
+            print(f"[TRANSCRIPT_FIX] {sum(1 for c in changes if c['tip']=='damgasiz_geri_yerlestirildi')}/{len(_trailing)} "
+                  f"damgasız trailing satır omurgaya geri yerleştirildi.")
+        kept = new_seq
+    else:
+        # 4.4 + GÖREV 1.2 — KARARLI sıralama: (devralınmış dahil) damgaya göre, aynı damgada _ord.
+        kept = sorted(kept, key=lambda p: (p["secs"] if p["secs"] is not None else -1, p["_ord"]))
+
     out_lines, last_sig, last_secs_by_role = [], None, {}
     for p in kept:
         sig = (p["role"], _norm_line_text(p["text"]))
@@ -6839,14 +7103,18 @@ def fix_transcript_speaker_and_leaks(transcript_text: str, lang: str = "tr"):
         last_sig = sig
         secs = p["secs"]
         role_label = "Aday" if p["role"] == "aday" else ("Mülakatçı" if p["role"] == "mulakatci" else "Aday")
-        if secs is not None:
-            # aynı saniyeyi aynı konuşmacıya birden çok, ya da diğer konuşmacıyla çakışma → +1 sn it
+        if secs is not None and secs >= 0:
             while last_secs_by_role.get(secs) not in (None, p["role"]):
                 secs += 1
             last_secs_by_role[secs] = p["role"]
             out_lines.append(f"[{secs // 60}:{secs % 60:02d}] {role_label}: {p['text']}")
         else:
             out_lines.append(f"{role_label}: {p['text']}")
+    # TUR 3 / GÖREV 1.5 — öncesi/sonrası satır sayısı + kaç düzeltme
+    out_count = len(out_lines)
+    _tip_ozet = ", ".join(sorted({c["tip"] for c in changes})) or "yok"
+    print(f"[TRANSCRIPT_FIX] giriş {in_count} satır → çıkış {out_count} satır "
+          f"({in_count - out_count} kaldırıldı/birleşti); düzeltme türleri: {_tip_ozet}")
     return "\n".join(out_lines), changes
 
 def is_likely_hallucination(text: str, lang: str = "tr") -> bool:
@@ -7421,24 +7689,23 @@ def compute_modality_coverage(candidate_id: int, level: int) -> dict:
         }
     return out
 
-def build_modality_coverage_note(candidate_id: int, level: int) -> str:
-    """Rapor gövdesine EKLENEN deterministik blok — modelin atlayamayacağı gerçek kapsam bilgisi.
-    (KALEM 1: iki kare seti ayrı; KALEM 2: ses metrikleri VAR ise somut sayılarla, var olmayan
-     bir bölüme atıf YOK.)"""
+def build_technical_annex(candidate_id: int, level: int) -> str:
+    """TUR 3 / GÖREV 5.2 — HAM metrikler + kare sayıları + tur sayaçları + soru-tekrarı tespiti.
+    Rapor GÖVDESİNE GİRMEZ; interviews.technical_annex kolonuna yazılır, PDF'te EN SONDA
+    (kamera karelerinden sonra) 'Teknik Ek (yalnızca yönetici)' başlığıyla basılır."""
     c = compute_modality_coverage(candidate_id, level)
-    lines = ["", "**Modalite Veri Kapsamı (sistem — deterministik):**"]
+    lines = ["**Teknik Ek (yalnızca yönetici — ham veri; müşteri raporuna girmez):**", ""]
 
-    def _frame_line(label, d, extra=""):
+    def _frame_line(label, d):
         if d["n"] == 0:
             return f"- {label}: hiç alınmadı."
-        span = f" — mülakatın {d['ilk_dk']}.–{d['son_dk']}. dakikaları arası" if d["ilk_dk"] is not None else ""
+        span = f" — {d['ilk_dk']}.–{d['son_dk']}. dk" if d["ilk_dk"] is not None else ""
         src = f" ({d['kaynak']})" if d.get("kaynak") else ""
-        warn = "  ⚠️ UYARI: kareler dar bir aralıkta toplanmış; oturumun büyük kısmı gözlemsiz." if d["kumelenme"] else ""
-        return f"- {label}: {d['n']} kare{span}{src}.{extra}{warn}"
+        warn = "  [dar aralık uyarısı]" if d["kumelenme"] else ""
+        return f"- {label}: {d['n']} kare{span}{src}.{warn}"
 
-    # TUR 2 / GÖREV D — 'dogrulama' artık select_verification_frames çıktısı (PDF ile TEK KAYNAK).
-    lines.append(_frame_line("Kamera doğrulama kareleri (PDF'te gösterilen)", c["dogrulama"]))
-    lines.append(_frame_line("Mimik analiz kareleri (kaynak havuz — yalnız AI analizi)", c["mimik"]))
+    lines.append(_frame_line("Kamera doğrulama kareleri (PDF galerisi)", c["dogrulama"]))
+    lines.append(_frame_line("Mimik analiz kareleri (kaynak havuz)", c["mimik"]))
 
     if c["ses_metrikleri_var"] and c["ses_ozet"]:
         s = c["ses_ozet"]
@@ -7446,31 +7713,38 @@ def build_modality_coverage_note(candidate_id: int, level: int) -> str:
             return f"{x}{unit}" if x is not None else "—"
         _ev = s.get('hesaba_katilan_tur') if s.get('hesaba_katilan_tur') is not None else s.get('tur_sayisi')
         _cevapsiz = s.get('cevapsiz_tur_sayisi')
-        # GÖREV 9.1 — DENKLİK: toplam = değerlendirilen + cevapsız (aynı kaynaktan türetilir)
         _tot = (_ev + _cevapsiz) if (_ev is not None and _cevapsiz is not None) else s.get('toplam_tur')
         _basis = f"{_n(_ev)}" + (f" (toplam {_tot} ses turu = {_n(_ev)} değerlendirilen + {_n(_cevapsiz)} cevapsız/halüsinasyon)" if _tot is not None else "")
         lines.append(
-            "- Ses metrikleri (tur bazlı, cevapsız turlar hariç): "
-            f"hesaba katılan tur {_basis}, "
-            f"aday konuşma toplam {_n(s['aday_konusma_toplam_sn'],' sn')}, "
-            f"ort. tur uzunluğu {_n(s['ortalama_tur_uzunlugu_sn'],' sn')}, "
-            f"yanıt gecikmesi ort. {_n(s['yanit_gecikmesi_ort_sn'],' sn')}, "
-            f"AI düşünme süresi ort. {_n(s['ai_dusunme_suresi_ort_sn'],' sn')}, "
+            "- Ses metrikleri (tur bazlı): "
+            f"hesaba katılan tur {_basis}; aday konuşma toplam {_n(s['aday_konusma_toplam_sn'],' sn')}; "
+            f"ort. tur uzunluğu {_n(s['ortalama_tur_uzunlugu_sn'],' sn')}; "
+            f"yanıt gecikmesi ort. {_n(s['yanit_gecikmesi_ort_sn'],' sn')}; "
+            f"AI düşünme süresi ort. {_n(s['ai_dusunme_suresi_ort_sn'],' sn')}; "
             f"söz kesme {_n(s['soz_kesme_sayisi'])} (güven: {_n(s['guven'])})."
         )
     else:
-        lines.append("- Ses metrikleri: TOPLANAMADI — realtime_events'te konuşma başlangıç/bitiş olayı yok; "
-                     "yanıt gecikmesi / duraklama / konuşma-sessizlik oranı / söz kesme ölçülemedi.")
-    # B2 — L2/L3 sesli hatta sunucu tarafı soru-tekrarı tespiti (ses metrikleri bloğunun yanında).
+        lines.append("- Ses metrikleri: TOPLANAMADI (realtime_events'te konuşma başlangıç/bitiş olayı yok).")
+
     try:
         rep = detect_repeated_questions(candidate_id, level)
         for r in rep:
-            lines.append(f"- ⚠️ Soru tekrarı: Mülakatçı \"{r['kriter']}\" konusunda {r['count']} kez ısrar etti"
-                         f"{' (' + r['span'] + ')' if r.get('span') else ''}; aday bu turlarda yeterli yanıt vermedi. "
-                         f"(Gözlem — puana etki etmez.)")
+            lines.append(f"- Soru tekrarı: Mülakatçı \"{r['kriter']}\" konusunda {r['count']} kez ısrar etti"
+                         f"{' (' + r['span'] + ')' if r.get('span') else ''}; aday bu turlarda yeterli yanıt vermedi. (Gözlem — puana etki etmez.)")
     except Exception as e:
-        print(f"UYARI (B2 soru tekrarı c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        print(f"UYARI (technical_annex soru tekrarı c={candidate_id} L{level}): {type(e).__name__}: {e}")
+
+    mimic, metrics, obs = _read_modality_json(candidate_id, level)
+    if mimic:
+        lines.append("- Mimik analizi (ham JSON): " + json.dumps(mimic, ensure_ascii=False))
+    if obs:
+        lines.append("- Mülakatçı ses gözlemleri (ham): " + json.dumps(obs, ensure_ascii=False))
     return "\n".join(lines)
+
+def build_modality_coverage_note(candidate_id: int, level: int) -> str:
+    """GERİYE UYUMLULUK — TUR 3'te işlevi build_modality_prose + build_technical_annex'e bölündü.
+    Artık rapor gövdesine RAW blok EKLENMEZ. Bu fonksiyon boş döner (eski çağrılar no-op)."""
+    return ""
 
 # ═══ B2 — SORU TEKRARI TESPİTİ (sunucu tarafı, L2/L3 sesli) ═══
 # L1'de [YENIDEN] etiketini sayan sunucu sayacı var; L2/L3 sesli hatta yok. Kayıtlı transkript
@@ -7649,8 +7923,9 @@ TEMEL KURALLAR:
 - Her puan için Kanıt → Analiz → Sonuç zinciri kur.
 - Analitik düşünme, kavrama, muhakeme, neden-sonuç kurma, problem çözme, düşünce esnekliği, öğrenme çevikliği ve belirsizlikte karar verme hakkında yalnızca transkriptte gözlenebilen sinyalleri yaz. IQ, zekâ puanı, psikiyatrik tanı, yalan tespiti veya kesin kişilik teşhisi yapma.
 - Görüşme kalitesi veya teknik kesinti değerlendirmeyi etkilediyse bunu ayrıca belirt; adayı bunun için cezalandırma.
-- SES METRİĞİ SAYILARINI (konuşma süresi, tur sayısı/uzunluğu, yanıt gecikmesi, söz kesme vb.) rapor metnine TEKRAR YAZMA — bu sayılar sistem tarafından ayrı 'Modalite Veri Kapsamı' bloğunda deterministik olarak veriliyor. "Serbest Gözlemler" yalnız NİTELİKSEL gözlem taşır (duruş, mimik, davranış, tutum); niteliksel bir şey yoksa "Belirtilecek bir gözlem yok" yaz.
-- "Dil Gözlemi", "Serbest Gözlemler", "Değerlendirilemeyen Alanlar" bölümlerinde yazacak bir şey yoksa "Belirtilecek bir ... yok" yaz — sistem bu bölümü rapordan otomatik çıkarır, uydurma içerik ekleme.
+- HAM SAYI YASAĞI (KESİN): Rapor gövdesine ses/mimik/kamera METRİĞİ SAYISI (konuşma süresi sn, tur sayısı, yanıt gecikmesi sn, söz kesme sayısı, kare sayısı vb.) YAZMA. Bunları sistem ayrı 'Görüntü ve Ses Gözlemi' bölümünde insan diliyle, 'Teknik Ek'te ham olarak veriyor. Rapor gövdesinde İZİN VERİLEN sayılar YALNIZCA: kriter puanları (16/20 gibi) ve dakika damgaları ([1:21] gibi).
+- "Dil Gözlemi", "Serbest Gözlemler", "Değerlendirilemeyen Alanlar", "AI Notuna Uyum" bölümlerinde yazacak SOMUT bir şey yoksa "Belirtilecek bir ... yok" yaz — sistem bu bölümü rapordan otomatik çıkarır, klişe/doldurma cümle KURMA.
+- "AI Notuna Uyum" bölümünü YALNIZCA yukarıda gerçek bir AI notu verildiyse doldur; doldururken hangi SORUYLA test edildiğini, adayın NE DEDİĞİNİ ([dk] + kısa alıntı) ve sonucu yaz. "Detaylı irdelendi / yeterli olduğunu gösterdi" gibi mekanizmasız genel cümle YASAK.
 - En az üç anlamlı aday cevabı yoksa [DEĞERLENDİRİLEMEDİ] üret.
 - Derinlik “derin” ise rapor daha kapsamlı, daha fazla çapraz kanıtlı ve daha ayrıntılı olmalı; standart rapor da kesinlikle yüzeysel olmamalı.
 
@@ -8234,6 +8509,21 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
                 img_table = Table(rows, colWidths=[8.4*cm, 8.4*cm])
                 img_table.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP"), ("GRID", (0,0), (-1,-1), 0.25, rl_colors.HexColor("#e2e8f0")), ("PADDING", (0,0), (-1,-1), 8)]))
                 story.append(img_table)
+
+    # TUR 3 / GÖREV 5.2 — TEKNİK EK (yalnızca yönetici): ham metrikler, kare sayıları, tur
+    # sayaçları — kamera karelerinden SONRA, ayrı sayfa.
+    _annex = (interview.get("technical_annex") or "").strip()
+    if _annex:
+        story.append(PageBreak())
+        story.append(Paragraph("Teknik Ek (yalnızca yönetici)", styles["Section"]))
+        for _ln in _annex.split("\n"):
+            _ln = _ln.strip()
+            if not _ln:
+                continue
+            _is_h = _ln.endswith(":") or _ln.startswith("**")
+            story.append(Paragraph(("<b>" + ptxt(_ln.replace("**", "")) + "</b>") if _is_h else f"<font size=8>{ptxt(_ln)}</font>",
+                                   styles["Small"] if not _is_h else styles["BodyWrap"]))
+            story.append(Spacer(1, 2))
 
     # KALEM 5 — teknik not (yalnız yönetici PDF'i): token kesilmesi vb.
     if interview.get("report_tech_note"):
