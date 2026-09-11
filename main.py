@@ -2637,8 +2637,30 @@ Kısa liste, her madde dakika damgalı. Risk niteliğinde bir bulgu varsa (tutar
 CV metninden ve/veya adayın mülakatta SÖZLÜ beyan ettiğinden yalnızca GERÇEKTEN bilgi olan alanları, her biri ayrı satırda, şu etiketlerle yaz: Eğitim / Deneyim / Teknik Yetkinlikler / Sektör Yetkinlikleri / Diller / Sertifikalar. Bilgi CV'de yoksa ama adayın SÖZLÜ beyanından geliyorsa satırın sonuna "(kaynak: sözlü beyan)" ekle. Bir alanda hiç bilgi YOKSA o satırı hiç YAZMA (atla). Bu bölümde DEĞERLENDİRME/yorum yapma, yalnız özetle.
 
 ===TAKİP MÜLAKATI SORULARI===
-3-5 soru. YALNIZ bu mülakatta ortaya çıkan SOMUT belirsizliklere yönelik olsun — genel gelişim sorusu ("kendinizi nasıl geliştirmeyi planlıyorsunuz" gibi) YAZMA.
+En fazla 3-5 soru (üst sınır — hedef DEĞİL: somut belirsizlik azsa 3'ten az da yazabilirsin, hatta hiç olmayabilir). YALNIZ bu mülakatta ortaya çıkan SOMUT belirsizliklere yönelik olsun. Her soru şu kaynaklardan birine dayanmalı: (a) adayın cevap veremediği/atladığı bir soru, (b) adayın kendi ağzıyla belirttiği bir bilgi eksikliği, (c) örnek istenip alınamayan/yüzeysel kalmış bir cevap, (d) CV'de yazılı olup mülakatta doğrulanamayan bir yetkinlik, (e) ikinci değerlendiricinin işaret edebileceği türden bir belirsizlik. Her sorunun transkriptte somut bir dayanağı olmalı.
+Sorular adayın GEÇMİŞİNE ve BİLDİKLERİNE yönelik olsun, GELECEK PLANINA değil. Yanlış: "Bu konuda nasıl gelişeceksiniz?" Doğru: "Şu yöntemi bildiğinizi belirttiniz; hangi koşullarda ve hangi kayıtla uyguladığınızı somut bir örnek üzerinden açıklar mısınız?"
+KESİNLİKLE YASAK — bu kalıplarla veya eş anlamlılarıyla SORU YAZMA (bunlar genel kariyer-koçluğu sorularıdır, adayı değerlendirmeye yaramaz): "hangi adımları atmayı planlıyorsunuz", "nasıl bir gelişim planı oluşturabilirsiniz", "hangi kaynakları kullanabilirsiniz", "hangi eğitim veya kaynaklardan yararlanmayı düşünüyorsunuz", "kendinizi nasıl geliştirmeyi planlıyorsunuz", "hangi stratejileri uygulayabilirsiniz".
+Somut bir belirsizlik YOKSA "YOK" yaz — sayıyı tamamlamak için soru uydurma.
 ===BÖLÜM SONU==="""
+
+# İş emri GÖREV 2.3+2.5 — takip mülakatı sorularındaki YASAK (genel gelişim koçluğu) kalıplarının
+# deterministik tespiti. Bulunca SATIRI SİLMEZ (madde 25 — sessizce yeni kural uydurma yasağı
+# gereği, otomatik silme yerine loglama tercih edildi) — yalnız teşhis için system_decision'a yazar.
+_FORBIDDEN_FOLLOWUP_RE = re.compile(
+    r"hangi ad[ıi]mlar[ıi] atmay[ıi] planl[ıi]yorsunuz"
+    r"|nas[ıi]l bir geli[şs]im plan[ıi]"
+    r"|hangi kaynaklar[ıi] kullanabilirsiniz"
+    r"|hangi e[ğg]itim(?:ler)?(?:den|'?den)? (?:veya kaynaklardan )?yararlanmay[ıi] d[üu][şs][üu]n[üu]yorsunuz"
+    r"|kendinizi nas[ıi]l geli[şs]tirmeyi planl[ıi]yorsunuz"
+    r"|hangi stratejileri uygulayabilirsiniz",
+    re.IGNORECASE)
+
+def detect_forbidden_followup_patterns(text: str) -> list:
+    """Takip Mülakatı Soruları içeriğinde yasaklı genel-gelişim kalıbı geçen SATIRLARI döner
+    (boş liste = temiz). Kaldırmaz — çağıran loglar."""
+    if not text:
+        return []
+    return [ln.strip() for ln in text.splitlines() if ln.strip() and _FORBIDDEN_FOLLOWUP_RE.search(ln)]
 
 # Level bazlı konfigürasyon: süre (dk), soru sayısı güvenlik ağı, CV zorunluluğu, ton talimatı.
 LEVEL_CONFIG = {
@@ -5209,64 +5231,99 @@ def _read_modality_json(candidate_id: int, level: int):
         print(f"UYARI (_read_modality_json c={candidate_id}): {type(e).__name__}: {e}")
     return mimic, metrics, obs
 
+def _tr_lower_first(s: str) -> str:
+    """Bir değeri cümle İÇİNE gömerken ilk harfini küçültür — Türkçe-doğru (İ→i, I→ı; bkz.
+    _tr_upper'daki aynı kök neden notu, str[0].lower() burada da YANLIŞ sonuç verir)."""
+    if not s:
+        return s
+    c = s[0]
+    if c == "İ":
+        c2 = "i"
+    elif c == "I":
+        c2 = "ı"
+    else:
+        c2 = c.lower()
+    return c2 + s[1:]
+
 def build_modality_prose(candidate_id: int, level: int) -> str:
-    """TUR 3 / GÖREV 4.5+5.1, TUR 4 / GÖREV 3+6.3 — mimik + ses + mülakatçı gözlemlerinden
-    İNSAN DİLİYLE, JSON ALAN ADI SIZDIRMAYAN, GÖRÜNTÜ ve SES ayrı paragraflarda bir 'Görüntü
-    ve Ses Gözlemi' bölümü üretir. Ham sayılar bu bölüme GİRMEZ (onlar build_technical_annex()'te).
-    Puanı ETKİLEMEZ. GENEL KURAL — Kader'e özel değil: seviye kamera/ses YAKALAMIYORSA (Level 1)
-    ilgili paragraf hiç üretilmez; hiç veri yoksa TÜM bölüm boş döner (üst katman boş başlık basmaz)."""
+    """Mimik + ses + mülakatçı gözlemlerinden İNSAN DİLİYLE, JSON ALAN ADI/ETİKETİ SIZDIRMAYAN,
+    GÖRÜNTÜ ve SES ayrı paragraflarda bir 'Görüntü ve Ses Gözlemi' bölümü üretir. Ham SAYILAR bu
+    bölüme GİRMEZ (yalnız build_technical_annex()'te, EK 3) — iş emri madde 3: aynı bilgi iki
+    yerde sayı olarak tekrarlanmasın, burada niteliksel ifadeye çevrilir. Puanı ETKİLEMEZ.
+    GENEL KURAL: seviye kamera/ses YAKALAMIYORSA (Level 1) ilgili paragraf hiç üretilmez; hiç
+    veri yoksa TÜM bölüm boş döner (üst katman boş başlık basmaz)."""
     mimic, metrics, obs = _read_modality_json(candidate_id, level)
     cov = compute_modality_coverage(candidate_id, level) if _level_has_camera(level) else {}
-    total_min = cov.get("toplam_dk")
 
     # ── Görüntü paragrafı (yalnız kamera yakalayan seviyelerde) ──
     goruntu = []
     if _level_has_camera(level):
         dg = cov.get("dogrulama") or {}
         if dg.get("n"):
-            if dg.get("ilk_dk") is not None and dg.get("son_dk") is not None:
-                yayilim = f", mülakatın {dg['ilk_dk']:.0f}. ile {dg['son_dk']:.0f}. dakikaları arasına yayılan {dg['n']} ayrı kareyle"
-            else:
-                yayilim = f", {dg['n']} ayrı kareyle"
             if dg.get("kumelenme"):
-                goruntu.append(f"Aday kamera görüntüsü{yayilim} doğrulandı; kareler dar bir aralıkta toplandığı için oturumun bir bölümü görüntüyle gözlemlenemedi.")
+                goruntu.append("Aday kamera görüntüsü oturumun sınırlı bir bölümünden doğrulandı; "
+                               "kareler dar bir aralıkta toplandığı için oturumun geri kalanı görüntüyle gözlemlenemedi.")
             else:
-                goruntu.append(f"Aday kamera görüntüsü{yayilim} doğrulandı ve kareler oturuma dengeli dağıldı.")
+                goruntu.append("Aday kamera görüntüsü oturum boyunca düzenli aralıklarla doğrulandı.")
         if isinstance(mimic, dict) and mimic and mimic.get("durum") != "yetersiz_kare":
-            betimler = []
-            if mimic.get("genel_durus"):
-                betimler.append(str(mimic["genel_durus"]).strip().rstrip("."))
-            if mimic.get("goz_temasi_egilimi") and "kestiril" not in str(mimic["goz_temasi_egilimi"]).lower():
-                betimler.append(str(mimic["goz_temasi_egilimi"]).strip().rstrip("."))
-            if betimler and not _is_near_duplicate("görüntüde " + ", ".join(betimler), goruntu):
-                goruntu.append("Görüntüde " + ", ".join(betimler) + " gözlendi.")
+            # genel_durus + goz_temasi_egilimi TEK cümlede birleşir (alan adları hiç yazılmaz,
+            # değerler cümle içine gömülürken ilk harfleri küçültülür — iş emri madde 1.2).
+            _durus = str(mimic.get("genel_durus") or "").strip().rstrip(".")
+            _goz = str(mimic.get("goz_temasi_egilimi") or "").strip().rstrip(".")
+            _parcalar = []
+            if _durus:
+                _parcalar.append(_tr_lower_first(_durus))
+            if _goz and "kestiril" not in _goz.lower() and not _is_near_duplicate(_goz, _parcalar):
+                _parcalar.append(_tr_lower_first(_goz))
+            if _parcalar:
+                goruntu.append("Görüntüde " + ", ".join(_parcalar) + " gözlendi.")
+
+            # belirgin_anlar — İŞ EMRİ madde 1.3+1.4: "Öne çıkan anlar:" gibi bir ETİKET/liste
+            # başlığı YOK; aynı gözlem birden çok zaman damgasında geçiyorsa TEK cümlede
+            # toplanır (madde 1.3), cümle içinde doğal bir bağlaçla akışa eklenir (madde 1.4).
             _anlar = [a for a in (mimic.get("belirgin_anlar") or []) if isinstance(a, dict) and a.get("gozlem")]
-            _anlar_metin = []
-            for a in _anlar[:3]:
+            _groups = []  # [{"text","times":[...],"yorum"}]
+            for a in _anlar[:8]:
+                gtxt = str(a["gozlem"]).strip().rstrip(".")
+                if not gtxt:
+                    continue
                 _t = a.get("t_sn")
-                _when = f"[{int(_t)//60}:{int(_t)%60:02d}] " if isinstance(_t, (int, float)) else ""
-                _yr = f" ({str(a['yorum']).strip()})" if a.get("yorum") and str(a["yorum"]).lower() not in ("nötr", "notr") else ""
-                _txt = f"{_when}{str(a['gozlem']).strip().rstrip('.')}{_yr}"
-                if not _is_near_duplicate(_txt, _anlar_metin):
-                    _anlar_metin.append(_txt)
-            if _anlar_metin:
-                goruntu.append("Öne çıkan anlar: " + "; ".join(_anlar_metin) + ".")
-            if mimic.get("genel_izlenim") and not _is_near_duplicate(str(mimic["genel_izlenim"]), goruntu):
-                goruntu.append(str(mimic["genel_izlenim"]).strip().rstrip(".") + ".")
-        # 2026-09 rapor yeniden tasarımı, iş emri madde 12 — "Kamera verisi yoksa Görüntü
-        # paragrafını oluşturma": veri YOKSA (yetersiz_kare) açıklayıcı bir cümle bile YAZILMAZ,
-        # paragraf tamamen atlanır (goruntu boş kalır → aşağıda hiç eklenmez). Bu, TUR 1-4'ün
-        # "eksik veriyi açıkça belirt" ilkesinden BİLİNÇLİ bir sapmadır — bu iş emri bu tek
-        # bölüm için AÇIKÇA sessizliği istiyor; genel ilke (EK 3, Beyan Tutarlılığı vb.) değişmedi.
+                ts = f"{int(_t)//60}:{int(_t)%60:02d}" if isinstance(_t, (int, float)) else None
+                yr = str(a.get("yorum") or "").strip().rstrip(".")
+                if yr.lower() in ("nötr", "notr"):
+                    yr = ""
+                grp = next((g for g in _groups if _is_near_duplicate(gtxt, [g["text"]], threshold=0.55)), None)
+                if grp:
+                    if ts and ts not in grp["times"]:
+                        grp["times"].append(ts)
+                else:
+                    _groups.append({"text": gtxt, "times": [ts] if ts else [], "yorum": yr})
+            if _groups:
+                clauses = []
+                for g in _groups[:3]:
+                    when = f"[{', '.join(g['times'])}] " if g["times"] else ""
+                    yr_txt = f" ({g['yorum']})" if g["yorum"] else ""
+                    clauses.append(f"{when}{g['text']}{yr_txt}")
+                goruntu.append("Ayrıca " + "; ".join(clauses) + ".")
+
+            _izlenim = str(mimic.get("genel_izlenim") or "").strip().rstrip(".")
+            if _izlenim and not _is_near_duplicate(_izlenim, goruntu):
+                goruntu.append(_izlenim + ".")
+        # İş emri (2026-09, madde 12) — kamera verisi YOKSA paragraf hiç üretilmez, açıklayıcı
+        # cümle bile yazılmaz (goruntu boş kalır → aşağıda hiç eklenmez).
 
     # ── Ses paragrafı (yalnız sesli akışı kullanan seviyelerde) ──
     ses = []
     if _level_has_voice(level):
         if metrics and _safe_int(metrics.get("tur_sayisi")) > 0:
             talk = metrics.get("aday_konusma_toplam_sn")
+            total_min = cov.get("toplam_dk")
             _pct = round(100 * (talk / 60.0) / total_min) if (talk is not None and total_min) else None
             if _pct is not None:
-                _lab = "sürenin yarısından fazlasında" if _pct >= 50 else (f"sürenin yaklaşık %{_pct}'inde" if _pct >= 25 else "sürenin küçük bir bölümünde")
+                # İş emri madde 3 — yüzde/sayı yerine niteliksel bant (ham sayı EK 3'te kalır).
+                _lab = ("sürenin yarısından fazlasında" if _pct >= 50
+                       else "sürenin önemli bir bölümünde" if _pct >= 25
+                       else "sürenin küçük bir bölümünde")
                 cumle = f"Aday mülakat {_lab} konuştu"
             else:
                 cumle = "Aday konuşma süresi ölçülebildi"
@@ -5287,16 +5344,15 @@ def build_modality_prose(candidate_id: int, level: int) -> str:
                     ses.append("Bazı sorulardan sonra uzun duraklamalar oldu; bu teknik gecikmeden de kaynaklanmış olabilir.")
             sk = _safe_int(metrics.get("soz_kesme_sayisi"))
             if sk >= 4:
-                ses.append(f"Mülakatçıyla üst üste konuşma {sk} noktada oldu (sık).")
+                ses.append("Mülakatçıyla üst üste konuşma birçok noktada oldu.")
             elif sk >= 1:
-                ses.append(f"Mülakatçıyla üst üste konuşma {sk} noktada oldu.")
+                ses.append("Mülakatçıyla birkaç noktada üst üste konuşma oldu.")
             _cev = _safe_int(metrics.get("cevapsiz_tur_sayisi"))
             if _cev >= 2:
-                ses.append(f"{_cev} soru turunda geçerli bir aday cevabı alınamadı (sessizlik veya transkripsiyon gürültüsü).")
+                ses.append("Birkaç soruda geçerli bir aday cevabı alınamadı (sessizlik veya transkripsiyon gürültüsü).")
             if (metrics.get("guven") or "").lower() == "dusuk":
                 ses.append("Ses metriklerinin güveni düşük olduğundan bu gözlemler temkinli okunmalı.")
-        # İş emri madde 12 — "Ses verisi yoksa Ses paragrafını oluşturma": veri YOKSA açıklayıcı
-        # cümle bile YAZILMAZ (bkz. Görüntü tarafındaki aynı karardaki not).
+        # İş emri (2026-09, madde 12) — ses verisi YOKSA paragraf hiç üretilmez.
 
         # Mülakatçının anlık ses gözlemleri — metrik cümleleriyle örtüşenler tekrar edilmez.
         for o in (obs or [])[:4]:
@@ -5493,16 +5549,21 @@ SERBEST METİN yaz — sabit başlık, numaralı madde, şablon YOK. Yalnızca G
 - Transkriptte olan ama raporun atladığı önemli bir sinyal varsa (aday kendi ağzıyla söylediği eksiklik dahil): yaz.
 - Bir kriter puanı kanıta göre belirgin şekilde yüksek/düşükse: hangi kriter, neden.
 - Sistem kararına (Genel Puan → Reddet/Değerlendir/İşe Al) katılmıyorsan: neden — bu yalnızca görüştür.
-- Genel güven düzeyin (yüksek/orta/düşük) düşükse ve nedeni varsa: kısaca.
 
 UZUNLUK: söyleyeceğin kadar. Bir cümle de olur, üç paragraf da. SAYFA DOLDURMA. Klişe cümle ("genel olarak yeterli", "belirgin bir sorun yok", "değerlendirme uygun") KURMA.
 
-SÖYLEYECEK SOMUT BİR ŞEYİN YOKSA — birincil değerlendirmede ciddi bir sorun görmüyorsan — yanıtın SADECE şu iki kelime olsun: GÖRÜŞ YOK
+SÖYLEYECEK SOMUT BİR ŞEYİN YOKSA — birincil değerlendirmede ciddi bir sorun görmüyorsan — BU KISIM için SADECE şu iki kelime yaz: GÖRÜŞ YOK
 
-Ayrıca, görüşünün olup olmamasından BAĞIMSIZ olarak, yanıtının EN SONUNA şu bloğu ekle — YALNIZCA birincil değerlendirmeden GERÇEKTEN FARKLI puan verdiğin kriterler için (aynı puanı veriyorsan o kriter için HİÇBİR satır yazma, atla; rapordaki puanları KOPYALAMA, transkripte göre KENDİ değerlendirmeni yap):
+Bunun DIŞINDA, yukarıdaki görüşün olup olmamasından TAMAMEN BAĞIMSIZ olarak, yanıtına AYRICA aşağıdaki İKİ bloğu MUTLAKA ekle:
+
+=== ADAY ÖZGÜVENİ İZLENİMİ ===
+Mülakatın TAMAMINA (akış baskısı olmadan, dışarıdan) bakarak adayın özgüvenine dair gözlemini yaz: kendinden emin mi/tereddütlü mü, kararlarını savunabiliyor mu/geri adım atıyor mu, belirsizlik veya zorlayıcı bir soru karşısındaki tutumu, bilmediğini açıkça kabul edebiliyor mu, görüşünü gerekçelendirerek mi savunuyor yoksa sadece tekrarlıyor mu, mülakatçı zorladığında pozisyonunu koruyor mu. Bu bir KONTROL LİSTESİ DEĞİLDİR — yalnız transkriptte GERÇEKTEN karşılığı olan yönleri yaz, karşılığı olmayan madde için cümle KURMA. KESİN KİŞİLİK HÜKMÜ YASAK (ör. "özgüveni düşük bir kişi" YAZMA) — somut davranış + [dk] damgası yaz, ör: "zorlayıcı sorularda pozisyonunu değiştirmeden savundu [12:36], ancak gerekçesini yeni bir örnekle desteklemek yerine aynı ifadeyi tekrarladı [13:47]". EN AZ BİR [dk] damgası ZORUNLU — damgasız genel yorum YAZMA. 1-2 paragraf, doldurma yok. SADECE transkript bu izlenimi kurmaya gerçekten yetmiyorsa (aday neredeyse hiç konuşmadı / mülakat çok kısa kesildi) bu bloğa SADECE "YETERSİZ VERİ" yaz — zorla üretme.
+
 === KRİTER PUANLARI ===
 KRITER_PUAN: <kriter adı> = <senin puanın>/<maksimum>
 KRITER_GEREKCE: <kriter adı> = <2-3 cümle gerekçe, en az bir [dk] damgalı somut kanıt>
+(YALNIZCA birincil değerlendirmeden GERÇEKTEN FARKLI puan verdiğin kriterler için — aynı puanı veriyorsan o kriter için HİÇBİR satır yazma, atla; rapordaki puanları KOPYALAMA, transkripte göre KENDİ değerlendirmeni yap.)
+GUVEN_DUZEYI: <yüksek|orta|düşük> — <kendi değerlendirmene duyduğun güven düşükse KISA neden; yüksekse yalnızca 'yüksek' yaz> (bu satır ADAYIN değil SENİN kendi değerlendirmene duyduğun güvendir — rapora BASILMAZ, yalnız yönetici kaydı için)
 
 {_reviewer_criteria_block(position_criteria)}
 
@@ -5577,6 +5638,36 @@ def _split_reviewer_output(raw: str):
     if m2:
         return raw[:m2.start()].strip(), raw[m2.start():].strip()
     return raw.strip(), ""
+
+# İş emri GÖREV 4 — ikinci değerlendiricinin ADAY ÖZGÜVENİ izlenimi: "GÖRÜŞ YOK" mantığından
+# BAĞIMSIZ, ayrı bir blok (kriter farkı olmasa bile MUTLAKA üretilir — madde 4.1). Bu ikisi
+# _extract_confidence_impression/_strip_confidence_block ile serbest metinden AYRIŞTIRILIR ki
+# KRİTER PUANLARI bloğuna veya _format_reviewer_notes'a karışmasın.
+_CONFIDENCE_BLOCK_RE = re.compile(r"(?is)===\s*ADAY\s+[ÖO]ZG[ÜU]VEN[İI]\s+[İI]ZLEN[İI]M[İI]\s*===\s*(.*?)(?=\n\s*===|\Z)")
+
+def _extract_confidence_impression(raw: str) -> str:
+    """'=== ADAY ÖZGÜVENİ İZLENİMİ ===' bloğunu döner. Blok yoksa VEYA içeriği 'YETERSİZ VERİ'
+    ise '' döner (iş emri madde 4.7 — transkript yetmiyorsa zorla üretilmez)."""
+    if not raw:
+        return ""
+    m = _CONFIDENCE_BLOCK_RE.search(raw)
+    if not m:
+        return ""
+    text = m.group(1).strip()
+    if not text or _tr_upper(text).rstrip(".") == "YETERSİZ VERİ":
+        return ""
+    return text
+
+def _strip_confidence_block(raw: str) -> str:
+    """Aday özgüveni bloğunu ham çıktıdan çıkarır (kalan metin _split_reviewer_output'a gider)."""
+    return _CONFIDENCE_BLOCK_RE.sub("", raw or "").strip()
+
+def parse_reviewer_confidence_level(notes: str) -> Optional[str]:
+    """İş emri — 'DOKUNULMAYACAKLAR': müfettişin KENDİ değerlendirmesine duyduğu güven düzeyi ana
+    rapora GİRMEZ, yalnız yönetici kaydına (system_decision) düşer. 'GUVEN_DUZEYI: <seviye> —
+    <neden>' satırını ayrıştırır; yoksa None."""
+    m = re.search(r"(?im)^\s*GUVEN_DUZEYI\s*:\s*(.+)$", notes or "")
+    return m.group(1).strip() if m else None
 
 def reviewer_has_substance(free_text: str) -> bool:
     """TUR 3 / GÖREV 3.3 — müfettişin serbest metni RAPORA basılmaya değer mi?
@@ -5704,9 +5795,15 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
         _save(final_report.replace(_REVIEWER_SLOT_MARK, "").strip())
         return
 
-    free_raw, scores_raw = _split_reviewer_output(notes)
-    rv_scores = parse_reviewer_criterion_scores(scores_raw or notes)
-    rv_gerekce = parse_reviewer_criterion_gerekce(scores_raw or notes)
+    # İş emri GÖREV 4 — aday özgüveni izlenimi, "GÖRÜŞ YOK" mantığından TAMAMEN BAĞIMSIZ ayrı
+    # bir blok (madde 4.1: kriter farkı/eleştiri olmasa bile MUTLAKA üretilir — yalnız veri
+    # yetersizse, madde 4.7, boş kalır). Serbest metinden/KRİTER PUANLARI'ndan önce ayıklanır.
+    confidence_text = _extract_confidence_impression(notes)
+    notes_wo_confidence = _strip_confidence_block(notes)
+
+    free_raw, scores_raw = _split_reviewer_output(notes_wo_confidence)
+    rv_scores = parse_reviewer_criterion_scores(scores_raw or notes_wo_confidence)
+    rv_gerekce = parse_reviewer_criterion_gerekce(scores_raw or notes_wo_confidence)
     has_view = reviewer_has_substance(free_raw)
 
     _pos_m = re.search(r'\*\*Pozisyon Yetkinlikleri:\*\*\s*\n([\s\S]*?)(?=\n\*\*[^\n]{2,60}:\*\*|\Z)', final_report)
@@ -5722,17 +5819,33 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     reviewer_score_position = compute_reviewer_overall(position_criteria or [], pos_table_text, rv_scores) if position_criteria else None
     reviewer_score_profile = compute_reviewer_overall(PROFILE_CRITERIA, prof_table_text, rv_scores)
 
-    if not has_view and not diff_block:
+    # DOKUNULMAYACAKLAR — müfettişin KENDİ güven düzeyi ana rapora GİRMEZ, yalnız burada
+    # (yönetici kaydı, system_decision) tutulur.
+    _reviewer_confidence = parse_reviewer_confidence_level(scores_raw or notes_wo_confidence)
+    if _reviewer_confidence:
+        record_system_decision(candidate_id, level, "mufettis_kendi_guven_duzeyi",
+                               "İkinci değerlendiricinin KENDİ değerlendirmesine duyduğu güven düzeyi (ana rapora girmez, yalnız yönetici kaydı).",
+                               {"guven_duzeyi": _reviewer_confidence})
+
+    if not has_view and not diff_block and not confidence_text:
         record_system_decision(candidate_id, level, "ikinci_degerlendirici_atlandi",
-                               "İkinci değerlendirici somut bir görüş bildirmedi ve kriter puanları birincille örtüşüyor — bölüm rapora eklenmedi.",
+                               "İkinci değerlendirici somut bir görüş/özgüven izlenimi bildirmedi ve kriter puanları birincille örtüşüyor — bölüm rapora eklenmedi.",
                                {"reviewer_status": status, "free_len": len(free_raw or "")})
         _save(final_report.replace(_REVIEWER_SLOT_MARK, "").strip())
     else:
         block = _REVIEWER_HEAD + "\n\n"
         if diff_block:
             block += diff_block + "\n\n"
+        # "Ek Görüş" — serbest eleştiri VE/VEYA özgüven izlenimi; ikisi de varsa aynı alt
+        # başlık altında art arda (iş emri madde 4.1'in "farklı puan olmasa da yazılır" şartı
+        # burada sağlanıyor — confidence_text tek başına bile bu başlığı/bölümü tetikler).
+        ek_gorus_parts = []
         if has_view:
-            block += "**Ek Görüş:**\n" + _format_reviewer_notes(free_raw) + "\n"
+            ek_gorus_parts.append(_format_reviewer_notes(free_raw))
+        if confidence_text:
+            ek_gorus_parts.append(confidence_text.strip())
+        if ek_gorus_parts:
+            block += "**Ek Görüş:**\n" + "\n\n".join(ek_gorus_parts) + "\n"
         block = scrub_forbidden_phrases(block.strip())
         _save(final_report.replace(_REVIEWER_SLOT_MARK, block))
         record_system_decision(candidate_id, level, "ikinci_degerlendirici_eklendi",
@@ -6154,6 +6267,15 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     gy_text = sections.get("guclu_yonler", "")
     ga_text = sections.get("gelisim_alanlari", "")
     tm_text = sections.get("takip_sorulari", "")
+    # İş emri GÖREV 2.5 — yasaklı genel-gelişim kalıbı tespiti (siler değil, loglar).
+    try:
+        _forbidden_followups = detect_forbidden_followup_patterns(tm_text)
+        if _forbidden_followups:
+            record_system_decision(candidate_id, level, "takip_sorulari_yasakli_kalip",
+                                   "Takip Mülakatı Soruları'nda genel gelişim-koçluğu kalıbı tespit edildi (loglama amaçlı; içerik OTOMATİK değiştirilmedi).",
+                                   {"satirlar": _forbidden_followups})
+    except Exception as e:
+        print(f"UYARI (finalize_interview takip sorulari kalip taramasi c={candidate_id}): {type(e).__name__}: {e}")
     cv_ozeti_text = ""
     if not raw_body or not (yo_text or pos_table_display):
         # AI rapor bloğu eksik/bozuk geldi — kanıta dayalı yedek rapor (eski davranış korunur).
