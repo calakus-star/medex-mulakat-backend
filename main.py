@@ -1527,7 +1527,15 @@ def build_transcript_view(messages_raw, level: int, started_at=None, for_report:
         if dt and anchor:
             elapsed_ms = max(0, int((dt - anchor).total_seconds() * 1000))
         clean_text = re.sub(r'\[SÜRE:\d+\]\s*', '', content).replace("[ADAY_CIKIS_TALEBI]", "").strip()
-        out.append({"role": "aday" if role_raw == "user" else "mulakatci", "ts": ts, "text": clean_text, "elapsed_ms": elapsed_ms})
+        # İş emri — KRİTER GEREKÇESİ (GÖREV 3): önceden burada HAM ISO zaman damgası (ts) tutulup
+        # transcript_to_text/PDF'e AYNEN basılıyordu (ör. "[2026-09-12T08:15:32]") — L1/L3 (metin)
+        # adaylar için modelin gördüğü transkriptte GERÇEK [mm:ss] damgası HİÇ yoktu; model rapora
+        # yazdığı her [dk] damgasını fiilen UYDURUYORDU (kök neden — GÖREV 3'ün "SORU_DAMGASI/KANIT
+        # transkriptte gerçekten var mı" doğrulaması bu yüzden L1/L3'te anlamlıydı ama daha önce hiç
+        # test edilebilir değildi). Artık ts, ses akışıyla (L2/L3-sesli) AYNI biçimde elapsed_ms'ten
+        # türetilen M:SS — anchor/started_at yoksa boş (uydurma bir damga göstermek yerine damgasız).
+        disp_ts = f"{elapsed_ms // 60000}:{(elapsed_ms // 1000) % 60:02d}" if elapsed_ms is not None else ""
+        out.append({"role": "aday" if role_raw == "user" else "mulakatci", "ts": disp_ts, "text": clean_text, "elapsed_ms": elapsed_ms})
     if for_report:
         out = [r for r in out if not _is_system_line(r.get("text"))]
     return out
@@ -2546,6 +2554,52 @@ SCORING_RUBRIC = (
     "dayandır, yalnızca o anı METİNDE her seferinde işaretleme."
 )
 
+# İş emri EK — GÖREV 5: PUAN, CEVABIN KRİTERİ KARŞILAMASINA GÖRE VERİLİR (2026-09, önceki iş
+# emrine ek). Kök neden: SCORING_RUBRIC cevabın BİÇİMİNE (somut örnek var mı, adım sayılabiliyor
+# mu) bakıyordu, KRİTERİ KARŞILAYIP KARŞILAMADIĞINA bakmıyordu — "benim alanım değil" akıcı/net/
+# tutarlı bir cevaptır ama kriterin sorduğunu KARŞILAMAZ; sistem bunu orta/yüksek banda koyuyordu
+# (gerçek örnek: Finance Specialist adayı 4 ayrı turda alan dışı olduğunu beyan etti, yine de
+# Nakit Akışı 18/25 aldı). ÖNCEL KURAL diğer TÜM bantlardan ÖNCE uygulanır.
+_SCOPE_PRIORITY_RULE = (
+    "ÖNCEL KURAL (diğer tüm bantlardan ÖNCE uygulanır, GÖREV 5): Puan, cevabın KRİTERİN SORDUĞU "
+    "ŞEYİ KARŞILAMA DERECESİNE göre verilir — cevabın akıcılığı/netliği/tutarlılığı/dürüstlüğü TEK "
+    "BAŞINA puan getirmez. Aşağıdakilerden biri varsa cevap ne kadar net/tutarlı olursa olsun bu "
+    "kriter tavanın EN FAZLA %25'ini alabilir: (a) ALAN DIŞI BEYANI — aday bu işin kendi "
+    "sorumluluğunda olmadığını söylüyor ('benim alanım değil', 'ben o kısımda yokum', 'bize "
+    "gelmiyor', 'görebileceğim bir alan yok'); (b) DEVRETME — cevap yerine süreci başkasına "
+    "bırakıyor ('yöneticime sorarım', 'yöneticim karar verir'); (c) SORUYU KARŞILAMAYAN CEVAP — "
+    "konu dışı bir şey anlatıyor; (d) TEKRARLI SORUYA CEVAPSIZLIK — mülakatçı aynı noktayı 2+ kez "
+    "sorduğu halde aday somut cevap vermiyor. Aday konuya temas edip pozisyonun gerektirdiği "
+    "SEVİYEDE değilse (ör. finans sorusuna muhasebe seviyesinde cevap) tavanın EN FAZLA %50'sini "
+    "alabilir (kısmi karşılama — cevap yanlış değildir ama kriterin ölçtüğü yetkinliği göstermez). "
+    "AYNI CEVAP FARKLI POZİSYONLARDA FARKLI PUAN alır — kriter adı ve pozisyon tanımı neyi "
+    "ölçüyorsa ona göre değerlendir, genel 'iyi cevap' ölçütü KULLANMA. (a) veya (b) tespit "
+    "edilirse: KANIT alanına [dk] damgasıyla YAZ (sistem bunu doğrular ve payda dışına almazsa "
+    "GÜÇLENDİRİLMİŞ RAPORLAMA için Gelişim Alanları'na ayrıca RİSK olarak ekler); bu bulgu "
+    "SESSİZCE GEÇİLEMEZ — işe alım kararını belirleyen en önemli sinyaldir."
+)
+
+# GÖREV 5.5 — alan dışı / devretme beyanının LEKSİK imzaları (transkriptte GERÇEKTEN söylenen
+# cümleler; KANIT alanındaki alıntı/özet bu kalıplardan birini içeriyorsa kriter "ALAN DIŞI/
+# DEVRETME" sayılır — bkz. validate_criterion_fields: out_of_scope_high_score).
+_OUT_OF_SCOPE_RE = re.compile(
+    r"benim alan[ıi]m de[ğg]il|ben o k[ıi]s[ıi]mda de[ğg]ilim|ben o k[ıi]sma?da? de[ğg]ilim|"
+    r"(?:bana|bize) gelmiyor|g[öo]rebilece[ğg]im bir alan yok|benim yapt[ıi][ğg][ıi]m bir k[ıi]s[ıi]m de[ğg]il|"
+    r"ben (?:bunlar[ıi]|bunu) kontrol etmiyorum|bu benim sorumlulu[ğg]umda de[ğg]il|"
+    r"finans k[ıi]sm[ıi]nda yokum|bu k[ıi]s[ıi]mda de[ğg]ilim|benim g[öo]revim de[ğg]il",
+    re.IGNORECASE)
+_DELEGATION_RE = re.compile(
+    r"y[öo]neticim(?:le| ile)? konu[şs]urum|y[öo]neticim karar verir|y[öo]neticime sorar[ıi]m|"
+    r"o bana y[öo]nlendirir|(?:ekibim|arkada[şs][ıi]m|meslekta[şs][ıi]m)(?:a|e) (?:sorar[ıi]m|b[ıi]rak[ıi]r[ıi]m)",
+    re.IGNORECASE)
+# GÖREV 5 EK — yasak kalıp listesine "beklenmiştir" ailesi (önceki tur 8 kriterde bunu üretti,
+# mevcut regex'lerin HİÇBİRİNE takılmadı): "daha <X> ... beklenmiştir" / "... sunması/yapması/
+# göstermesi/alması beklenmiştir" — araya giren kelimelerden BAĞIMSIZ.
+_EXPECTATION_PHRASE_RE = re.compile(
+    r"daha [\wçğıöşü]+(?:\s+[\wçğıöşü]+){0,4}\s+beklenmi[şs]tir"
+    r"|(?:sunmas[ıi]|yapmas[ıi]|g[öo]stermesi|almas[ıi])(?:\s+[\wçğıöşü]+){0,4}\s+beklenmi[şs]tir",
+    re.IGNORECASE)
+
 # İş emri GÖREV 1.1 — kriter gerekçelerinde klişe kalıp DETEKSİYONU (siler/düzeltmez — bir kalıbı
 # cümle ORTASINDAN çıkarmak grameri bozar; bu, GÖREV 5'in takip-sorusu SATIRLARINI çıkarmasından
 # FARKLI bir durum — orada tüm satır bağımsız bir madde, burada kalıp cümlenin İÇİNDE). Yalnız
@@ -2560,18 +2614,71 @@ _FORBIDDEN_EVIDENCE_CLICHE_RE = re.compile(
 
 def detect_evidence_cliches(text: str) -> list:
     """Pozisyon/Profil kriter tablosu METNİNDE (Kanıt ve Analiz hücreleri) yukarıdaki yasaklı
-    klişe kalıplarından biri geçen SATIRLARI döner (boş liste = temiz). Kaldırmaz — çağıran loglar."""
+    klişe kalıplarından biri geçen SATIRLARI döner (boş liste = temiz). Kaldırmaz — çağıran loglar.
+    NOT (İş emri — KRİTER GEREKÇESİ: YAPISAL ÜRETİM + DETERMİNİSTİK DOĞRULAMA, 2026-09): bu fonksiyon
+    artık TEK BAŞINA yeterli değil (prompt talimatı + bu log-only tarama, paraphrase ile atlatıldı —
+    kanıtlı geri bildirim). Aşağıdaki _BANNED_PHRASE_FAMILY_RE + validate_criterion_fields (bkz.
+    apply_structured_rationale_gate, run_deferred_finish_job yakınında) artık bir KAPI: geçemeyen
+    içerik rapora HİÇ girmez. Bu fonksiyon geriye uyum + ek bir alt-kontrol olarak kalır."""
     if not text:
         return []
     return [ln.strip() for ln in text.splitlines() if ln.strip() and _FORBIDDEN_EVIDENCE_CLICHE_RE.search(ln)]
 
+# İş emri GÖREV 2.1 — YASAKLI KALIP AİLESİ (yapısal desen, TEK TEK kelime listesi DEĞİL): önceki
+# turun sabit ifade listesi ("daha fazla X gerekmektedir" vb. birebir) paraphrase ile atlatıldı
+# ("daha fazla bilgi sunmamıştır", "yeterli çözüm önerisi sunamamıştır" — listede YOKTU). Bu desen
+# aradaki kelimelerden BAĞIMSIZ çalışır: "daha fazla <ne olursa olsun> gerekmektedir/sunmamıştır/
+# vermemiştir/sunamamıştır", "yeterli <ne olursa olsun> sunamamıştır", "yeterince <...>mamıştır",
+# "somut <ne olursa olsun> verememiştir". GÖSTERDİĞİ ve EKSİK alanlarının İKİSİNE de uygulanır
+# (validate_criterion_fields) — model klişeyi hangi alana yazarsa yazsın yakalanır.
+_BANNED_PHRASE_FAMILY_RE = re.compile(
+    r"daha fazla [\wçğıöşü]+(?:\s+[\wçğıöşü]+){0,3}\s+(?:gerekmektedir|gerekiyor|sunmam[ıi][şs]t[ıi]r|"
+    r"vermemi[şs]tir|sunamam[ıi][şs]t[ıi]r|aktaramam[ıi][şs]t[ıi]r)"
+    r"|yeterli [\wçğıöşü]+(?:\s+[\wçğıöşü]+){0,3}\s+(?:sunamam[ıi][şs]t[ıi]r|sa[ğg]lamam[ıi][şs]t[ıi]r|verememi[şs]tir)"
+    r"|yeterince [\wçğıöşü]+(?:mam[ıi][şs]t[ıi]r|memi[şs]tir)"
+    r"|somut [\wçğıöşü]+(?:\s+[\wçğıöşü]+){0,3}\s+(?:verememi[şs]tir|sunamam[ıi][şs]t[ıi]r|olu[şs]turamam[ıi][şs]t[ıi]r)"
+    r"|daha derin [\wçğıöşü]+(?:\s+[\wçğıöşü]+){0,3}\s+(?:anlatmam[ıi][şs]t[ıi]r|aktaramam[ıi][şs]t[ıi]r)",
+    re.IGNORECASE)
+
+def banned_phrase_hits(text: str) -> list:
+    """GÖREV 2.1 + GÖREV 5 EK — _BANNED_PHRASE_FAMILY_RE + _EXPECTATION_PHRASE_RE ('beklenmiştir'
+    ailesi) + eski _FORBIDDEN_EVIDENCE_CLICHE_RE (sabit liste, geriye uyum) birlikte taranır.
+    Dönüş: eşleşen ifadeler (boş liste = temiz)."""
+    if not text:
+        return []
+    hits = [m.group(0) for m in _BANNED_PHRASE_FAMILY_RE.finditer(text)]
+    hits += [m.group(0) for m in _EXPECTATION_PHRASE_RE.finditer(text)]
+    hits += [m.group(0) for m in _FORBIDDEN_EVIDENCE_CLICHE_RE.finditer(text)]
+    return hits
+
+# İş emri GÖREV 1 — YAPISAL GEREKÇE ALANLARI. Model artık serbest cümle değil, '~~' ile ayrılmış
+# 4 ETİKETLİ alan üretir: G(österdiği, zorunlu) / K(anıt, zorunlu, [dk] damgalı) / E(ksik, isteğe
+# bağlı) / S(oru damgası, E doluysa zorunlu). Rapor derleyicisi (kod) bunları NİHAİ cümleye döker
+# (bkz. render_criterion_rationale, run_deferred_finish_job yakınında) — sabit 'X. Ancak Y.'
+# şablonu YOK, EN AZ 3 farklı şablon rotasyonla kullanılır.
+_CRIT_EVIDENCE_HINT = ("G: <adayın ne yapabildiği/bildiği/nasıl yaklaştığı> ~~ "
+                       "K: [mm:ss] <transkriptte GERÇEKTEN var olan an + kısa alıntı/özet> ~~ "
+                       "E: <GERÇEK bir eksik varsa TEK cümle, yoksa BOŞ bırak> ~~ "
+                       "S: <E doluysa mülakatçının bu eksikliği ortaya çıkaran sorusunun [mm:ss] damgası, E boşsa BOŞ bırak>")
+
+_STRUCTURED_EVIDENCE_FORMAT_INSTRUCTIONS = """YAPISAL GEREKÇE FORMATI (KESİN — 'Kanıt ve Analiz' hücresinin TAMAMI budur, BAŞKA HİÇBİR ŞEY YAZMA):
+Her hücreye TAM OLARAK şu 4 alanı, aralarına " ~~ " koyarak yaz (etiketler ZORUNLU, sıra sabit):
+G: <adayın bu kriterde NE YAPABİLDİĞİ/NE BİLDİĞİ/NASIL YAKLAŞTIĞI — TEK cümle. 'ancak/fakat/ne var ki' YAZMA (geçiş cümlesini SİSTEM ekler, sen ASLA ekleme).>
+K: <[mm:ss] transkriptte GERÇEKTEN var olan bir an + kısa somut alıntı/özet. UYDURMA damga YASAK — sistem doğrular, geçemeyen kriter YENİDEN ÜRETTİRİLİR.>
+E: <GERÇEKTEN bir eksik/zayıflık varsa TEK cümle; YOKSA bu alanı TAMAMEN BOŞ bırak ('E: ~~' yazıp geç) — eksik UYDURMA, sorulmamış bir konu için EKSİK YAZMA.>
+S: <E doluysa, mülakatçının BU eksikliği ortaya çıkaran GERÇEK sorusunun [mm:ss] damgası (uydurma YASAK, sistem doğrular); E boşsa bu alanı BOŞ bırak.>
+ÖRNEK (eksik VAR): G: KDV beyannamesi hazırlama sürecini uçtan uca anlattı ~~ K: [08:12] "önce mizanı kontrol ederim, sonra beyannameyi keserim" ~~ E: Gecikme faizi hesaplamasını sorduğumuzda somut bir yöntem tarifleyemedi ~~ S: [09:40]
+ÖRNEK (eksik YOK): G: Enflasyon muhasebesi düzeltmelerini iki farklı senaryo üzerinden karşılaştırdı ~~ K: [14:03] "sabit kıymetlerde endeksleme farkını ayrı hesaplarım" ~~ E: ~~ S:
+Bu format DIŞINDA hiçbir cümle/açıklama YAZMA — sistem bu 4 alanı ayrıştırıp NİHAİ cümleyi kendisi kurar; format bozuksa veya damga uydurmaysa bu kriter YENİDEN ÜRETTİRİLİR."""
+
 def build_criteria_table_filled(criteria: list, evidence_header: str = "Kanıt ve Analiz") -> str:
     """DETERMİNİSTİK kriter tablosu: satırlar pozisyondan gelir, model AYNEN doldurur.
     Model satır ekleyemez/çıkaramaz/yeniden adlandıramaz. Payda (tavan) sabit.
-    Eksik veri kuralı: bkz. CRITERION_SCORING_RULE (payda dışı 'Değerlendirilemedi (sistem)' varsayılan)."""
+    Eksik veri kuralı: bkz. CRITERION_SCORING_RULE (payda dışı 'Değerlendirilemedi (sistem)' varsayılan).
+    Kanıt ve Analiz hücresi artık YAPISAL (bkz. _CRIT_EVIDENCE_HINT + _STRUCTURED_EVIDENCE_FORMAT_INSTRUCTIONS)."""
     lines = [f"| Kriter | Puan | {evidence_header} |", "|--------|------|-----------------|"]
     for c in criteria:
-        lines.append(f"| {c['name']} | {_CRIT_CELL_HINT.format(w=c['weight'])} | <kanıt → analiz → sonuç> |")
+        lines.append(f"| {c['name']} | {_CRIT_CELL_HINT.format(w=c['weight'])} | {_CRIT_EVIDENCE_HINT} |")
     return "\n".join(lines)
 
 def build_criteria_table_template(criteria: list) -> str:
@@ -2656,35 +2763,40 @@ def build_report_content_prompt(criteria_table_filled: str, profile_table_filled
 ===POZİSYON YETKİNLİKLERİ===
 {criteria_table_filled}
 (YUKARIDAKİ TABLOYU AYNEN KULLAN: satır ekleme/çıkarma/yeniden adlandırma YOK, tavanı AŞMA.)
+{_SCOPE_PRIORITY_RULE}
 {CRITERION_SCORING_RULE}
 {SCORING_RUBRIC}
+{_STRUCTURED_EVIDENCE_FORMAT_INSTRUCTIONS}
 
 ===KİŞİSEL VE BİLİŞSEL PROFİL===
 (Pozisyon yetkinliklerinden AYRI, pozisyondan bağımsız, her aday için SABİT kriter seti — işe alım kararını TEK BAŞINA belirlemez, yalnızca destekleyici bir puandır.)
 {profile_table_filled}
-(YUKARIDAKİ TABLOYU AYNEN KULLAN.) Aynı kanıt standardı ve GEREKÇE YAZIM KURALLARI (yukarıda, SCORING_RUBRIC içinde) burada da geçerlidir: yüksek puanda ≥2 bağımsız kanıt, düşük puanda somut gerekçe, tahmin YOK, klişe kalıp YOK, damga yalnız kritik kanıtta. Dayanaksız çıkarım, kişilik teşhisi, IQ/zekâ yorumu YASAK.
+(YUKARIDAKİ TABLOYU AYNEN KULLAN.) Aynı kanıt standardı, ÖNCEL KURAL ve GEREKÇE YAZIM KURALLARI (yukarıda) burada da geçerlidir: yüksek puanda ≥2 bağımsız kanıt, düşük puanda somut gerekçe, tahmin YOK, klişe kalıp YOK, damga yalnız kritik kanıtta. Dayanaksız çıkarım, kişilik teşhisi, IQ/zekâ yorumu YASAK.
+{_STRUCTURED_EVIDENCE_FORMAT_INSTRUCTIONS}
 
 ===GÜÇLÜ YÖNLER===
-Her madde PARAGRAF halinde (tek satır/etiket DEĞİL) — bir madde: (a) aday NE YAPABİLİYOR, (b) bunu mülakatın neresinden anlıyoruz (somut örnek/alıntı), (c) pozisyon açısından ne anlama geliyor. Yalnız GERÇEKTEN güçlü, somut bulgular — genel ifade YASAK ("Luca kullanıyor" değil, "Luca'da e-fatura iptal/iade süreçlerini bağımsız yürütebilir" gibi somut ve pozisyona bağlanmış). Madde sayısı gerçekten olan kadar — üçe tamamlama YOK. Kriter gerekçelerinin (yukarıdaki tablolardaki) TEKRARI OLMAYACAK — orada puan gerekçesi var, burada yöneticinin göreceği "bu aday işe başlayınca ne yapabilir" var. Damga yalnız gerçekten kritik bir alıntı için (GÖREV 2 kuralı — zorunlu değil).
+Her madde PARAGRAF halinde (tek satır/etiket DEĞİL) — bir madde: (a) aday NE YAPABİLİYOR, (b) bunu mülakatın neresinden anlıyoruz (somut örnek/alıntı, EN AZ BİR [dk] damgasıyla — damgasız "X'i mülakatta belirttiği örneklerle desteklemiştir" gibi GENEL/DAYANAKSIZ övgü cümlesi YASAK, sistem bunu tespit edip SİLER), (c) pozisyon açısından ne anlama geliyor. Yalnız GERÇEKTEN güçlü, somut bulgular — genel ifade YASAK ("Luca kullanıyor" değil, "Luca'da e-fatura iptal/iade süreçlerini bağımsız yürütebilir" gibi somut ve pozisyona bağlanmış). Madde sayısı gerçekten olan kadar — üçe tamamlama YOK. Kriter gerekçelerinin (yukarıdaki tablolardaki) TEKRARI OLMAYACAK — orada puan gerekçesi var, burada yöneticinin göreceği "bu aday işe başlayınca ne yapabilir" var.
 
 ===GELİŞİM ALANLARI===
-Her madde PARAGRAF halinde: (a) aday NE YAPAMIYOR/NEREDE ZORLANDI, (b) hangi somut senaryoda/soruda kendini gösterdi, (c) bu eksiğin işte YARATABİLECEĞİ SOMUT RİSK. Risk niteliğinde bir bulgu varsa (tutarsız beyan, mevzuata aykırı yaklaşım, iç kontrol zaafı, kurumsal ortamda çalışmayı zorlaştıracak somut bir tutum/davranış vb.) paragrafın başına "RİSK:" yaz. Kanıtsız gelişim alanı üretme; madde sayısı gerçekten olan kadar. Kriter gerekçelerinin TEKRARI OLMAYACAK (yukarıdaki not — Güçlü Yönler için de geçerli). Genel ifade YASAK ("analitik düşünmede derinlik eksikliği" değil, hangi senaryoda nasıl zorlandığı). Damga yalnız gerçekten kritik bir alıntı için.
+Her madde PARAGRAF halinde: (a) aday NE YAPAMIYOR/NEREDE ZORLANDI, (b) hangi somut senaryoda/soruda kendini gösterdi ([dk] damgasıyla), (c) bu eksiğin işte YARATABİLECEĞİ SOMUT RİSK. Risk niteliğinde bir bulgu varsa (tutarsız beyan, mevzuata aykırı yaklaşım, iç kontrol zaafı, ALAN DIŞI/DEVRETME beyanı — bkz. ÖNCEL KURAL, kurumsal ortamda çalışmayı zorlaştıracak somut bir tutum/davranış vb.) paragrafın başına "RİSK:" yaz — bir kriterde ALAN DIŞI/DEVRETME beyanı tespit ettiysen bunu BURADA da RİSK olarak belirtmen ZORUNLUDUR (sistem, hiç belirtilmediyse kendisi bir RİSK paragrafı ekler). Kanıtsız gelişim alanı üretme; madde sayısı gerçekten olan kadar. Kriter gerekçelerinin TEKRARI OLMAYACAK (yukarıdaki not — Güçlü Yönler için de geçerli). Genel ifade YASAK ("analitik düşünmede derinlik eksikliği" değil, hangi senaryoda nasıl zorlandığı). Bir RİSK paragrafının [dk] damgası transkriptte GERÇEKTEN var olan bir ana karşılık gelmiyorsa sistem o paragrafı rapordan ÇIKARIR — damgasız/uydurma RİSK YAZMA.
 
 ===CV ÖZETİ===
 CV metninden ve/veya adayın mülakatta SÖZLÜ beyan ettiğinden yalnızca GERÇEKTEN bilgi olan alanları, her biri ayrı satırda, şu etiketlerle yaz: Eğitim / Deneyim / Teknik Yetkinlikler / Sektör Yetkinlikleri / Diller / Sertifikalar. Bilgi CV'de yoksa ama adayın SÖZLÜ beyanından geliyorsa satırın sonuna "(kaynak: sözlü beyan)" ekle. Bir alanda hiç bilgi YOKSA o satırı hiç YAZMA (atla). Bu bölümde DEĞERLENDİRME/yorum yapma, yalnız özetle.
 
 ===TAKİP MÜLAKATI SORULARI===
 En fazla 3-5 soru (üst sınır — hedef DEĞİL: somut belirsizlik azsa 3'ten az da yazabilirsin, hatta hiç olmayabilir). YALNIZ bu mülakatta ortaya çıkan SOMUT belirsizliklere yönelik olsun. Her soru şu kaynaklardan birine dayanmalı: (a) adayın cevap veremediği/atladığı bir soru, (b) adayın kendi ağzıyla belirttiği bir bilgi eksikliği, (c) örnek istenip alınamayan/yüzeysel kalmış bir cevap, (d) CV'de yazılı olup mülakatta doğrulanamayan bir yetkinlik, (e) ikinci değerlendiricinin işaret edebileceği türden bir belirsizlik. Her sorunun transkriptte somut bir dayanağı olmalı.
+ZORUNLU BİÇİM (GÖREV 3 — dayanaksız/uydurma soruların sisteme yakalanması için): her soru satırının BAŞINA, bu belirsizliği ortaya çıkaran mülakatçı sorusunun/anının GERÇEK zaman damgasını şu biçimde ekle: "[dayanak: mm:ss] <soru metni>". Bu damga transkriptte GERÇEKTEN var olan bir mülakatçı sorusuna karşılık gelmelidir — uydurma damga YASAK; sistem doğrular, geçemeyen soru RAPORDAN SİLİNİR (damga rapora BASILMAZ, yalnız doğrulama içindir).
 KURAL: Sorular adayın GEÇMİŞİNE ve BİLDİKLERİNE yönelik olsun, GELECEK PLANINA değil.
-  Yanlış (GELECEK PLANI sorusu): "Bu konuda kendinizi nasıl geliştirmeyi planlıyorsunuz?"
-  Doğru (GEÇMİŞE/BİLGİYE dayalı): "Şu yöntemi bildiğinizi belirttiniz; hangi koşullarda ve hangi kayıtla uyguladığınızı somut bir örnek üzerinden açıklar mısınız?"
-KESİNLİKLE YASAK — aşağıdaki kalıplarla veya eş anlamlılarıyla SORU YAZMA (bunlar genel kariyer-koçluğu sorularıdır, HER adaya sorulabilir, BU adayı değerlendirmeye yaramaz — sistem bu kalıplardan birini tespit ederse o SORUYU RAPORDAN SİLER):
+  Yanlış (GELECEK PLANI sorusu): "[dayanak: 12:03] Bu konuda kendinizi nasıl geliştirmeyi planlıyorsunuz?"
+  Doğru (GEÇMİŞE/BİLGİYE dayalı): "[dayanak: 12:03] Şu yöntemi bildiğinizi belirttiniz; hangi koşullarda ve hangi kayıtla uyguladığınızı somut bir örnek üzerinden açıklar mısınız?"
+KESİNLİKLE YASAK — aşağıdaki kalıplarla veya eş anlamlılarıyla SORU YAZMA (bunlar genel kariyer-koçluğu sorularıdır, HER adaya sorulabilir, BU adayı değerlendirmeye yaramaz; ayrıca "daha fazla bilgi verebilir misiniz" gibi tek başına hiçbir şey sormayan genel-geçer sorular da YASAK — sistem bu kalıplardan birini tespit ederse o SORUYU RAPORDAN SİLER):
   - "hangi adımları atmayı planlıyorsunuz"
   - "nasıl bir gelişim planı oluşturabilirsiniz"
   - "hangi kaynakları kullanabilirsiniz"
   - "hangi eğitim veya kaynaklardan yararlanmayı düşünüyorsunuz"
   - "kendinizi nasıl geliştirmeyi planlıyorsunuz"
   - "hangi stratejileri uygulayabilirsiniz"
+  - "daha fazla bilgi verebilir misiniz" / "daha fazla bilgi verir misiniz"
 Somut bir belirsizlik YOKSA "YOK" yaz — sayıyı tamamlamak için soru uydurma.
 ===BÖLÜM SONU==="""
 
@@ -2702,15 +2814,20 @@ _FORBIDDEN_FOLLOWUP_RE = re.compile(
     r"|(?:yararlanmay[ıi]|kullanmay[ıi]|geli[şs]tirmeyi|uygulamay[ıi]|a[şs]may[ıi]) d[üu][şs][üu]n[üu]yorsunuz"
     r"|nas[ıi]l bir geli[şs]im plan[ıi]"
     r"|hangi kaynaklar[ıi]?(?:dan)? kullanabilirsiniz"
-    r"|hangi strateji(?:leri)? uygulayabilirsiniz",
+    r"|hangi strateji(?:leri)? uygulayabilirsiniz"
+    r"|daha fazla bilgi ver(?:ebilir|ir) misiniz",
     re.IGNORECASE)
 
 def detect_forbidden_followup_patterns(text: str) -> list:
     """Takip Mülakatı Soruları içeriğinde yasaklı genel-gelişim kalıbı geçen SATIRLARI döner
-    (boş liste = temiz). Kaldırmaz — çağıran loglar."""
+    (boş liste = temiz). GÖREV 2.2/3.5 — artık _FORBIDDEN_FOLLOWUP_RE'ye ek olarak GÖREV 2.2'nin
+    genişletilmiş yasaklı-kalıp ailesi (banned_phrase_hits) de aynı satırlarda taranır (bir soru
+    hem 'genel gelişim koçluğu' kalıbında OLMASA bile klişe bir ifadeyle sorulmuş olabilir).
+    Kaldırmaz — çağıran (finalize_interview) aktif olarak siler."""
     if not text:
         return []
-    return [ln.strip() for ln in text.splitlines() if ln.strip() and _FORBIDDEN_FOLLOWUP_RE.search(ln)]
+    return [ln.strip() for ln in text.splitlines()
+            if ln.strip() and (_FORBIDDEN_FOLLOWUP_RE.search(ln) or banned_phrase_hits(ln))]
 
 # Level bazlı konfigürasyon: süre (dk), soru sayısı güvenlik ağı, CV zorunluluğu, ton talimatı.
 LEVEL_CONFIG = {
@@ -5889,6 +6006,35 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     pos_table_text = _pos_m.group(1) if _pos_m else ""
     prof_table_text = _prof_m.group(1) if _prof_m else ""
 
+    # İş emri GÖREV 5 EK — reviewer_contradiction_unresolved: müfettiş serbest metninde ana
+    # rapordan ("...") ALINTILADIĞI bir iddiayı AÇIKÇA "desteklenmiyor/tutarlı değil/abartılı"
+    # diye işaretlediyse, bu çelişki rapora GİRMEZ — ana metindeki (Güçlü Yönler) o cümle
+    # ÇIKARILIR (ikinci değerlendirici bunu Ek Görüş'te yazdığı halde ana metin değişmeden
+    # basılmasın diye — bu turun somut örneği).
+    try:
+        _gy_m = re.search(r'\*\*Güçlü Yönler:\*\*\s*\n([\s\S]*?)(?=\n\*\*[^\n]{2,60}:\*\*|\Z)', final_report)
+        _gy_block = _gy_m.group(1) if _gy_m else ""
+        _removed_contradictions = []
+        if free_raw and _gy_block:
+            _gy_sents = re.split(r'(?<=[.!?])\s+', _gy_block)
+            for m in _STR_QUOTE_UNSUPPORTED_RE.finditer(free_raw):
+                quoted = m.group(1).strip()
+                if not quoted:
+                    continue
+                for i, s in enumerate(_gy_sents):
+                    if s.strip() and _is_near_duplicate(quoted, [s], threshold=0.5):
+                        _removed_contradictions.append(s.strip())
+                        _gy_sents[i] = ""
+                        break
+            if _removed_contradictions:
+                _new_gy_block = " ".join(s for s in _gy_sents if s.strip())
+                final_report = final_report.replace(_gy_block, _new_gy_block, 1)
+                record_system_decision(candidate_id, level, "reviewer_contradiction_unresolved_duzeltildi",
+                                       "GÖREV 5 EK — ikinci değerlendirici Güçlü Yönler'deki bir iddianın transkriptle desteklenmediğini işaret etti; o cümle ana metinden çıkarıldı.",
+                                       {"silinen_cumleler": _removed_contradictions})
+    except Exception as e:
+        print(f"UYARI (append_reviewer_section reviewer_contradiction taraması c={candidate_id}): {type(e).__name__}: {e}")
+
     diff_block = build_reviewer_diff_block(rv_scores, rv_gerekce, position_criteria or [], PROFILE_CRITERIA,
                                            pos_table_text, prof_table_text)
 
@@ -5988,6 +6134,529 @@ def _insert_report_section(reply: str, section_body: str, pre_note: str = "") ->
 # GÖREV 1.2 — reviewer_flagged_criteria / apply_reviewer_score_revision / annotate_revised_criteria_prose
 # ve yardımcıları (_match_strength, _VALUE_JUDGMENT_RE, _ANNOTATE_* , _criterion_fully_mentioned)
 # TAMAMEN SİLİNDİ. İkinci model artık puana/metne müdahale etmiyor (bkz. append_reviewer_section).
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# İŞ EMRİ — KRİTER GEREKÇESİ: YAPISAL ÜRETİM + DETERMİNİSTİK DOĞRULAMA (2026-09)
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# Önceki tur (RAPOR İÇERİK KALİTESİ) klişe/gerekçe sorununu PROMPT talimatı + LOG-ONLY tespitle
+# çözmeye çalıştı — YETERSİZ kaldı: paraphrase ile regex atlatıldı, "Ancak" kalıbı 12/12'ye çıktı
+# (önceki turdaki 10/12'den DAHA KÖTÜ), aynı kanıt iki kritere kopyalandı, Yönetici Özeti 95
+# kelimeye küçüldü (hedef 150-250, önceki tur 107) VE — en ciddisi — HİÇ SORULMAMIŞ bir konu
+# ("Vergi ve Mevzuat") için EKSİK uydurulup ondan bir takip sorusu türetildi. Kök neden: modelin
+# SERBEST METİN yazdığı TEK bir hücreye "bunu yazma" demek işe yaramıyor — model istemeden ya da
+# bilerek talimatın etrafından dolaşabiliyor. Çözüm burada YAPISAL + DENETİMLİ:
+#   GÖREV 1 — model artık serbest cümle değil, G(österdiği)/K(anıt)/E(ksik)/S(oru damgası) diye
+#             4 AYRI ALAN üretir (bkz. _CRIT_EVIDENCE_HINT / _STRUCTURED_EVIDENCE_FORMAT_INSTRUCTIONS,
+#             yukarıda); NİHAİ cümleyi bu alanlardan KOD (render_criterion_rationale) kurar — EN AZ
+#             3 farklı şablon rotasyonla, sabit "X. Ancak Y." iskeleti YOK.
+#   GÖREV 2 — validate_criterion_fields DETERMİNİSTİK bir KAPI (log değil): geçemeyen içerik rapora
+#             HİÇ girmez; apply_structured_rationale_gate SADECE o kriter için max 2 deneme hedefli
+#             yeniden üretim tetikler (regenerate_criterion_fields); 2 denemeden sonra hâlâ geçemezse
+#             kriter "Değerlendirilemedi (sistem)" sayılır (payda dışına alınır, puan yeniden
+#             normalize edilir) — YEDEK ŞABLON GEREKÇE ÜRETİLMEZ ("kötü gerekçe basmaktansa hiç basma").
+#   GÖREV 3 — her EKSİK/RİSK/takip-sorusu iddiası check_timestamp_grounded ile transkriptte GERÇEKTEN
+#             var olan bir mülakatçı sorusuna bağlanmak ZORUNDA; bağlanamıyorsa iddia SİLİNİR.
+#   GÖREV 4 — Yönetici Özeti AYRI, bağımsız bir uzunluk doğrulayıcı (regenerate_yonetici_ozeti) —
+#             tek deneme, sonra olduğu gibi basılır + loglanır (otomatik kısaltma/uzatma YOK).
+#   GÖREV 5 (EK) — puan artık cevabın KRİTERİ KARŞILAMA DERECESİNE göre: alan dışı/devretme beyanı
+#             varken yüksek puan verilmişse (out_of_scope_high_score) DETERMİNİSTİK olarak tavanın
+#             %25'ine sabitlenir (LLM'e "puanını düşür" demek GÜVENİLMEZ — 5.2'nin bizzat kanıtladığı
+#             gibi model bunu kendiliğinden yapmadı); bulgu Gelişim Alanları'na RİSK olarak ZORUNLU
+#             yansıtılır (yoksa sistem kendisi ekler — sessizce geçilemez).
+
+# ---- Zaman damgası yardımcıları (GÖREV 2+3 — KANIT/SORU_DAMGASI'nın transkriptte GERÇEKTEN var
+# olup olmadığını doğrulamak için ortak): ----
+_TS_RE = re.compile(r"\[?(\d{1,3}):([0-5]\d)\]?")
+
+def _extract_timestamp(s: str) -> Optional[str]:
+    m = _TS_RE.search(s or "")
+    return f"{m.group(1)}:{m.group(2)}" if m else None
+
+def check_timestamp_grounded(ts: str, transcript_view: list, role: Optional[str] = None, tolerance_s: int = 8) -> bool:
+    """GÖREV 2 (evidence_timestamp_invalid) + GÖREV 3 (unsourced_eksik/SORU_DAMGASI) — verilen
+    [mm:ss] damgasının transkriptte GERÇEKTEN var olan bir satıra karşılık gelip gelmediğini
+    kontrol eder. role='mulakatci' verilirse YALNIZ mülakatçı satırları aranır (SORU_DAMGASI ve
+    takip sorusu 'dayanak' damgası için — GÖREV 3: eksiklik/takip-sorusu iddiası GERÇEKTEN sorulmuş
+    bir soruya dayanmalı, ADAY'ın kendi cümlesine değil). Tolerans: model/insan yuvarlaması birkaç
+    saniye kayabilir; ±tolerance_s içindeki en yakın satır kabul edilir. DAR TUTULUR (8sn): geniş
+    bir tolerans (ör. 45sn), soru-cevap turları sık olduğunda ADAY'ın kendi cevabını YANLIŞLIKLA
+    'mülakatçı sorusu' gibi doğrulayabiliyordu (sentetik testte yakalandı) — GÖREV 3'ün amacı
+    TAM OLARAK bunu önlemek olduğu için tolerans komşu konuşma turunu KAPSAMAYACAK kadar dar olmalı."""
+    if not ts:
+        return False
+    target_s = _TS_RE.search(ts)
+    if not target_s:
+        return False
+    target = int(target_s.group(1)) * 60 + int(target_s.group(2))
+    for row in (transcript_view or []):
+        if role and row.get("role") != role:
+            continue
+        if row.get("role") == "baslik":
+            continue
+        em = row.get("elapsed_ms")
+        if em is None:
+            continue
+        if abs(em // 1000 - target) <= tolerance_s:
+            return True
+    return False
+
+# ---- GÖREV 1 — yapısal hücre ayrıştırma + render ----
+def parse_structured_evidence_cell(cell_text: str) -> Optional[dict]:
+    """'Kanıt ve Analiz' hücresindeki YAPISAL alanları ayrıştırır: G (gösterdiği, zorunlu), K
+    (kanıt, zorunlu), E (eksik, isteğe bağlı), S (soru damgası, E doluysa zorunlu). Format:
+    'G: ... ~~ K: ... ~~ E: ... ~~ S: ...' (bkz. _CRIT_EVIDENCE_HINT). Ayrıştırılamazsa (G veya K
+    yoksa, ya da '~~' hiç yoksa — eski/serbest metin) None döner; çağıran bunu 'structure_invalid'
+    kabul eder (GÖREV 2)."""
+    if not cell_text or "~~" not in cell_text:
+        return None
+    fields = {"g": "", "k": "", "e": "", "s": ""}
+    for seg in cell_text.split("~~"):
+        seg = seg.strip()
+        m = re.match(r"^([GKES])\s*:\s*(.*)$", seg, re.IGNORECASE | re.DOTALL)
+        if not m:
+            continue
+        key = {"G": "g", "K": "k", "E": "e", "S": "s"}[m.group(1).upper()]
+        fields[key] = m.group(2).strip()
+    if not fields["g"] or not fields["k"]:
+        return None
+    return fields
+
+# GÖREV 2.2 — geçiş bağlacı ailesi. "Bununla birlikte" YALNIZ render_criterion_rationale'ın 3
+# şablonundan BİRİNDE (idx 1), rotasyonla, kullanılır — bu yüzden E dolu kriterlerin EN FAZLA
+# 1/3'ünde görünür (tasarım gereği; transition_overuse yine de ÇAPRAZ KRİTER bir GÜVENLİK AĞI
+# olarak ayrıca kontrol eder — bkz. apply_structured_rationale_gate). Modelin KENDİ G/E metninin
+# İÇİNDE bu bağlaçlardan birini kullanması (forbidden_transition_found) AYRI ve HER ZAMAN yasaktır.
+_TRANSITION_WORD_RE = re.compile(r"\b(ancak|fakat|ne var ki|bununla birlikte)\b", re.IGNORECASE)
+
+def render_criterion_rationale(fields: dict, template_idx: int) -> str:
+    """GÖREV 1 — yapısal alanları (G/K/E) NİHAİ cümleye döker. EN AZ 3 farklı şablon, kriter
+    SIRASINA göre rotasyonla seçilir (sabit 'X. Ancak Y.' iskeleti YOK — iki şablonda HİÇ geçiş
+    bağlacı yok, yalnız 1 şablonda 'Bununla birlikte' var). EKSİK boşsa hiçbir geçiş/olumsuzlama
+    cümlesi EKLENMEZ — yalnızca G+K anlatılır (iş emri: 'EKSİK boşsa sadece GÖSTERDİĞİ+KANIT
+    render edilir')."""
+    g = (fields.get("g") or "").strip().rstrip(".")
+    k = (fields.get("k") or "").strip()
+    e = (fields.get("e") or "").strip().rstrip(".")
+    idx = template_idx % 3
+    if idx == 0:
+        base = f"{g} ({k})."
+        return base + (f" Gelişime açık yön: {e}." if e else "")
+    if idx == 1:
+        base = f"{k} üzerinden görülüyor ki {_tr_lower_first(g)}."
+        return base + (f" Bununla birlikte {_tr_lower_first(e)}." if e else "")
+    base = f"{g}. Kanıt: {k}."
+    return base + (f" Eksik kalan yön: {e}." if e else "")
+
+# ---- GÖREV 2 — DOĞRULAYICI (validator): LOG değil KAPI ----
+def validate_criterion_fields(fields: Optional[dict], cap: int, awarded: Optional[int], transcript_view: list,
+                              prior_claims: list) -> list:
+    """Bir kriterin YAPISAL alanlarını (G/K/E/S) denetler. Dönüş: ihlal kodları listesi (boş liste
+    = GEÇTİ). Kodlar: structure_invalid, banned_phrase_found, forbidden_transition_found,
+    duplicate_claim, evidence_timestamp_invalid, full_score_has_eksik, unsourced_eksik,
+    out_of_scope_high_score (GÖREV 5 EK). transition_overuse BURADA YOK — bu ÇAPRAZ KRİTER bir
+    kontrol, apply_structured_rationale_gate'te AYRICA yapılır (tek kriterin kendi metnine bakan
+    forbidden_transition_found'dan FARKLI: 12/12 kriterin HER BİRİ 'temiz' görünse bile RAPOR
+    GENELİNDE oran aşılabilir — bu yüzden ayrı, rapor-seviyesi bir kontrol şart)."""
+    violations = []
+    if not fields:
+        return ["structure_invalid"]
+    g, k, e, s = fields.get("g", ""), fields.get("k", ""), fields.get("e", ""), fields.get("s", "")
+    if not g or not k:
+        return ["structure_invalid"]
+    combined = f"{g} {e}"
+    if banned_phrase_hits(combined):
+        violations.append("banned_phrase_found")
+    if _TRANSITION_WORD_RE.search(g) or _TRANSITION_WORD_RE.search(e):
+        violations.append("forbidden_transition_found")
+    k_ts = _extract_timestamp(k)
+    if not k_ts or not check_timestamp_grounded(k_ts, transcript_view):
+        violations.append("evidence_timestamp_invalid")
+    if e:
+        if cap and awarded is not None and cap > 0 and (awarded / cap) >= 0.85:
+            violations.append("full_score_has_eksik")
+        s_ts = _extract_timestamp(s)
+        if not s_ts or not check_timestamp_grounded(s_ts, transcript_view, role="mulakatci"):
+            violations.append("unsourced_eksik")
+    if _is_near_duplicate(g, prior_claims):
+        violations.append("duplicate_claim")
+    # GÖREV 5 EK — alan dışı/devretme beyanı varken yüksek puan (tavanın >%25'i) verilmişse: bu
+    # DETERMİNİSTİK bir ihlal (LLM'e "puanı düşür" demek GÜVENİLMEZ, bkz. apply_structured_rationale_gate
+    # içindeki sabit %25 kelepçesi — burada yalnız TESPİT edilir, düzeltme çağıran tarafta).
+    if (_OUT_OF_SCOPE_RE.search(k) or _DELEGATION_RE.search(k) or _OUT_OF_SCOPE_RE.search(g) or _DELEGATION_RE.search(g)):
+        if cap and awarded is not None and cap > 0 and (awarded / cap) > 0.25:
+            violations.append("out_of_scope_high_score")
+    return violations
+
+_VIOLATION_TR = {
+    "structure_invalid": "Alanlar (G/K/E/S) doğru biçimde ayrıştırılamadı — biçimi TAM UY: 'G: ... ~~ K: ... ~~ E: ... ~~ S: ...'.",
+    "banned_phrase_found": "Yasaklı klişe kalıp kullanıldı (ör. 'daha fazla ... gerekmektedir/sunmamıştır', '... beklenmiştir').",
+    "forbidden_transition_found": "G veya E alanı İÇİNDE 'ancak/fakat/ne var ki' bağlacı kullanıldı — YASAK, bu bağlaçları rapor derleyici (kod) ekler, sen ASLA ekleme.",
+    "evidence_timestamp_invalid": "KANIT alanındaki [mm:ss] damgası transkriptte GERÇEKTEN yok — SADECE transkriptte var olan bir ana damga koy.",
+    "full_score_has_eksik": "Bu kriter tavanın %85+'ini almış ama EKSİK doldurulmuş — tutarsız: EKSİK'i BOŞ bırak (gerçekten tam performans varsa).",
+    "unsourced_eksik": "EKSİK doldurulmuş ama SORU_DAMGASI mülakatçının GERÇEKTEN sorduğu bir soruya denk gelmiyor — ya EKSİK'i GERÇEK bir mülakatçı sorusuna dayandır (gerçek [mm:ss] ver) ya da EKSİK'i BOŞ bırak.",
+    "duplicate_claim": "GÖSTERDİĞİ alanı başka bir kriterde ZATEN kullanılan kanıtla neredeyse AYNI — bu kriter için FARKLI, bağımsız bir kanıt/gözlem yaz.",
+    "out_of_scope_high_score": "Adayın cevabı ALAN DIŞI/DEVRETME beyanı içeriyor (örn. 'benim alanım değil' / 'yöneticime sorarım') — G/K alanların bunu AÇIKÇA yansıtsın (puanı SEN değiştiremezsin, sistem düzeltir).",
+}
+
+def regenerate_criterion_fields(candidate_id: int, level: int, provider: str, model: str, crit_name: str, cap: int,
+                                transcript_text: str, prior_fields: dict, violations: list) -> Optional[dict]:
+    """GÖREV 2.3 — YALNIZCA bu kriterin G/K/E/S alanlarını, tespit edilen ihlal listesini modele
+    AÇIKÇA vererek, HEDEFLİ olarak yeniden ürettirir (rapor genelini DEĞİL). Sağlayıcı, birincil
+    rapor üretiminde kullanılanla AYNIDIR (provider run_deferred_finish_job'tan gelir — L1/L3
+    Claude, L2 OpenAI; DOKUNULMAYACAKLAR: Level 2 hattına Anthropic çağrısı EKLENMEZ, provider
+    zaten 'openai' olarak gelir). Başarısız/istisna/API anahtarı yok → None (çağıran bunu
+    'yeniden üretim de başarısız' sayar — GÖREV 2.4'ün max-2-deneme sayacını ilerletir)."""
+    reasons = "\n".join(f"- {v}: {_VIOLATION_TR.get(v, v)}" for v in violations)
+    prompt = f"""Aşağıdaki TEK kriter için, önceki üretimin DOĞRULAYICIDAN GEÇEMEDİĞİ tespit edildi. SADECE bu kriter için YENİDEN üret — rapor genelini yazma, açıklama ekleme.
+
+KRİTER: {crit_name} (tavan: {cap} puan)
+
+ÖNCEKİ ÜRETİM:
+G: {(prior_fields or {}).get('g','')}
+K: {(prior_fields or {}).get('k','')}
+E: {(prior_fields or {}).get('e','')}
+S: {(prior_fields or {}).get('s','')}
+
+TESPİT EDİLEN İHLALLER (HER BİRİNİ DÜZELT):
+{reasons}
+
+ZORUNLU ÇIKTI FORMATI (başka HİÇBİR ŞEY yazma, tam olarak bu 4 satır, sırasıyla):
+G: <adayın bu kriterde ne yapabildiği/bildiği/nasıl yaklaştığı — TEK cümle, 'ancak/fakat' YOK>
+K: <[mm:ss] transkriptte GERÇEKTEN var olan bir ana damga + kısa somut alıntı/özet>
+E: <GERÇEKTEN bir eksik varsa TEK cümle; yoksa bu satırı 'E:' olarak BOŞ bırak>
+S: <E doluysa, mülakatçının bu eksikliği ortaya çıkaran sorusunun [mm:ss] damgası; E boşsa bu satırı 'S:' olarak BOŞ bırak>
+
+=== TRANSKRİPT ===
+{(transcript_text or '')[:TRANSCRIPT_PROMPT_MAX_CHARS]}"""
+    raw = None
+    try:
+        if provider == "claude":
+            if not ANTHROPIC_API_KEY:
+                return None
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
+            resp = client.messages.create(model=model or "claude-sonnet-4-6", max_tokens=500, temperature=0,
+                                          messages=[{"role": "user", "content": prompt}])
+            record_anthropic_usage(candidate_id, level, model or "claude-sonnet-4-6", "criterion_rationale_retry", resp)
+            raw = resp.content[0].text
+        elif provider == "openai":
+            if not OPENAI_API_KEY:
+                return None
+            resp = openai_call("POST", "https://api.openai.com/v1/chat/completions",
+                               json_body={"model": model or OPENAI_REPORT_MODEL,
+                                          "messages": [{"role": "user", "content": prompt}],
+                                          "max_tokens": 500, "temperature": 0},
+                               timeout=45.0, step="criterion_rationale_retry", severity="background", retry=False,
+                               context={"candidate_id": candidate_id, "level": level})
+            result = resp.json()
+            record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "criterion_rationale_retry", result)
+            raw = result["choices"][0]["message"]["content"]
+        else:
+            return None
+    except Exception as ex:
+        print(f"UYARI (regenerate_criterion_fields c={candidate_id} L{level} kriter={crit_name}): {type(ex).__name__}: {ex}")
+        return None
+    if not raw:
+        return None
+    g_m = re.search(r"(?im)^\s*G\s*:\s*(.*)$", raw)
+    k_m = re.search(r"(?im)^\s*K\s*:\s*(.*)$", raw)
+    e_m = re.search(r"(?im)^\s*E\s*:\s*(.*)$", raw)
+    s_m = re.search(r"(?im)^\s*S\s*:\s*(.*)$", raw)
+    new_fields = {
+        "g": (g_m.group(1).strip() if g_m else ""),
+        "k": (k_m.group(1).strip() if k_m else ""),
+        "e": (e_m.group(1).strip() if e_m else ""),
+        "s": (s_m.group(1).strip() if s_m else ""),
+    }
+    if not new_fields["g"] or not new_fields["k"]:
+        return None
+    return new_fields
+
+_OUT_OF_SCOPE_SCORE_CAP_RATIO = 0.25  # GÖREV 5.2 — alan dışı/devretme: tavanın EN FAZLA %25'i
+
+def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_prefix: str, transcript_view: list,
+                                    transcript_text: str, provider: str, model: str, candidate_id: int, level: int):
+    """GÖREV 2 — DOĞRULAYICI KAPI. `table_text` (recompute_and_fix_score/recompute_profile_section
+    tarafından ZATEN puan-normalize edilmiş tablo) üzerindeki her kriterin 'Kanıt ve Analiz'
+    hücresini YAPISAL alanlara ayrıştırır, doğrular; geçemeyeni max 2 deneme HEDEFLİ yeniden
+    ürettirir; 2 denemeden sonra hâlâ geçemezse kriteri 'Değerlendirilemedi (sistem)' sayar (payda
+    dışına ALINIR, TOPLAM/PROFİL PUANI yeniden normalize edilir) ve YER TUTUCU YEDEK GEREKÇE
+    ÜRETMEZ. GÖREV 5.2 — out_of_scope_high_score tespit edilirse puan DETERMİNİSTİK olarak tavanın
+    %25'ine kelepçelenir (LLM'in kendiliğinden düşürmesine GÜVENİLMEZ — bu turun kök nedeni).
+    GÖREV 2.2 — transition_overuse ÇAPRAZ KRİTER kontrolü ayrıca, tüm kriterler işlendikten SONRA
+    yapılır (render seçimiyle düzeltilir, LLM çağrısı GEREKMEZ — bu bir render sorunu, içerik
+    sorunu değil). GÖREV 5.5 — alan dışı/devretme LEKSİK imzası (puan zaten düşük olsa BİLE)
+    `flagged_scope` listesine toplanır; çağıran (finalize_interview) bunun Gelişim Alanları'nda
+    RİSK olarak GERÇEKTEN raporlandığını doğrular, yoksa kendisi ekler (unreported_scope_limitation
+    sessizce geçilemez). Dönüş: (yeni_table_text, yeni_score_veya_None, log[], flagged_scope[])."""
+    if not table_text or not criteria_list:
+        return table_text, None, [], []
+    lines = table_text.splitlines()
+    log = []
+    accepted_claims = []
+    rendered_rows = []
+    flagged_scope = []
+    used_lines = set()
+
+    for idx, c in enumerate(criteria_list, start=1):
+        cid = f"{id_prefix}{idx}"
+        cap = _safe_int(c.get("weight"))
+        cname = c.get("name", "")
+        if cap <= 0 or not cname:
+            continue
+        best_i, best_s = None, 0.0
+        for i, ln in enumerate(lines):
+            if i in used_lines or ln.count("|") < 2:
+                continue
+            cells = [x.strip() for x in ln.strip().strip("|").split("|")]
+            if len(cells) < 3:
+                continue
+            c0 = _norm_name(re.sub(r"[*_`]", "", cells[0]))
+            if len(c0) < 2:
+                continue
+            sc = _name_score(cname, cells[0])
+            if sc > best_s:
+                best_i, best_s = i, sc
+        if best_i is None or best_s < 0.34:
+            continue
+        used_lines.add(best_i)
+        cells = [x.strip() for x in lines[best_i].strip().strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        score_cell, evidence_cell = cells[1], cells[2]
+        award_m = re.search(r"(?<![\d/])(\d+)\s*/\s*(\d+)(?![\d/])", score_cell)
+        if not award_m or re.search(r"de[ğg]erlendirilemedi", score_cell, re.IGNORECASE):
+            continue  # zaten sistem/aday kaynaklı eksik — yapısal doğrulama gerekmez (kanıt yok)
+        awarded = _safe_int(award_m.group(1))
+
+        fields = parse_structured_evidence_cell(evidence_cell)
+        if fields is None:
+            # GERİYE UYUM (kök neden — sentetik regresyon testinde yakalandı): model henüz YENİ
+            # '~~' etiketli formata geçmemiş bir hücre (ör. eski '[dk] örnek analiz sonuç' serbest
+            # metni) HER ZAMAN 'structure_invalid' sayıp diskalifiye etmek AŞIRI SERTTİR — TÜM
+            # kriterlerin payda dışı kalıp TOPLAM PUAN'ın anlamsızlaşmasına (denom=0) yol açardı.
+            # Bunun yerine: klişe/geçiş-bağlacı YOKSA legacy hücre AYNEN KORUNUR (retry/diskalifiye
+            # YOK, yapısal alan ayrımının getirdiği ek kontroller — duplicate_claim, SORU_DAMGASI
+            # doğrulaması vb. — bu hücreye uygulanamaz, bu bilinen bir kapsam dışılıktır); yalnız
+            # GERÇEKTEN sorunlu (klişeli/boş) legacy hücreler retry akışına girer.
+            if not evidence_cell.strip() or len(strip_markdown(evidence_cell)) < 3:
+                violations = ["structure_invalid"]
+            else:
+                violations = []
+                if banned_phrase_hits(evidence_cell):
+                    violations.append("banned_phrase_found")
+                if _TRANSITION_WORD_RE.search(evidence_cell):
+                    violations.append("forbidden_transition_found")
+            if not violations:
+                log.append({"kriter": cname, "kimlik": cid, "sonuc": "gecti_eski_format"})
+                rendered_rows.append({"line_idx": best_i, "disqualified": False, "cap": cap, "awarded": awarded,
+                                      "fields": None, "template_idx": idx - 1, "cid": cid, "cname": cname})
+                continue
+        else:
+            violations = validate_criterion_fields(fields, cap, awarded, transcript_view, accepted_claims)
+        attempt = 0
+        while violations and attempt < 2:
+            attempt += 1
+            new_fields = regenerate_criterion_fields(candidate_id, level, provider, model, cname, cap,
+                                                      transcript_text, fields or {"g": "", "k": "", "e": "", "s": ""},
+                                                      violations)
+            if new_fields is None:
+                break
+            fields = new_fields
+            violations = validate_criterion_fields(fields, cap, awarded, transcript_view, accepted_claims)
+
+        # GÖREV 5.2 — out_of_scope_high_score DETERMİNİSTİK kelepçe (retry sonrası da kalabilir;
+        # bu tavan LLM'e bırakılmaz — 5. iş emrinin bizzat kanıtladığı gibi model bunu kendiliğinden
+        # yapmıyor). Kelepçe uygulanınca ihlal listesinden çıkarılır (artık kural sağlanmış olur).
+        if "out_of_scope_high_score" in violations and cap > 0:
+            capped = max(0, int(cap * _OUT_OF_SCOPE_SCORE_CAP_RATIO))
+            if awarded > capped:
+                log.append({"kriter": cname, "kimlik": cid, "sonuc": "alan_disi_puan_kelepceledi",
+                           "onceki_puan": f"{awarded}/{cap}", "yeni_puan": f"{capped}/{cap}"})
+                awarded = capped
+            violations = [v for v in violations if v != "out_of_scope_high_score"]
+
+        # GÖREV 5.5 — alan dışı/devretme leksik imzası puan zaten düşük olsa BİLE (5.2'de
+        # "tespit edilirse" diyor, "puan yüksekse" DEĞİL) toplanır — Gelişim Alanları'nda RİSK
+        # olarak raporlanmalı; raporlanmadıysa aşağıda (finalize_interview) sistem kendisi ekler.
+        if fields and (_OUT_OF_SCOPE_RE.search(f"{fields.get('k','')} {fields.get('g','')}")
+                      or _DELEGATION_RE.search(f"{fields.get('k','')} {fields.get('g','')}")):
+            flagged_scope.append({"kriter": cname, "kanit": (fields.get("k") or "")[:200]})
+
+        if violations:
+            log.append({"kriter": cname, "kimlik": cid, "sonuc": "degerlendirilemedi_sistem", "ihlaller": violations})
+            new_score_cell = f"Değerlendirilemedi (sistem) — doğrulayıcı 2 denemede geçerli gerekçe üretemedi ({', '.join(violations)})"
+            new_evidence = "Bu kriter için doğrulanabilir bir gerekçe üretilemedi; puan sisteme göre değerlendirilemedi sayıldı."
+            cells[1] = new_score_cell
+            cells[2] = new_evidence
+            rendered_rows.append({"line_idx": best_i, "disqualified": True, "cap": cap, "awarded": awarded})
+        else:
+            log.append({"kriter": cname, "kimlik": cid, "sonuc": "gecti", "deneme": attempt})
+            accepted_claims.append(fields["g"])
+            t_idx = idx - 1
+            rendered_rows.append({"line_idx": best_i, "disqualified": False, "cap": cap, "awarded": awarded,
+                                  "fields": fields, "template_idx": t_idx, "cid": cid, "cname": cname})
+            cells[1] = f"{awarded}/{cap}"
+            cells[2] = render_criterion_rationale(fields, t_idx)
+        lines[best_i] = "| " + " | ".join(cells) + " |"
+
+    # GÖREV 2.2 — transition_overuse: ÇAPRAZ KRİTER (rapor genelindeki ORAN), tek kriterin kendi
+    # metnine bakan forbidden_transition_found'dan AYRI. >1/3 ise fazlalık RENDER'ı değiştirilir.
+    # Legacy (yapısal olmayan, 'fields' None) satırlar bu sayıma DAHİL DEĞİL — onlar zaten intake
+    # sırasında geçiş-bağlacı için ayrıca kontrol edildi (yukarıda) ve biz onları hiç render ETMİYORUZ.
+    _passed = [r for r in rendered_rows if not r["disqualified"] and r.get("fields") is not None]
+    n = len(_passed)
+    if n:
+        hit_idx = [i for i, r in enumerate(_passed) if _TRANSITION_WORD_RE.search(render_criterion_rationale(r["fields"], r["template_idx"]))]
+        limit = n // 3
+        if len(hit_idx) > limit:
+            fixed = 0
+            remaining = len(hit_idx)
+            for i in reversed(hit_idx):
+                if remaining <= limit:
+                    break
+                r = _passed[i]
+                alt_idx = 0 if (r["template_idx"] % 3) != 0 else 2
+                new_text = render_criterion_rationale(r["fields"], alt_idx)
+                row_cells = [x.strip() for x in lines[r["line_idx"]].strip().strip("|").split("|")]
+                if len(row_cells) >= 3:
+                    row_cells[2] = new_text
+                    lines[r["line_idx"]] = "| " + " | ".join(row_cells) + " |"
+                fixed += 1
+                remaining -= 1
+            log.append({"kriter": "(rapor geneli)", "kimlik": "-", "sonuc": "transition_overuse_rebalance",
+                       "ihlaller": ["transition_overuse"],
+                       "detay": f"{len(hit_idx)}/{n} kriterde geçiş bağlacı vardı (izin: {limit}); {fixed} kriter farklı şablonla yeniden render edildi"})
+
+    # Diskalifiye edilen / kelepçelenen kriterler varsa: TOPLAM/PROFİL PUANI yeniden normalize edilir.
+    new_score = None
+    if any(r["disqualified"] for r in rendered_rows) or any(g.get("sonuc") == "alan_disi_puan_kelepceledi" for g in log):
+        awarded_sum = sum(r["awarded"] for r in rendered_rows if not r["disqualified"])
+        denom = sum(r["cap"] for r in rendered_rows if not r["disqualified"])
+        new_score = max(0, min(100, round(awarded_sum / denom * 100))) if denom > 0 else None
+        body = "\n".join(lines)
+        total_re = (r"(\*\*\s*PROF\S*\s+PUANI\s*[:：]\s*)(\d+)(\s*/\s*)(\d+)(\s*\*\*)" if id_prefix == "K"
+                   else r"(\*\*\s*TOPLAM\s+PUAN\s*[:：]\s*)(\d+)(\s*/\s*)(\d+)(\s*\*\*)")
+        if new_score is not None:
+            body = re.sub(total_re, lambda m: f"{m.group(1)}{new_score}{m.group(3)}100{m.group(5)}", body, count=1, flags=re.IGNORECASE)
+        lines = body.splitlines()
+
+    return "\n".join(lines), new_score, log, flagged_scope
+
+# ---- GÖREV 4 — Yönetici Özeti: AYRI, bağımsız bir uzunluk doğrulayıcı (kriter gerekçesi
+# sistemiyle KARIŞTIRILMAZ — iş emri açıkça "ayrı akış" istiyor). ----
+def regenerate_yonetici_ozeti(candidate_id: int, level: int, provider: str, model: str, current_text: str,
+                              word_count: int, transcript_text: str) -> Optional[str]:
+    """GÖREV 4 — Yönetici Özeti hedef aralık (150-250 kelime) dışındaysa VEYA yasaklı klişe
+    içeriyorsa TEK deneme ile yeniden ürettirir; mevcut içeriği koruyarak genişlet/kısalt. Başarısız
+    → None (çağıran olduğu gibi basar + loglar — OTOMATİK kısaltma/uzatma YAPILMAZ, cümle ortadan
+    kesilmez)."""
+    prompt = f"""Aşağıdaki 'Yönetici Özeti' metni {word_count} kelime — hedef aralık 150-250 kelime dışında OLABİLİR ve/veya yasaklı klişe ifade içerebilir. İçeriği KORUYARAK (yeni bilgi UYDURMA, var olan gerçek bilgiyi SİLME) metni 150-250 kelime aralığına GENİŞLET/KISALT; klişe ifade varsa somut, transkript kanıtına dayalı cümleyle DEĞİŞTİR. Karar/öneri kelimesi (Reddet/İşe Al/Değerlendir) YAZMA. Dakika damgası kullanma.
+
+MEVCUT METİN ({word_count} kelime):
+{current_text}
+
+=== TRANSKRİPT (ek bağlam için) ===
+{(transcript_text or '')[:8000]}
+
+SADECE yeni Yönetici Özeti metnini yaz (başlık/etiket ekleme, açıklama yapma)."""
+    try:
+        if provider == "claude":
+            if not ANTHROPIC_API_KEY:
+                return None
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
+            resp = client.messages.create(model=model or "claude-sonnet-4-6", max_tokens=600, temperature=0,
+                                          messages=[{"role": "user", "content": prompt}])
+            record_anthropic_usage(candidate_id, level, model or "claude-sonnet-4-6", "yonetici_ozeti_retry", resp)
+            raw = resp.content[0].text
+        elif provider == "openai":
+            if not OPENAI_API_KEY:
+                return None
+            resp = openai_call("POST", "https://api.openai.com/v1/chat/completions",
+                               json_body={"model": model or OPENAI_REPORT_MODEL,
+                                          "messages": [{"role": "user", "content": prompt}],
+                                          "max_tokens": 600, "temperature": 0},
+                               timeout=45.0, step="yonetici_ozeti_retry", severity="background", retry=False,
+                               context={"candidate_id": candidate_id, "level": level})
+            result = resp.json()
+            record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "yonetici_ozeti_retry", result)
+            raw = result["choices"][0]["message"]["content"]
+        else:
+            return None
+    except Exception as ex:
+        print(f"UYARI (regenerate_yonetici_ozeti c={candidate_id} L{level}): {type(ex).__name__}: {ex}")
+        return None
+    return (raw or "").strip() or None
+
+# ---- GÖREV 3 — Takip Mülakatı Soruları: '[dayanak: mm:ss]' ile transkript-temelli doğrulama ----
+_DAYANAK_RE = re.compile(r"^\s*[-*•]?\s*\[dayanak\s*:\s*(\d{1,3}:[0-5]\d)\]", re.IGNORECASE)
+
+def _followup_line_grounded(line: str, transcript_view: list) -> bool:
+    m = _DAYANAK_RE.search(line)
+    if not m:
+        return False
+    return check_timestamp_grounded(m.group(1), transcript_view, role="mulakatci")
+
+def strip_dayanak_tag(line: str) -> str:
+    """'[dayanak: mm:ss]' etiketi İÇ doğrulama içindir — okuyucuya BASILMAZ, temiz satır döner."""
+    return _DAYANAK_RE.sub("", line).strip()
+
+# ---- GÖREV 3 — Gelişim Alanları: RİSK paragraflarının transkript-temelli doğrulanması ----
+def _strip_ungrounded_risk_paragraphs(text: str, transcript_view: list) -> tuple:
+    """RİSK: ile başlayan bir paragrafın İÇİNDE transkriptte GERÇEKTEN var olan bir [mm:ss] damgası
+    yoksa (uydurma/dayanaksız risk iddiası — GÖREV 3), o paragraf ÇIKARILIR. Dönüş: (yeni_metin,
+    çıkarılan_paragraflar[])."""
+    if not text or "RİSK" not in _tr_upper(text):
+        return text, []
+    paras = re.split(r"\n\s*\n", text)
+    kept, dropped = [], []
+    for p in paras:
+        if _tr_upper(p).lstrip().startswith("RİSK"):
+            ts_list = [f"{m.group(1)}:{m.group(2)}" for m in _TS_RE.finditer(p)]
+            if not ts_list or not any(check_timestamp_grounded(t, transcript_view) for t in ts_list):
+                dropped.append(p.strip()[:200])
+                continue
+        kept.append(p)
+    return "\n\n".join(kept).strip(), dropped
+
+def render_scope_risk_paragraph(flagged: list) -> str:
+    """GÖREV 5.5 — alan dışı/devretme beyanı tespit edilip modelin KENDİSİ bunu Gelişim Alanları'na
+    RİSK olarak yazmadıysa, sistem bunu KENDİSİ ekler (sessizce geçilemez — 'işe alım kararını
+    belirleyen en önemli sinyal'). `flagged`: [{"kriter","kanit"}]."""
+    parts = []
+    for f in flagged:
+        parts.append(f"RİSK: \"{f['kriter']}\" kriterinde aday, bu alanın kendi sorumluluğunda "
+                     f"olmadığını veya kararı başkasına devrettiğini beyan etti ({f['kanit']}). "
+                     f"Pozisyonun bu alandaki beklentisi bu mülakatta doğrulanamadı.")
+    return "\n\n".join(parts)
+
+# ---- GÖREV 5 EK — Güçlü Yönler: dayanaksız/damgasız genel övgü cümleleri ----
+_UNSUPPORTED_STRENGTH_RE = re.compile(
+    r"[öo]rneklerle destekle(?:mi[şs]tir|di)|beklenmi[şs]tir", re.IGNORECASE)
+
+# GÖREV 5 EK — reviewer_contradiction_unresolved: müfettişin serbest metninde ana rapordan
+# ALINTILADIĞI ("...") bir iddiayı desteklenmiyor/tutarlı değil/abartılı diye işaretlediği
+# kalıp (bkz. append_reviewer_section).
+_STR_QUOTE_UNSUPPORTED_RE = re.compile(
+    r'["“]([^"”]{15,200})["”][^.\n]{0,60}(?:desteklenmiyor|desteklenmemektedir|'
+    r'kar[şs][ıi]l[ıi][ğg][ıi]\s+yok|transkriptte\s+yok|tutarl[ıi]\s+de[ğg]il|abart[ıi]l[ıi])',
+    re.IGNORECASE)
+
+def _strip_unsupported_strength_sentences(text: str) -> tuple:
+    """GÖREV 5 EK (unsupported_strength) — bir cümle 'örneklerle desteklemiştir' gibi genel bir
+    övgü kalıbı içeriyor AMA cümlenin kendi içinde [mm:ss] damgası YOKSA (yani GERÇEKTEN hangi
+    örnek olduğu belirtilmemiş — bu turun raporunda görülen 'bu deneyimini mülakat sırasında
+    belirttiği örneklerle desteklemiştir' tam olarak budur), o cümle ÇIKARILIR. Dönüş:
+    (yeni_metin, çıkarılan_cümleler[])."""
+    if not text:
+        return text, []
+    sents = re.split(r'(?<=[.!?])\s+', text)
+    kept, dropped = [], []
+    for s in sents:
+        if _UNSUPPORTED_STRENGTH_RE.search(s) and not _TS_RE.search(s):
+            dropped.append(s.strip())
+            continue
+        kept.append(s)
+    return " ".join(kept).strip(), dropped
 
 def run_deferred_finish_job(candidate_id: int, level: int, regen: bool = False):
     """BackgroundTasks'ten (mülakat az önce bitti) VEYA kurtarma taramasından (takılı kalmış eski
@@ -6283,7 +6952,8 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
 
     _dbc = get_db()
     candidate = _dbc.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-    _ivr = _dbc.execute("SELECT criteria_coverage_json, messages, started_at FROM interviews WHERE candidate_id=? AND level=?",
+    _ivr = _dbc.execute("SELECT criteria_coverage_json, messages, started_at, pending_finish_provider, pending_finish_model "
+                        "FROM interviews WHERE candidate_id=? AND level=?",
                         (candidate_id, level)).fetchone()
     _dbc.close()
     _pos = get_position(candidate["position"]) if candidate else None
@@ -6293,13 +6963,23 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     except Exception:
         _fcov = None
     try:
-        _ftx = transcript_to_text(build_transcript_view(_ivr["messages"] if _ivr else "[]", level, _ivr["started_at"] if _ivr else None))
+        _tview = build_transcript_view(_ivr["messages"] if _ivr else "[]", level, _ivr["started_at"] if _ivr else None)
+        _ftx = transcript_to_text(_tview)
     except Exception:
-        _ftx = ""
+        _tview, _ftx = [], ""
+    # İş emri — KRİTER GEREKÇESİ: sağlayıcı/model, hedefli yeniden-üretim çağrıları (GÖREV 2.3
+    # regenerate_criterion_fields / GÖREV 4 regenerate_yonetici_ozeti) için — DB'deki kayıtlı
+    # pending_finish_* alanlarından (run_deferred_finish_job'ın ZATEN kullandığı sağlayıcı, aynı
+    # DOKUNULMAYACAKLAR — Level 2 hattına Anthropic EKLENMEZ). Kayıt yoksa (ör. eski satır/test)
+    # seviyeye göre GENEL varsayım: L2 → openai, L1/L3 → claude (CLAUDE.md — Level 2 sadece OpenAI).
+    _gate_provider = (_ivr["pending_finish_provider"] if _ivr and "pending_finish_provider" in _ivr.keys() else None) \
+        or ("openai" if level == 2 else "claude")
+    _gate_model = _ivr["pending_finish_model"] if _ivr and "pending_finish_model" in _ivr.keys() else None
 
     # --- Pozisyon Yetkinlikleri: doğrulanır + normalize edilir (motor DEĞİŞMEDİ, yalnız girdi
     #     artık İZOLE bölüm metni — split_report_regions'a gerek yok, karışma riski yok). ---
     _score_warnings = []
+    _scope_flagged = []  # GÖREV 5.5 — alan dışı/devretme leksik bulguları (pozisyon+profil toplu)
     score_position = None
     pos_table_display = ""
     pos_raw = sections.get("pozisyon_yetkinlikleri", "")
@@ -6309,6 +6989,22 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
                 pos_raw, _crit, extract_score(pos_raw), criteria_coverage=_fcov, transcript=_ftx,
                 candidate_id=candidate_id, level=level)
             _score_warnings += list(_w1)
+            # İş emri GÖREV 2 — DETERMİNİSTİK DOĞRULAYICI KAPI: yapısal G/K/E/S alanlarını denetler,
+            # geçemeyeni HEDEFLİ (max 2 deneme) yeniden ürettirir, hâlâ geçemezse kriteri payda
+            # dışına alır (bkz. apply_structured_rationale_gate tanımı — eski log-only
+            # detect_evidence_cliches çağrısının YERİNE geçer, aşağıda kaldırıldı).
+            try:
+                _fixed_pos, _new_score_pos, _val_log_pos, _flag_pos = apply_structured_rationale_gate(
+                    _fixed_pos, _crit, "P", _tview, _ftx, _gate_provider, _gate_model, candidate_id, level)
+                _scope_flagged.extend(_flag_pos)
+                if _new_score_pos is not None:
+                    score_position = _new_score_pos
+                if _val_log_pos:
+                    record_system_decision(candidate_id, level, "kriter_gerekcesi_dogrulayici_pozisyon",
+                                           "GÖREV 2 — Pozisyon Yetkinlikleri kriterleri için yapısal doğrulayıcı çalıştı (bkz. meta.kayitlar).",
+                                           {"kayitlar": _val_log_pos})
+            except Exception as e:
+                print(f"UYARI (finalize_interview pozisyon doğrulayıcı c={candidate_id}): {type(e).__name__}: {e}")
             pos_table_display = _strip_total_line_for_display(_fixed_pos, is_profile=False)
         except Exception as e:
             print(f"UYARI (finalize_interview pozisyon puanlama c={candidate_id}): {type(e).__name__}: {e}")
@@ -6325,6 +7021,19 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
             _fixed_prof, score_profile, _w2 = recompute_profile_section(
                 prof_raw, transcript=_ftx, criteria_coverage=_fcov, candidate_id=candidate_id, level=level)
             _score_warnings += list(_w2)
+            # İş emri GÖREV 2 — AYNI doğrulayıcı kapı, K1..K6 (PROFILE_CRITERIA) için.
+            try:
+                _fixed_prof, _new_score_prof, _val_log_prof, _flag_prof = apply_structured_rationale_gate(
+                    _fixed_prof, PROFILE_CRITERIA, "K", _tview, _ftx, _gate_provider, _gate_model, candidate_id, level)
+                _scope_flagged.extend(_flag_prof)
+                if _new_score_prof is not None:
+                    score_profile = _new_score_prof
+                if _val_log_prof:
+                    record_system_decision(candidate_id, level, "kriter_gerekcesi_dogrulayici_profil",
+                                           "GÖREV 2 — Kişisel ve Bilişsel Profil kriterleri için yapısal doğrulayıcı çalıştı (bkz. meta.kayitlar).",
+                                           {"kayitlar": _val_log_prof})
+            except Exception as e:
+                print(f"UYARI (finalize_interview profil doğrulayıcı c={candidate_id}): {type(e).__name__}: {e}")
             prof_table_display = _strip_total_line_for_display(_fixed_prof, is_profile=True)
         except Exception as e:
             print(f"UYARI (finalize_interview profil puanlama c={candidate_id}): {type(e).__name__}: {e}")
@@ -6337,16 +7046,11 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     score = compute_genel_puan(score_position, score_profile)
     recommendation = decide_recommendation(score) or "Değerlendirilemedi"
 
-    # İş emri GÖREV 1.1 — kriter gerekçelerinde klişe kalıp tespiti (siler değil, loglar — bkz.
-    # detect_evidence_cliches tanımı: cümle ortasından çıkarmak grameri bozar).
-    try:
-        _cliche_hits = detect_evidence_cliches(pos_table_display) + detect_evidence_cliches(prof_table_display)
-        if _cliche_hits:
-            record_system_decision(candidate_id, level, "kriter_gerekcesi_klise_kalip",
-                                   "Kriter gerekçelerinde klişe/kalıplaşmış ifade tespit edildi (loglama amaçlı; içerik OTOMATİK değiştirilmedi).",
-                                   {"satirlar": _cliche_hits})
-    except Exception as e:
-        print(f"UYARI (finalize_interview klişe taraması c={candidate_id}): {type(e).__name__}: {e}")
+    # NOT — İş emri KRİTER GEREKÇESİ (2026-09): eski log-only klişe taraması (detect_evidence_cliches
+    # üzerinden, içerik değiştirilmeden yalnız loglanıyordu) BURADAN KALDIRILDI. Artık denetim
+    # apply_structured_rationale_gate içinde bir KAPI olarak çalışıyor (yukarıda, pos/profil
+    # tablolarının HEMEN normalize edilmesinin ardından) — geçemeyen içerik rapora hiç girmiyor,
+    # log-only davranış GÖREV 2'nin doğrudan hedefiydi ("log değil kapı").
 
     db = get_db()
     messages = get_interview_messages(db, candidate_id, level)
@@ -6363,13 +7067,32 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     try:
         _forbidden_followups = detect_forbidden_followup_patterns(tm_text)
         if _forbidden_followups:
-            _kept = [ln for ln in tm_text.splitlines() if not (ln.strip() and _FORBIDDEN_FOLLOWUP_RE.search(ln))]
+            _kept = [ln for ln in tm_text.splitlines()
+                    if not (ln.strip() and (_FORBIDDEN_FOLLOWUP_RE.search(ln) or banned_phrase_hits(ln)))]
             tm_text = "\n".join(_kept).strip()
             record_system_decision(candidate_id, level, "takip_sorulari_yasakli_kalip_silindi",
                                    "Takip Mülakatı Soruları'nda genel gelişim-koçluğu kalıbı tespit edildi ve o SORU rapordan çıkarıldı (GÖREV 5.3 — tümü çıkarsa bölüm hiç basılmaz).",
                                    {"silinen_satirlar": _forbidden_followups})
     except Exception as e:
         print(f"UYARI (finalize_interview takip sorulari kalip taramasi c={candidate_id}): {type(e).__name__}: {e}")
+    # İş emri GÖREV 3.4/3.5 — her takip sorusu GERÇEKTEN sorulmuş bir mülakatçı sorusuna
+    # ('[dayanak: mm:ss]') dayanmak ZORUNDA; dayanaksız/uydurma damgalı sorular SİLİNİR (bu tur
+    # kök neden örneği: sorulmamış "Vergi ve Mevzuat" konusundan türetilmiş takip sorusu). Etiket
+    # doğrulama içindir — okuyucuya BASILMAZ (strip_dayanak_tag).
+    try:
+        _tm_lines = [ln for ln in tm_text.splitlines() if ln.strip()]
+        _grounded_lines, _ungrounded_lines = [], []
+        for ln in _tm_lines:
+            (_grounded_lines if _followup_line_grounded(ln, _tview) else _ungrounded_lines).append(ln)
+        if _ungrounded_lines:
+            tm_text = "\n".join(strip_dayanak_tag(ln) for ln in _grounded_lines).strip()
+            record_system_decision(candidate_id, level, "takip_sorulari_dayanaksiz_silindi",
+                                   "GÖREV 3 — Takip Mülakatı Soruları'nda geçerli [dayanak: mm:ss] damgası (gerçek mülakatçı sorusuna karşılık gelen) taşımayan sorular rapordan çıkarıldı.",
+                                   {"silinen_satirlar": [strip_dayanak_tag(ln) for ln in _ungrounded_lines]})
+        else:
+            tm_text = "\n".join(strip_dayanak_tag(ln) for ln in _tm_lines).strip()
+    except Exception as e:
+        print(f"UYARI (finalize_interview takip sorulari dayanak taramasi c={candidate_id}): {type(e).__name__}: {e}")
     cv_ozeti_text = ""
     if not raw_body or not (yo_text or pos_table_display):
         # AI rapor bloğu eksik/bozuk geldi — kanıta dayalı yedek rapor (eski davranış korunur).
@@ -6384,14 +7107,31 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         except Exception as e:
             print(f"UYARI (finalize_interview boşluk onarımı c={candidate_id}): {type(e).__name__}: {e}")
 
-        # İş emri GÖREV 4.1 — Yönetici Özeti 150-250 kelime sınırı: DETECT+LOG (kısaltmak cümleyi
-        # yarıda keser, daha kötü olur — bkz. GÖREV 1'in aynı "silme değil teşhis" ilkesi).
+        # İş emri GÖREV 4 — Yönetici Özeti: AYRI bağımsız akış (kriter gerekçesi sistemiyle
+        # KARIŞTIRILMAZ). Hedef aralık (150-250 kelime) dışındaysa VEYA yasaklı klişe içeriyorsa
+        # TEK deneme ile yeniden ürettirilir (mevcut kelime sayısı + hedef AÇIKÇA modele verilir);
+        # ikinci denemede de düzelmezse OLDUĞU GİBİ basılır + loglanır — OTOMATİK kısaltma/uzatma
+        # YOK (cümleyi yarıda keser, daha kötü olur).
         try:
             _wc = len(yo_text.split())
-            if yo_text and not (150 <= _wc <= 250):
-                record_system_decision(candidate_id, level, "yonetici_ozeti_uzunluk_disi",
-                                       f"Yönetici Özeti {_wc} kelime — hedef aralık (150-250) dışında (loglama amaçlı; içerik OTOMATİK kısaltılmadı/uzatılmadı).",
-                                       {"kelime_sayisi": _wc})
+            _yo_bad = yo_text and (not (150 <= _wc <= 250) or banned_phrase_hits(yo_text))
+            if _yo_bad:
+                _new_yo = None
+                try:
+                    _new_yo = regenerate_yonetici_ozeti(candidate_id, level, _gate_provider, _gate_model, yo_text, _wc, _ftx)
+                except Exception as e:
+                    print(f"UYARI (finalize_interview yönetici özeti yeniden üretim c={candidate_id}): {type(e).__name__}: {e}")
+                if _new_yo:
+                    _wc2 = len(_new_yo.split())
+                    record_system_decision(candidate_id, level, "yonetici_ozeti_yeniden_uretildi",
+                                           f"Yönetici Özeti {_wc} kelimeydi ve/veya klişe içeriyordu; TEK deneme ile yeniden ürettirildi ({_wc2} kelime).",
+                                           {"onceki_kelime": _wc, "yeni_kelime": _wc2})
+                    yo_text = _new_yo
+                    _wc = _wc2
+                if not (150 <= _wc <= 250):
+                    record_system_decision(candidate_id, level, "yonetici_ozeti_uzunluk_disi",
+                                           f"Yönetici Özeti {_wc} kelime — hedef aralık (150-250) dışında (yeniden deneme sonrası da; OTOMATİK kısaltma/uzatma YAPILMADI, olduğu gibi basıldı).",
+                                           {"kelime_sayisi": _wc})
         except Exception as e:
             print(f"UYARI (finalize_interview yönetici özeti uzunluk kontrolü c={candidate_id}): {type(e).__name__}: {e}")
 
@@ -6418,6 +7158,43 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         except Exception as e:
             print(f"UYARI (finalize_interview modalite prose c={candidate_id}): {type(e).__name__}: {e}")
             modality_prose = ""
+
+        # İş emri GÖREV 5 EK — Güçlü Yönler: dayanaksız/damgasız genel övgü cümleleri ÇIKARILIR
+        # (unsupported_strength — bu turun somut örneği: "bu deneyimini mülakat sırasında
+        # belirttiği örneklerle desteklemiştir" — hiçbir [dk] damgası yok, hangi örnek belirsiz).
+        try:
+            gy_text, _dropped_strength = _strip_unsupported_strength_sentences(gy_text)
+            if _dropped_strength:
+                record_system_decision(candidate_id, level, "guclu_yonler_dayanaksiz_silindi",
+                                       "GÖREV 5 EK (unsupported_strength) — Güçlü Yönler'de damgasız/dayanaksız genel övgü cümlesi tespit edildi ve çıkarıldı.",
+                                       {"silinen_cumleler": _dropped_strength})
+        except Exception as e:
+            print(f"UYARI (finalize_interview güçlü yönler dayanaksızlık taraması c={candidate_id}): {type(e).__name__}: {e}")
+
+        # İş emri GÖREV 3 — Gelişim Alanları'ndaki RİSK paragrafları transkriptte GERÇEKTEN var
+        # olan bir [mm:ss] damgasına dayanmak ZORUNDA; dayanaksız/uydurma risk iddiası ÇIKARILIR.
+        try:
+            ga_text, _dropped_risk = _strip_ungrounded_risk_paragraphs(ga_text, _tview)
+            if _dropped_risk:
+                record_system_decision(candidate_id, level, "risk_iddia_dayanaksiz_silindi",
+                                       "GÖREV 3 — Gelişim Alanları'ndaki RİSK ifadesi transkriptte doğrulanabilir bir [dk] damgasına dayanmıyordu, paragraf rapordan çıkarıldı.",
+                                       {"silinen_paragraflar": _dropped_risk})
+        except Exception as e:
+            print(f"UYARI (finalize_interview risk dayanaksızlık taraması c={candidate_id}): {type(e).__name__}: {e}")
+
+        # İş emri GÖREV 5.5 — alan dışı/devretme beyanı tespit edildiyse (apply_structured_rationale_gate
+        # → _scope_flagged) ama Gelişim Alanları'nda HİÇ RİSK olarak raporlanmadıysa (unreported_scope_
+        # limitation), sistem BU BULGUYU KENDİSİ ekler — "sessizce geçilemez" (işe alım kararını
+        # belirleyen en önemli sinyal). ga_text zaten yukarıda dayanaksız risklerden temizlendi.
+        try:
+            if _scope_flagged and "RİSK" not in _tr_upper(ga_text):
+                _injected = render_scope_risk_paragraph(_scope_flagged)
+                ga_text = (ga_text.strip() + "\n\n" + _injected).strip() if ga_text.strip() else _injected
+                record_system_decision(candidate_id, level, "alan_disi_risk_zorunlu_eklendi",
+                                       "GÖREV 5.5 — alan dışı/devretme beyanı tespit edildi ama Gelişim Alanları'nda RİSK olarak raporlanmamıştı (unreported_scope_limitation); sistem bunu kendisi ekledi.",
+                                       {"kriterler": [f["kriter"] for f in _scope_flagged]})
+        except Exception as e:
+            print(f"UYARI (finalize_interview zorunlu risk ekleme c={candidate_id}): {type(e).__name__}: {e}")
 
         parts = []
         if yo_text:
