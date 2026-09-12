@@ -7826,26 +7826,62 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
             print(f"UYARI (finalize_interview öneri gerekçesi c={candidate_id}): {type(e).__name__}: {e}")
             _oneri_gerekcesi_text = ""
 
+        # İş emri — RAPOR ANLATI KATMANI GERİ EKLEME (2026-09, sonraki tur) / ADIM 2 — bölümler
+        # her raporda KOŞULSUZ basılır (madde: "veri yoksa bölüm başlığı kalır, içine deterministik
+        # 'değerlendirilemedi' metni girer — bölüm tamamen gizlenmez"); önceki turun "içerik yoksa
+        # YOK yaz, sistem bölümü rapordan çıkarır" davranışı bu 7 anlatı bölümü için TERSİNE çevrildi.
+        # Analitik/Problem Çözme/Kavrama-İletişim: EN AZ BİR [dk] referansı ZORUNLU — yoksa hüküm
+        # cümlesi KURULMAZ, yerine sabit "Doğrulanabilir kanıt bulunamadı." yazılır.
+        try:
+            for _s in ("analitik_dusunme", "problem_cozme", "kavrama_iletisim"):
+                _narrative_sections[_s] = finalize_narrative_section(_narrative_sections.get(_s, ""), require_timestamp=True)
+            for _s in ("one_cikan_proje", "dil_gozlemi", "genel_kani"):
+                _narrative_sections[_s] = finalize_narrative_section(_narrative_sections.get(_s, ""), require_timestamp=False)
+            # CV ↔ Mülakat ↔ Pozisyon Uyumu — GÖREV kuralı: alan dışı/devretme beyanı varsa ZORUNLU
+            # belirtilir (Gelişim Alanları'ndaki ZORUNLU enjeksiyon mekanizmasıyla AYNI ilke, burada da
+            # uygulanır — bkz. _scope_flagged, GÖREV 5.5'ten beri toplanıyor).
+            _cv_uyum = finalize_narrative_section(_narrative_sections.get("cv_mulakat_pozisyon_uyumu", ""), require_timestamp=False)
+            if _scope_flagged:
+                _mentioned = any(f["kriter"] in _cv_uyum for f in _scope_flagged) or re.search(r"alan d[ıi][şs][ıi]|devret", _cv_uyum, re.IGNORECASE)
+                if not _mentioned:
+                    _add = " ".join(f"\"{f['kriter']}\" kriterinde aday alan dışı/devretme beyanında bulundu ({f['kanit']})." for f in _scope_flagged)
+                    _cv_uyum = (_add if _cv_uyum in (_NO_NARRATIVE_EVIDENCE_FALLBACK,) else _cv_uyum + "\n\n" + _add)
+                    record_system_decision(candidate_id, level, "cv_uyum_alan_disi_zorunlu_eklendi",
+                                           "CV ↔ Mülakat ↔ Pozisyon Uyumu'nda alan dışı/devretme beyanı tespit edildi ama belirtilmemişti; sistem ekledi.",
+                                           {"kriterler": [f["kriter"] for f in _scope_flagged]})
+            _narrative_sections["cv_mulakat_pozisyon_uyumu"] = _cv_uyum
+        except Exception as e:
+            print(f"UYARI (finalize_interview anlatı bölümleri koşulsuz basım c={candidate_id}): {type(e).__name__}: {e}")
+
+        # İş emri ADIM 2 — Tutarlılık/Çelişki Analizi (Beyan Tutarlılığı ile AYNI kaynaktan — _disc
+        # bu noktada henüz hesaplanmadı, birazdan hesaplanacak Beyan Tutarlılığı bloğuyla AYNI
+        # compute_field_discrepancies çağrısını PAYLAŞMASI için önce buraya taşındı) ve
+        # Değerlendirilemeyen Alanlar (Puanlama Kapsamı ile AYNI _dropped_pos_names/_dropped_prof_names).
+        try:
+            _disc_for_tutarlilik = compute_field_discrepancies(dict(candidate) if candidate else {}, _ftx)
+        except Exception as e:
+            print(f"UYARI (finalize_interview tutarlılık/çelişki c={candidate_id}): {type(e).__name__}: {e}")
+            _disc_for_tutarlilik = {}
+        _tutarlilik_text = render_tutarlilik_celiski_analizi(_disc_for_tutarlilik)
+        _degerlendirilemeyen_text = render_degerlendirilemeyen_alanlar(_dropped_pos_names, _dropped_prof_names)
+
         parts = []
         if yo_text:
             parts.append("**Yönetici Özeti:**\n" + yo_text)
         # İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 1.1 — Puanlama Kapsamı (deterministik, HER
-        # ZAMAN) + 6 model-yazımlı anlatı bölümü, Yönetici Özeti'nden SONRA, kriter tablolarından
-        # ÖNCE (eski rapor formatındaki yerleri).
+        # ZAMAN) + anlatı bölümleri, Yönetici Özeti'nden SONRA, kriter tablolarından ÖNCE (eski
+        # rapor formatındaki yerleri; ADIM 2 ile Genel Kanı da BU bloğa taşındı).
         if _puanlama_kapsami_text:
             parts.append(f"{_PUANLAMA_KAPSAMI_HEAD}\n{_puanlama_kapsami_text}")
-        if _narrative_sections.get("analitik_dusunme"):
-            parts.append("**Analitik Düşünme ve Muhakeme:**\n" + _narrative_sections["analitik_dusunme"])
-        if _narrative_sections.get("problem_cozme"):
-            parts.append("**Problem Çözme ve Karar Verme Yaklaşımı:**\n" + _narrative_sections["problem_cozme"])
-        if _narrative_sections.get("kavrama_iletisim"):
-            parts.append("**Kavrama ve İletişim:**\n" + _narrative_sections["kavrama_iletisim"])
-        if _narrative_sections.get("one_cikan_proje"):
-            parts.append("**Öne Çıkan Proje ve Deneyimler:**\n" + _narrative_sections["one_cikan_proje"])
-        if _narrative_sections.get("cv_mulakat_pozisyon_uyumu"):
-            parts.append("**CV ↔ Mülakat ↔ Pozisyon Uyumu:**\n" + _narrative_sections["cv_mulakat_pozisyon_uyumu"])
-        if _narrative_sections.get("dil_gozlemi"):
-            parts.append("**Dil Gözlemi:**\n" + _narrative_sections["dil_gozlemi"])
+        parts.append("**Analitik Düşünme ve Muhakeme:**\n" + _narrative_sections["analitik_dusunme"])
+        parts.append("**Problem Çözme ve Karar Verme Yaklaşımı:**\n" + _narrative_sections["problem_cozme"])
+        parts.append("**Kavrama ve İletişim:**\n" + _narrative_sections["kavrama_iletisim"])
+        parts.append("**Tutarlılık / Çelişki Analizi:**\n" + _tutarlilik_text)
+        parts.append("**Öne Çıkan Proje ve Deneyimler:**\n" + _narrative_sections["one_cikan_proje"])
+        parts.append("**CV ↔ Mülakat ↔ Pozisyon Uyumu:**\n" + _narrative_sections["cv_mulakat_pozisyon_uyumu"])
+        parts.append("**Değerlendirilemeyen Alanlar:**\n" + _degerlendirilemeyen_text)
+        parts.append("**Dil Gözlemi:**\n" + _narrative_sections["dil_gozlemi"])
+        parts.append("**Genel Kanı:**\n" + _narrative_sections["genel_kani"])
         if pos_table_display.strip():
             parts.append("**Pozisyon Yetkinlikleri:**\n" + pos_table_display.strip())
         if prof_table_display.strip():
@@ -7866,10 +7902,10 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
             parts.append("**CV Özeti:**\n" + cv_ozeti_text.strip())
         if beyan_tutarliligi_text:
             parts.append("**Beyan Tutarlılığı:**\n" + beyan_tutarliligi_text)
-        # İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 1.1 — Genel Kanı (model) + Öneri Gerekçesi
-        # (deterministik) raporun SONUNDA, Takip Soruları'ndan ÖNCE (eski rapor formatındaki yeri).
-        if _narrative_sections.get("genel_kani"):
-            parts.append("**Genel Kanı:**\n" + _narrative_sections["genel_kani"])
+        # İş emri RAPOR ANLATI KATMANI GERİ EKLEME / ADIM 2 — Genel Kanı ARTIK üst blokta (Yönetici
+        # Özeti sonrası, bu iş emrinin AÇIKÇA verdiği "Bölüm sırası" listesine göre — önceki turda
+        # rapor SONUNA konmuştu, bu KARARIN İPTALİ, açıkça belirtilir). Öneri Gerekçesi
+        # (deterministik) burada, raporun sonunda kalır.
         if _oneri_gerekcesi_text:
             parts.append("**Öneri Gerekçesi:**\n" + _oneri_gerekcesi_text)
         if tm_text:
@@ -9260,10 +9296,14 @@ _PUANLAMA_KAPSAMI_HEAD = "**Puanlama Kapsamı:**"
 _PUANLAMA_KAPSAMI_RE = re.compile(re.escape(_PUANLAMA_KAPSAMI_HEAD) + r".*?(?=\n\n|\Z)", re.DOTALL)
 
 def render_puanlama_kapsami(total_pos: int, total_prof: int, dropped_pos_names: list, dropped_prof_names: list) -> str:
-    """GÖREV 1.4 — eski raporun 'Puanlama Kapsamı' + 'Değerlendirilemeyen Alanlar' bölümlerinin
-    TAMAMEN deterministik, tek-bölümlü karşılığı. Eski raporun kendi cümle kalıbına sadık kalır
-    ('... kriterleri değerlendirildi. Değerlendirilmeyen kriter olmadı. Puanlama, değerlendirilen
-    kriterlerin ağırlığına göre normalize edilmiştir.')."""
+    """GÖREV 1.4 — eski raporun 'Puanlama Kapsamı' bölümünün TAMAMEN deterministik karşılığı. Eski
+    raporun kendi cümle kalıbına sadık kalır ('... kriterleri değerlendirildi. Değerlendirilmeyen
+    kriter olmadı. Puanlama, değerlendirilen kriterlerin ağırlığına göre normalize edilmiştir.').
+    NOT (RAPOR ANLATI KATMANI GERİ EKLEME turu, sonraki iş emri) — önceki turda bu fonksiyon
+    'Değerlendirilemeyen Alanlar'ın da YERİNE geçiyordu (ayrı bölüm açılmamıştı); bu turda iş emri
+    AÇIKÇA 'Değerlendirilemeyen Alanlar' bölümünü AYRI istedi — render_degerlendirilemeyen_alanlar
+    AYNI dropped_pos_names/dropped_prof_names girdisini kullanır (iş emri: 'ikisi asla farklı şey
+    söylemeyecek') ama KENDİ başlığı altında basılır."""
     dropped = list(dropped_pos_names) + list(dropped_prof_names)
     total = total_pos + total_prof
     evaluated = total - len(dropped)
@@ -9275,6 +9315,64 @@ def render_puanlama_kapsami(total_pos: int, total_prof: int, dropped_pos_names: 
         lines.append("Değerlendirilmeyen kriter olmadı.")
     lines.append("Puanlama, değerlendirilen kriterlerin ağırlığına göre normalize edilmiştir.")
     return "\n".join(lines)
+
+def render_degerlendirilemeyen_alanlar(dropped_pos_names: list, dropped_prof_names: list) -> str:
+    """ADIM 2 — Puanlama Kapsamı İLE AYNI kaynak veriden (dropped_pos_names/dropped_prof_names)
+    türer; iş emri kuralı: 'ikisi asla farklı şey söylemeyecek' — aynı iki listeyi girdi alarak
+    YAPI GEREĞİ garanti edilir (iki AYRI hesaplama YOK)."""
+    dropped = list(dropped_pos_names) + list(dropped_prof_names)
+    if not dropped:
+        return "Değerlendirilemeyen kriter yok — tüm kriterler değerlendirildi."
+    return "Değerlendirilemeyen kriterler: " + ", ".join(dropped) + "."
+
+def render_tutarlilik_celiski_analizi(disc: dict) -> str:
+    """ADIM 2 — Beyan Tutarlılığı (render_beyan_tutarliligi) İLE AYNI kaynak veriden (disc —
+    compute_field_discrepancies çıktısı) türer; iş emri kuralı: 'Beyan Tutarlılığı bölümündeki
+    tespitlerle aynı kaynaktan beslenecek, çelişki varsa burada da görünecek. Çelişki yoksa bunu
+    açıkça yazacak.'"""
+    rows = [r for r in ((disc or {}).get("rows") or []) if r.get("durum") == "çelişki"]
+    if not rows:
+        return "Çelişki taraması yapıldı; CV, sözlü beyan ve kayıt formu arasında belirgin bir çelişki tespit edilmedi."
+    lines = []
+    for r in rows:
+        src = "; ".join(f"{k}: {v}" for k, v in (r.get("kaynaklar") or {}).items())
+        lines.append(f"{r['alan']} — {src}" + (f" ({r['not']})" if r.get("not") else ""))
+    return "Beyan Tutarlılığı bölümündeki tespitlerle aynı kaynaktan: " + " | ".join(lines)
+
+# ADIM 2 — "Dil Gözlemi kendi içinde çelişmeyecek (gözlem yazıp ardından 'belirtilecek dil gözlemi
+# yok' demek yasak)". Model artık UNCONDITIONAL olarak basılan bölümlerde bazen gerçek bir gözlem
+# YAZIP ardından eski alışkanlıkla kendini çürüten bir dolgu cümlesi de ekleyebilir — bu cümle
+# (yalnız KENDİSİ, gerçek gözlem cümlesi DEĞİL) çıkarılır.
+_SELF_NEGATING_FILLER_RE = re.compile(r"belirtilecek (?:bir )?[\wçğıöşü ]{0,30}\byok\b\.?", re.IGNORECASE)
+
+def strip_self_negating_filler(text: str) -> tuple:
+    if not text:
+        return text, []
+    sents = re.split(r'(?<=[.!?])\s+', text)
+    kept, dropped = [], []
+    for s in sents:
+        if _SELF_NEGATING_FILLER_RE.search(s):
+            dropped.append(s.strip())
+        else:
+            kept.append(s)
+    return " ".join(kept).strip(), dropped
+
+_NO_TIMESTAMP_EVIDENCE_FALLBACK = "Doğrulanabilir kanıt bulunamadı."
+_NO_NARRATIVE_EVIDENCE_FALLBACK = "Bu bölüm için mülakatta doğrulanabilir bir bulgu tespit edilmedi."
+
+def finalize_narrative_section(raw_text: str, require_timestamp: bool = False) -> str:
+    """ADIM 2 — bölümler artık KOŞULSUZ basılır: veri yoksa/klişe temizliği sonrası boş kalırsa
+    (ya da require_timestamp=True iken hiç [mm:ss] damgası yoksa — Analitik/Problem Çözme/Kavrama
+    ve İletişim için ZORUNLU) sabit bir 'değerlendirilemedi' metni döner; bölüm BAŞLIĞI hiçbir
+    zaman gizlenmez (finalize_interview'daki çağıran artık bu bölümleri koşulsuz parts.append eder)."""
+    text = (raw_text or "").strip()
+    if text:
+        text, _ = strip_self_negating_filler(text)
+    if not text:
+        return _NO_TIMESTAMP_EVIDENCE_FALLBACK if require_timestamp else _NO_NARRATIVE_EVIDENCE_FALLBACK
+    if require_timestamp and not _TS_RE.search(text):
+        return _NO_TIMESTAMP_EVIDENCE_FALLBACK
+    return text
 
 # GÖREV 1.7 — Profil Veto Kontrolü: eski mimaride modelin kendi yazdığı "[VETO: ...]" etiketine
 # dayanıyordu (detect_profile_veto, artık orphan — 2026-09 yeniden tasarımında ÇAĞRILMAZ hale
@@ -9394,7 +9492,9 @@ def strip_narrative_conflicts_with_disqualified(text: str, disqualified_names: l
 # kaldırdığı için burada çıplak "Ad:" biçiminde eşleşir).
 _KNOWN_REPORT_HEADINGS = ("Yönetici Özeti", "Puanlama Kapsamı", "Analitik Düşünme ve Muhakeme",
                           "Problem Çözme ve Karar Verme Yaklaşımı", "Kavrama ve İletişim",
+                          "Tutarlılık / Çelişki Analizi",
                           "Öne Çıkan Proje ve Deneyimler", "CV ↔ Mülakat ↔ Pozisyon Uyumu",
+                          "Değerlendirilemeyen Alanlar",
                           "Dil Gözlemi", "Pozisyon Yetkinlikleri", "Kişisel ve Bilişsel Profil",
                           "İkinci Değerlendirici Görüşü", "Güçlü Yönler", "Gelişim Alanları",
                           "Görüntü ve Ses Gözlemi", "CV Özeti", "Beyan Tutarlılığı", "Genel Kanı",
@@ -10689,12 +10789,34 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
         if "Yönetici Özeti" in secs:
             story.append(Paragraph("Yönetici Özeti", styles["Section"]))
             _emit_report_block(secs["Yönetici Özeti"])
+        # İş emri — RAPOR ANLATI KATMANI GERİ EKLEME (2026-09) / ADIM 1 KÖK NEDEN, ADIM 2 DÜZELTME:
+        # bu döngü ("Pozisyon Yetkinlikleri", ...) ile _KNOWN_REPORT_HEADINGS (_split_report_sections'ın
+        # kullandığı, GÖREV1 turunda 10 yeni başlıkla güncellenen liste) İKİ AYRI, BAĞIMSIZ liste idi.
+        # _split_report_sections yeni başlıkları DOĞRU ayırıyordu (secs sözlüğünde vardı) ama BU DÖNGÜ
+        # onları hiç ZİYARET ETMİYORDU — içerik VARDI, PDF'e hiç YAZILMIYORDU (kanıt: Profil Veto
+        # Kontrolü, "Kişisel ve Bilişsel Profil" bloğunun İÇİNE gömülü olduğu için basılıyordu, ama
+        # bağımsız "Puanlama Kapsamı" gibi başlıklar hiç görünmüyordu — aynı finalize_interview
+        # çalıştırmasında biri basılıp diğerinin basılmaması bu ayrımı KANITLADI). Mevcut 30 test bunu
+        # YAKALAMADI çünkü hepsi `interviews.report` (finalize_interview'ın yazdığı DB metni) OKUYORDU,
+        # PDF'i HİÇ ÜRETMİYORDU — bu döngü yalnız _make_report_pdf İÇİNDE, ayrı bir kod yolu.
+        # ADIM 3 koruma testiyle bulundu (bu turda): başlık metni Paragraph'a DOĞRUDAN veriliyordu,
+        # ptxt() ÜZERİNDEN GEÇMİYORDU — "CV ↔ Mülakat ↔ Pozisyon Uyumu" başlığındaki ↔ karakteri
+        # Vera yedek fontunda (DejaVu/Noto bulunamayan ortamlarda, bkz. register_unicode_font)
+        # glif karşılığı olmadığı için sessizce .notdef'e düşüyor, PDF metninde \x00 olarak çıkıyordu
+        # (pdfminer ile doğrulandı) — gövde metninde zaten var olan ptxt() ok-karakteri yedeğini
+        # başlıklara da uygula.
+        for _head in ("Puanlama Kapsamı", "Analitik Düşünme ve Muhakeme", "Problem Çözme ve Karar Verme Yaklaşımı",
+                     "Kavrama ve İletişim", "Tutarlılık / Çelişki Analizi", "Öne Çıkan Proje ve Deneyimler",
+                     "CV ↔ Mülakat ↔ Pozisyon Uyumu", "Değerlendirilemeyen Alanlar", "Dil Gözlemi", "Genel Kanı"):
+            if _head in secs:
+                story.append(Paragraph(ptxt(_head), styles["Section"]))
+                _emit_report_block(secs[_head])
         _render_score_table()
         for _head in ("Pozisyon Yetkinlikleri", "Kişisel ve Bilişsel Profil", "İkinci Değerlendirici Görüşü",
                      "Güçlü Yönler", "Gelişim Alanları", "Görüntü ve Ses Gözlemi", "CV Özeti",
-                     "Beyan Tutarlılığı", "Takip Mülakatı İçin Önerilen Sorular"):
+                     "Beyan Tutarlılığı", "Öneri Gerekçesi", "Takip Mülakatı İçin Önerilen Sorular"):
             if _head in secs:
-                story.append(Paragraph(_head, styles["Section"]))
+                story.append(Paragraph(ptxt(_head), styles["Section"]))
                 _emit_report_block(secs[_head])
 
     # ============ Metodoloji Notu (iş emri madde 16) — ana raporun sonu, DETERMİNİSTİK ============
@@ -11040,12 +11162,21 @@ def regenerate_report(candidate_id: int, background_tasks: BackgroundTasks, leve
                     _seen_dg = True
                 _dedup.append(e)
             _events = _dedup
+            # İş emri — RAPOR ANLATI KATMANI GERİ EKLEME / ADIM 2 ("Örnekten taşınmayacak kusurlar" —
+            # iç debug metni müşteri raporuna girmeyecek): eski metin "(rapor yeniden üretiminde
+            # düzeltildi: önceki 'erken sonlandırma' tespiti hatalıydı)" iç SÜREÇ dilinde yazılmıştı
+            # ve müşteriye giden "Sonuç Gerekçesi / İhlal Kaydı" bölümünde AYNEN basılıyordu
+            # (Murat AYZİT raporunda kanıtlandı). Müşteriye giden cümle artık yalnız SONUCU söyler;
+            # düzeltme sürecinin kendisi (iç bilgi) system_decision'a ayrıca loglanır.
             try:
                 db.execute("UPDATE interviews SET result_events_json=?, result_reason=?, partial=0 WHERE candidate_id=? AND level=?",
                            (json.dumps(_events, ensure_ascii=False)[:12000],
-                            "Mülakat normal tamamlandı (rapor yeniden üretiminde düzeltildi: önceki 'erken sonlandırma' tespiti hatalıydı).",
+                            "Mülakat normal şekilde tamamlanmıştır.",
                             candidate_id, level))
                 db.commit()
+                record_system_decision(candidate_id, level, "erken_sonlandirma_tespiti_geri_alindi",
+                                       "Yönetici talebiyle yeniden üretimde önceki 'erken sonlandırma' tespiti hatalı bulundu ve geri alındı (iç kayıt — müşteri raporuna girmez).",
+                                       {})
             except Exception as e:
                 print(f"UYARI (regenerate: olay/result_reason düzeltme c={candidate_id}): {type(e).__name__}: {e}")
 
