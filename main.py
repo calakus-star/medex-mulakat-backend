@@ -2598,13 +2598,32 @@ _DELEGATION_RE = re.compile(
 # İş emri — VALIDATOR KALİBRASYONU / GÖREV 3 (2026-09, sonraki tur) — bu regex yalnız "beklenmiştir"
 # (geçmiş zaman) çekimini yakalıyordu; Yönetici Özeti'nde GERÇEKTEN kullanılan "beklenmektedir"
 # (şimdiki zaman-geniş, çok daha yaygın çekim) ve "gerektiği" biten kalıp HİÇBİRİNE takılmadı —
-# canlı örnekte 4/5 kaçtı ("somut örnekler sunması beklenmektedir", "daha fazla operasyonel detay
-# ... sunması beklenmektedir", "somut örneklerle desteklemesi beklenmektedir", "daha fazla derinlik
-# ve inisiyatif alması gerektiği"). Artık HER İKİ çekim de (mi[şs]tir/mektedir/iyor) + "gerektiği".
+# canlı örnekte 4/5 kaçtı. "daha <X> ... beklen*/gerektiği" kalıbı artık _BANNED_PHRASE_FAMILY_RE'nin
+# genelleştirilmiş "daha <HERHANGİ SIFAT>" dalına TAŞINDI (KAYIP ANLATI BÖLÜMLERİ turu — "daha
+# fazla" sabit ön eki "daha somut ... gerekmektedir" gibi varyantları üçüncü kez kaçırdı); burada
+# yalnız "daha" ÖN EKİ OLMADAN geçen "sunması/yapması/... beklenmektedir" kalıbı kalıyor.
 _EXPECTATION_PHRASE_RE = re.compile(
-    r"daha [\wçğıöşü]+(?:\s+[\wçğıöşü]+){0,4}\s+(?:beklen(?:mi[şs]tir|mektedir|iyor)|gerekti[ğg]i)"
-    r"|(?:sunmas[ıi]|yapmas[ıi]|g[öo]stermesi|almas[ıi]|destekle(?:mesi|nmesi))(?:\s+[\wçğıöşü]+){0,4}\s+beklen(?:mi[şs]tir|mektedir|iyor)",
+    r"(?:sunmas[ıi]|yapmas[ıi]|g[öo]stermesi|almas[ıi]|destekle(?:mesi|nmesi))(?:\s+[\wçğıöşü]+){0,4}\s+beklen(?:mi[şs]tir|mektedir|iyor)",
     re.IGNORECASE)
+
+# İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 2.2 (2026-09, sonraki tur) — SABİT KALIP LİSTESİ üç
+# kez art arda kaçırıldı ("daha fazla" → "daha somut", "beklenmiştir" → "beklenmektedir", vb.);
+# artık YAPISAL bir kısıt da var: Yönetici Özeti'nde ZORUNLULUK KİPİ (-meli/-malı — Türkçede bu
+# çekim HER ZAMAN "yapılması gereken bir şey" anlamına gelir, geçmişte YAPILANI anlatan bir
+# özette neredeyse hiç meşru kullanımı yoktur) tek başına yeterli bir sinyal. Yalnız Yönetici
+# Özeti'ne uygulanır (kriter hücreleri/Güçlü Yönler gibi diğer serbest metinlerde -meli/-malı
+# başka bağlamlarda geçebilir; scope dar tutuldu).
+_MODAL_OBLIGATION_RE = re.compile(r"\b[a-zçğıöşü]+(?:meli|mal[ıi])(?:dir|d[ıi]r)?\b", re.IGNORECASE)
+
+def detect_future_expectation(text: str) -> list:
+    """GÖREV 2.2 — Yönetici Özeti'nde GELECEĞE DÖNÜK BEKLENTİ cümlesi tespiti: banned_phrase_hits
+    (genişletilmiş kalıp ailesi) + zorunluluk kipi (-meli/-malı) BİRLİKTE. Yalnız tespit eder,
+    çağıran (finalize_interview) retry tetikler."""
+    if not text:
+        return []
+    hits = banned_phrase_hits(text)
+    hits += [m.group(0) for m in _MODAL_OBLIGATION_RE.finditer(text)]
+    return hits
 
 # İş emri GÖREV 1.1 — kriter gerekçelerinde klişe kalıp DETEKSİYONU (siler/düzeltmez — bir kalıbı
 # cümle ORTASINDAN çıkarmak grameri bozar; bu, GÖREV 5'in takip-sorusu SATIRLARINI çıkarmasından
@@ -2637,13 +2656,21 @@ def detect_evidence_cliches(text: str) -> list:
 # vermemiştir/sunamamıştır", "yeterli <ne olursa olsun> sunamamıştır", "yeterince <...>mamıştır",
 # "somut <ne olursa olsun> verememiştir". GÖSTERDİĞİ ve EKSİK alanlarının İKİSİNE de uygulanır
 # (validate_criterion_fields) — model klişeyi hangi alana yazarsa yazsın yakalanır.
+# İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 2 (2026-09, sonraki tur) — "daha fazla" SABİT ÖN EKİ
+# ÜÇÜNCÜ kez kaçırdı: gerçek örnekte "daha SOMUT örnekler vermesi GEREKMEKTEDİR" kullanıldı —
+# "daha fazla" değil "daha somut", "gerekmektedir" değil (bu turda _EXPECTATION_PHRASE_RE'de
+# olmayan bir bitiş). "daha fazla" artık "daha <HERHANGİ bir sıfat>" olarak genelleştirildi VE
+# bitiş fiil ailesi (gerekmektedir/gerekiyor/gerektiği/beklenmektedir/beklenmiştir/bekleniyor)
+# TEK bir yerde toplandı — iki ayrı regex'te (biri "daha fazla", öbürü yalnız "gerektiği/beklen*")
+# YARIM YARIM tutulmasının kaçırdığı boşluk kapatıldı.
+_FUTURE_VERB_ENDINGS = (r"(?:gerekmektedir|gerekiyor|gerekti[ğg]i|beklenmektedir|beklenmi[şs]tir|bekleniyor|"
+                       r"sunmam[ıi][şs]t[ıi]r|vermemi[şs]tir|sunamam[ıi][şs]t[ıi]r|aktaramam[ıi][şs]t[ıi]r|"
+                       r"anlatmam[ıi][şs]t[ıi]r)")
 _BANNED_PHRASE_FAMILY_RE = re.compile(
-    r"daha fazla [\wçğıöşü]+(?:\s+[\wçğıöşü]+){0,3}\s+(?:gerekmektedir|gerekiyor|sunmam[ıi][şs]t[ıi]r|"
-    r"vermemi[şs]tir|sunamam[ıi][şs]t[ıi]r|aktaramam[ıi][şs]t[ıi]r)"
+    r"daha [\wçğıöşü]+(?:\s+[\wçğıöşü]+){0,4}\s+" + _FUTURE_VERB_ENDINGS +
     r"|yeterli [\wçğıöşü]+(?:\s+[\wçğıöşü]+){0,3}\s+(?:sunamam[ıi][şs]t[ıi]r|sa[ğg]lamam[ıi][şs]t[ıi]r|verememi[şs]tir)"
     r"|yeterince [\wçğıöşü]+(?:mam[ıi][şs]t[ıi]r|memi[şs]tir)"
-    r"|somut [\wçğıöşü]+(?:\s+[\wçğıöşü]+){0,3}\s+(?:verememi[şs]tir|sunamam[ıi][şs]t[ıi]r|olu[şs]turamam[ıi][şs]t[ıi]r)"
-    r"|daha derin [\wçğıöşü]+(?:\s+[\wçğıöşü]+){0,3}\s+(?:anlatmam[ıi][şs]t[ıi]r|aktaramam[ıi][şs]t[ıi]r)",
+    r"|somut [\wçğıöşü]+(?:\s+[\wçğıöşü]+){0,3}\s+(?:verememi[şs]tir|sunamam[ıi][şs]t[ıi]r|olu[şs]turamam[ıi][şs]t[ıi]r)",
     re.IGNORECASE)
 
 def banned_phrase_hits(text: str) -> list:
@@ -2728,11 +2755,29 @@ def _tr_upper(s: str) -> str:
 
 _REPORT_SECTION_ALIASES = {
     _tr_upper("Yönetici Özeti"): "yonetici_ozeti",
+    # İş emri — KAYIP ANLATI BÖLÜMLERİ (2026-09, sonraki tur) / GÖREV 1.1 — eski (2026-09-08
+    # öncesi) rapor formatında Yönetici Özeti ile kriter tabloları ARASINDA bir anlatı katmanı
+    # vardı (Analitik Düşünme, Problem Çözme, Kavrama ve İletişim, Öne Çıkan Proje, CV↔Mülakat↔
+    # Pozisyon Uyumu, Dil Gözlemi); 2026-09 yeniden tasarımında bu katman "iş emrinin 14 bölümlük
+    # listesine dahil değil" gerekçesiyle TAMAMEN atlandı — ama bu katman kararı GEREKÇELENDİREN
+    # katmandı, kaybı fark edilmeden geçti. Aşağıdaki 6 anahtar bu katmanı GERİ getiriyor (YENİ
+    # kalite kurallarıyla — bkz. build_report_content_prompt). "Tutarlılık / Çelişki Analizi" ve
+    # "Değerlendirilemeyen Alanlar" BİLİNÇLİ OLARAK yeniden eklenmedi — işlevleri sırasıyla KORUNAN
+    # Beyan Tutarlılığı (deterministik) ve YENİ Puanlama Kapsamı (deterministik) bölümleriyle ZATEN
+    # karşılanıyor; aynı bilgiyi iki ayrı bölümde tekrar etmek bu iş emri serisinin baştan beri
+    # savaştığı "tekrar" sorununu yeniden üretirdi.
+    _tr_upper("Analitik Düşünme ve Muhakeme"): "analitik_dusunme",
+    _tr_upper("Problem Çözme ve Karar Verme Yaklaşımı"): "problem_cozme",
+    _tr_upper("Kavrama ve İletişim"): "kavrama_iletisim",
+    _tr_upper("Öne Çıkan Proje ve Deneyimler"): "one_cikan_proje",
+    _tr_upper("CV ↔ Mülakat ↔ Pozisyon Uyumu"): "cv_mulakat_pozisyon_uyumu",
+    _tr_upper("Dil Gözlemi"): "dil_gozlemi",
     _tr_upper("Pozisyon Yetkinlikleri"): "pozisyon_yetkinlikleri",
     _tr_upper("Kişisel ve Bilişsel Profil"): "profil",
     _tr_upper("Güçlü Yönler"): "guclu_yonler",
     _tr_upper("Gelişim Alanları"): "gelisim_alanlari",
     _tr_upper("CV Özeti"): "cv_ozeti",
+    _tr_upper("Genel Kanı"): "genel_kani",
     _tr_upper("Takip Mülakatı Soruları"): "takip_sorulari",
 }
 
@@ -2757,14 +2802,39 @@ def parse_llm_report_sections(text: str) -> dict:
     return out
 
 def build_report_content_prompt(criteria_table_filled: str, profile_table_filled: str) -> str:
-    """Modelden istenen TEK gövde: 7 bölüm, ===BAŞLIK=== ayraçlı. L1/L2/L3 ORTAK — seviyeler
-    arası içerik farkı yoktur (iş emri madde 3'teki bölüm listesi seviyeden bağımsızdır); CV
-    yoksa/kamera-ses yoksa ilgili içerik zaten deterministik katmanda atlanır, modele ayrı
-    bir 'seviye talimatı' verilmesine gerek yok."""
-    return f"""Aşağıdaki YEDİ bölümü, TAM OLARAK bu sırayla ve TAM OLARAK bu ayraçlarla üret. Ayraç satırlarını (===...===) AYNEN kopyala; başka hiçbir başlık/ayraç EKLEME. Bir bölümde yazacak GERÇEKTEN somut bir şey yoksa o bölümün içeriğine SADECE "YOK" yaz (sistem o bölümü rapordan çıkarır) — asla "belirtilecek bir şey yok" gibi dolgu cümle kurma, asla "-", "—" veya "bulunmamaktadır" yazma.
+    """Modelden istenen TEK gövde: 13 bölüm, ===BAŞLIK=== ayraçlı. L1/L2/L3 ORTAK — seviyeler
+    arası içerik farkı yoktur; CV yoksa/kamera-ses yoksa ilgili içerik zaten deterministik
+    katmanda atlanır, modele ayrı bir 'seviye talimatı' verilmesine gerek yok.
+    İş emri — KAYIP ANLATI BÖLÜMLERİ (2026-09, sonraki tur) — 6 bölüm (Analitik Düşünme,
+    Problem Çözme, Kavrama ve İletişim, Öne Çıkan Proje, CV↔Mülakat↔Pozisyon Uyumu, Dil Gözlemi)
+    Yönetici Özeti'nden HEMEN SONRA, ve Genel Kanı raporun SONUNDA (Takip Soruları'ndan önce)
+    eklendi — eski (2026-09-08 öncesi) formatta vardı, yeniden tasarımda kayboldu; kararı
+    GEREKÇELENDİREN katmandı. Puanlama Kapsamı/Öneri Gerekçesi/Profil Veto Kontrolü modelden
+    İSTENMEZ — TAMAMEN deterministik (bkz. render_puanlama_kapsami/render_oneri_gerekcesi/
+    render_profile_veto_control, finalize_interview/append_reviewer_section içinde eklenir)."""
+    return f"""Aşağıdaki bölümleri, TAM OLARAK bu sırayla ve TAM OLARAK bu ayraçlarla üret. Ayraç satırlarını (===...===) AYNEN kopyala; başka hiçbir başlık/ayraç EKLEME. Bir bölümde yazacak GERÇEKTEN somut bir şey yoksa o bölümün içeriğine SADECE "YOK" yaz (sistem o bölümü rapordan çıkarır) — asla "belirtilecek bir şey yok" gibi dolgu cümle kurma, asla "-", "—" veya "bulunmamaktadır" yazma. Aşağıdaki HİÇBİR bölümde yasak kalıp (banned_phrase_hits — "daha fazla/somut/derin ... gerekmektedir/beklenmektedir/gerektiği" ailesi, "beklenmiştir" ailesi) KULLANMA; sistem bunu tespit edip o CÜMLEYİ siler. Hiçbir bölümde bir kriterin KANIT alanındaki veya Pozisyon/Profil tablolarındaki cümleyi AYNEN tekrar ETME. Sorulmamış bir konuda eksiklik/olumsuz yargı YAZMA.
 
 ===YÖNETİCİ ÖZETİ===
-2-3 kısa paragraf, TOPLAM yaklaşık 150-250 kelime (bu sınırı AŞMA). İçerik: aday kim, hangi deneyime sahip; mülakatta NEYİ SOMUT OLARAK gösterdi; hangi konularda güçlü, hangi konularda değil; pozisyona uygunluk açısından sonuç. Dakika damgası KULLANMA (detay aşağıdaki bölümlerde). Bir karar/öneri kelimesi (Reddet/İşe Al/Değerlendir vb.) YAZMA — karar ayrı, sistem tarafından üretilir. Boş/klişe ifade YASAK (aşağıdaki "YASAK KALIPLAR" listesi burada da geçerli). Aşağıdaki bölümlerdeki cümleleri AYNEN kopyalama.
+2-3 kısa paragraf, TOPLAM yaklaşık 150-250 kelime (bu sınırı AŞMA). İçerik: aday kim, hangi deneyime sahip; mülakatta NEYİ SOMUT OLARAK gösterdi; hangi konularda güçlü, hangi konularda değil; pozisyona uygunluk açısından sonuç. Dakika damgası KULLANMA (detay aşağıdaki bölümlerde). Bir karar/öneri kelimesi (Reddet/İşe Al/Değerlendir vb.) YAZMA — karar ayrı, sistem tarafından üretilir. Aşağıdaki bölümlerdeki cümleleri AYNEN kopyalama.
+KESİN YASAK — GELECEĞE DÖNÜK BEKLENTİ CÜMLESİ KURMA ("aday X yapmalı/sunmalı/göstermeli", "...beklenmektedir", "...gerekmektedir/gerektiği" gibi "adayın NE YAPMASI GEREKTİĞİ" cümleleri) — bu özet adayın MÜLAKATTA NE YAPTIĞINI/GÖSTERDİĞİNİ anlatır, ne yapması gerektiğini DEĞİL (o Gelişim Alanları'nın işi). Bu ihlal edilirse sistem cümleyi SİLER.
+
+===ANALİTİK DÜŞÜNME VE MUHAKEME===
+1-2 cümle, EN AZ BİR [dk] damgasıyla: adayın problemi nasıl parçaladığı, neden-sonuç kurma biçimi, veri/örnek kullanımı — somut. Pozisyon/Profil tablolarındaki gerekçenin TEKRARI OLMAYACAK (orada puan gerekçesi var, burada niteliksel bir gözlem). Somut bir şey yoksa YOK yaz.
+
+===PROBLEM ÇÖZME VE KARAR VERME YAKLAŞIMI===
+1-2 cümle, EN AZ BİR [dk] damgasıyla: izlediği yöntem, düşündüğü seçenekler, riskler, sonucu nasıl takip ettiği — somut. Tekrarı olmayacak. Somut bir şey yoksa YOK yaz.
+
+===KAVRAMA VE İLETİŞİM===
+1-2 cümle, EN AZ BİR [dk] damgasıyla: soruyu doğru anlama, cevabı yapılandırma, açıklık — ya da tersi (dağılma, yanlış anlama). Tekrarı olmayacak. Somut bir şey yoksa YOK yaz.
+
+===ÖNE ÇIKAN PROJE VE DENEYİMLER===
+Transkriptte anlatılan GERÇEKTEN somut bir proje/deneyim varsa (adayın kişisel katkısı + sonucu), [dk] damgasıyla özetle. Güçlü Yönler'in TEKRARI OLMAYACAK (orası yetkinlik değerlendirmesi/yorumu, burası SOMUT olay/proje anlatımı — salt aktarım, yorum yok). Böyle bir proje/deneyim anlatılmadıysa YOK yaz.
+
+===CV ↔ MÜLAKAT ↔ POZİSYON UYUMU===
+Üç soruyu cevapla: (a) CV'de/sözlü beyanda iddia edilen yetkinlikler mülakatta doğrulandı mı, (b) pozisyonun ÇEKİRDEK alanıyla adayın fiili çalışma alanı örtüşüyor mu, (c) alan dışı/devretme beyanı varsa (ör. "benim alanım değil", "yöneticime sorarım") burada da SOMUT belirt. Beyan Tutarlılığı bölümünden FARKLIDIR (o sayısal/kimlik alanı karşılaştırması — deneyim yılı, eğitim, tarih; bunu TEKRARLAMA), bu bölüm YETKİNLİK-POZİSYON uyumu. Somut bir şey yoksa YOK yaz.
+
+===DİL GÖZLEMİ===
+Adayın dil tercihine/hakimiyetine dair GERÇEKTEN somut bir gözlem varsa (hangi konuda dil değiştirdiği, pozisyonun dil gereksinimiyle ilişkisi) yaz. Gözlem YOKSA "YOK" yaz (sistem bölümü hiç basmaz) — "Belirtilecek bir dil gözlemi yok" gibi kendini çürüten dolgu cümle YASAK.
 
 ===POZİSYON YETKİNLİKLERİ===
 {criteria_table_filled}
@@ -2787,7 +2857,10 @@ Her madde PARAGRAF halinde (tek satır/etiket DEĞİL) — bir madde: (a) aday N
 Her madde PARAGRAF halinde: (a) aday NE YAPAMIYOR/NEREDE ZORLANDI, (b) hangi somut senaryoda/soruda kendini gösterdi ([dk] damgasıyla), (c) bu eksiğin işte YARATABİLECEĞİ SOMUT RİSK. Risk niteliğinde bir bulgu varsa (tutarsız beyan, mevzuata aykırı yaklaşım, iç kontrol zaafı, ALAN DIŞI/DEVRETME beyanı — bkz. ÖNCEL KURAL, kurumsal ortamda çalışmayı zorlaştıracak somut bir tutum/davranış vb.) paragrafın başına "RİSK:" yaz — bir kriterde ALAN DIŞI/DEVRETME beyanı tespit ettiysen bunu BURADA da RİSK olarak belirtmen ZORUNLUDUR (sistem, hiç belirtilmediyse kendisi bir RİSK paragrafı ekler). Kanıtsız gelişim alanı üretme; madde sayısı gerçekten olan kadar. Kriter gerekçelerinin TEKRARI OLMAYACAK (yukarıdaki not — Güçlü Yönler için de geçerli). Genel ifade YASAK ("analitik düşünmede derinlik eksikliği" değil, hangi senaryoda nasıl zorlandığı). Bir RİSK paragrafının [dk] damgası transkriptte GERÇEKTEN var olan bir ana karşılık gelmiyorsa sistem o paragrafı rapordan ÇIKARIR — damgasız/uydurma RİSK YAZMA.
 
 ===CV ÖZETİ===
-CV metninden ve/veya adayın mülakatta SÖZLÜ beyan ettiğinden yalnızca GERÇEKTEN bilgi olan alanları, her biri ayrı satırda, şu etiketlerle yaz: Eğitim / Deneyim / Teknik Yetkinlikler / Sektör Yetkinlikleri / Diller / Sertifikalar. Bilgi CV'de yoksa ama adayın SÖZLÜ beyanından geliyorsa satırın sonuna "(kaynak: sözlü beyan)" ekle. Bir alanda hiç bilgi YOKSA o satırı hiç YAZMA (atla). Bu bölümde DEĞERLENDİRME/yorum yapma, yalnız özetle.
+CV metninden ve/veya adayın mülakatta SÖZLÜ beyan ettiğinden yalnızca GERÇEKTEN bilgi olan alanları, her biri ayrı satırda, şu etiketlerle yaz: Eğitim, Deneyim, Teknik Yetkinlikler, Sektör Yetkinlikleri, Diller, Sertifikalar. HER SATIRI TAM OLARAK "Etiket: içerik" biçiminde yaz — etiket ile içerik arasına İKİ NOKTA (:) koy, ASLA slash (/) veya başka bir ayraç kullanma (ör. "Eğitim: Ticaret Meslek Lisesi mezunu" — "Eğitim / Ticaret Meslek Lisesi mezunu" DEĞİL). Adayın SÖZLÜ beyanındaki SPESİFİK ifadeyi AYNEN kullan, GENELLEŞTİRME/kısaltma yapma (ör. aday "ticaret meslek lisesi mezunuyum" dediyse "Ticaret Meslek Lisesi mezunu" yaz — asla daha genel bir kategoriye, ör. sadece "Lise mezunu", İNDİRGEME). Bilgi CV'de yoksa ama adayın SÖZLÜ beyanından geliyorsa satırın sonuna "(kaynak: sözlü beyan)" ekle. Bir alanda hiç bilgi YOKSA o satırı hiç YAZMA (atla). Bu bölümde DEĞERLENDİRME/yorum yapma, yalnız özetle.
+
+===GENEL KANI===
+2-4 cümlelik bir SENTEZ: kriter tabloları, Güçlü Yönler, Gelişim Alanları ve CV↔Mülakat↔Pozisyon Uyumu'ndaki bulguları BİR ARAYA getiren bütüncül bir kanı. Bir karar/öneri kelimesi (Reddet/İşe Al/Değerlendir) YAZMA — o ayrı, sistem tarafından üretilir. Yukarıdaki bölümlerin cümlelerini AYNEN tekrar ETME, sentezle. Somut bir sentez kurulamıyorsa YOK yaz.
 
 ===TAKİP MÜLAKATI SORULARI===
 En fazla 3-5 soru (üst sınır — hedef DEĞİL: somut belirsizlik azsa 3'ten az da yazabilirsin, hatta hiç olmayabilir). YALNIZ bu mülakatta ortaya çıkan SOMUT belirsizliklere yönelik olsun. Her soru şu kaynaklardan birine dayanmalı: (a) adayın cevap veremediği/atladığı bir soru, (b) adayın kendi ağzıyla belirttiği bir bilgi eksikliği, (c) örnek istenip alınamayan/yüzeysel kalmış bir cevap, (d) CV'de yazılı olup mülakatta doğrulanamayan bir yetkinlik, (e) ikinci değerlendiricinin işaret edebileceği türden bir belirsizlik. Her sorunun transkriptte somut bir dayanağı olmalı.
@@ -2815,13 +2888,20 @@ Somut bir belirsizlik YOKSA "YOK" yaz — sayıyı tamamlamak için soru uydurma
 # yakalandı. Artık GÖREV 5.4'ün ayırt edici ilkesine (GELECEK PLANI vs GEÇMİŞ/BİLGİ) göre genel
 # desenler de yakalanıyor: "...planlıyorsunuz" (planlamak HER ZAMAN gelecek-yönelimlidir) ve
 # "yararlanmayı/kullanmayı/geliştirmeyi/uygulamayı düşünüyorsunuz" (gelecek niyeti sorgusu).
+# İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 3.1 (2026-09, sonraki tur) — "...düşünüyorsunuz" YALNIZ
+# belirli fiillerin (yararlanmayı/kullanmayı/...) ARDINDAN aranıyordu; "nasıl geliştirebileceğinizi
+# düşünüyorsunuz" bambaşka bir çekim (-ebileceğinizi, yeterlilik+gelecek nominalizasyonu) kullandığı
+# için KAÇTI. Artık "düşünüyorsunuz" TEK BAŞINA (hangi fiilin ardından gelirse gelsin) yakalanıyor —
+# bu bağlamda (takip sorusu, adaya yöneltilen) HER ZAMAN gelecek niyeti/planı sorgusudur, GEÇMİŞE
+# dayalı bir soru "düşünüyorsunuz" ile bitmez. Ayrıca kesin gelecek kipi ("-eceksiniz/-acaksınız").
 _FORBIDDEN_FOLLOWUP_RE = re.compile(
     r"planl[ıi]yorsunuz"
-    r"|(?:yararlanmay[ıi]|kullanmay[ıi]|geli[şs]tirmeyi|uygulamay[ıi]|a[şs]may[ıi]) d[üu][şs][üu]n[üu]yorsunuz"
+    r"|d[üu][şs][üu]n[üu]yorsunuz"
     r"|nas[ıi]l bir geli[şs]im plan[ıi]"
     r"|hangi kaynaklar[ıi]?(?:dan)? kullanabilirsiniz"
     r"|hangi strateji(?:leri)? uygulayabilirsiniz"
-    r"|daha fazla bilgi ver(?:ebilir|ir) misiniz",
+    r"|daha fazla bilgi ver(?:ebilir|ir) misiniz"
+    r"|[ae]ceksiniz\b",
     re.IGNORECASE)
 
 def detect_forbidden_followup_patterns(text: str) -> list:
@@ -3099,6 +3179,12 @@ def decide_recommendation(genel_puan) -> Optional[str]:
 # kalma parantez açıklamaları + eski terminoloji (PUAN 1/2, AI-1/2, birinci/ikinci model, veto
 # vb.). Kaynak metinlerdeki bu ifadeler KAYNAKTA da ayrıca temizlendi (aşağıdaki liste SON bir
 # güvenlik ağıdır — modelin veya eski kod yollarının kaçırdığı bir şey varsa burada yakalanır).
+# NOT (KAYIP ANLATI BÖLÜMLERİ turu, 2026-09 sonraki tur) — "veto yok" listeden ÇIKARILDI: o zaman
+# bu, modelin eski mimaride kendiliğinden yazabildiği bir DOLGU ifadeydi (yasaklanması doğruydu).
+# GÖREV 1.7 ile Profil Veto Kontrolü artık DETERMİNİSTİK olarak "Veto yok." metnini KENDİSİ
+# üretiyor — bu artık meşru bir sistem çıktısı, dolgu değil; listede kalsaydı scrub_forbidden_
+# phrases KENDİ ürettiğimiz metni sessizce siliyordu (sentetik testte yakalandı — "Profil Veto
+# Kontrolü:." biçiminde, metni eksik basıyordu).
 FORBIDDEN_PHRASES = [
     "(sistem — deterministik)", "(sistem - deterministik)",
     "(eşik tablosundan)", "(esik tablosundan)",
@@ -3109,7 +3195,7 @@ FORBIDDEN_PHRASES = [
     "kararı değiştirmez", "karari degistirmez",
     "normalize yöntemiyle", "normalize yontemiyle",
     "ham puan", "payda dışı", "payda disi",
-    "veto yok", "belirgin çelişki yok", "belirgin celiski yok",
+    "belirgin çelişki yok", "belirgin celiski yok",
     "0 kriter eksik",
     "puan 1", "puan 2",
     "birinci model", "ikinci model", "ai-1", "ai-2",
@@ -6045,40 +6131,33 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     except Exception as e:
         print(f"UYARI (append_reviewer_section devralma c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
-    # İş emri GÖREV 1.4 (devam) — devralma SONRASI düşme oranı YENİDEN hesaplanır: not artık
-    # eşiğin (%25) altındaysa KALDIRILIR, hâlâ üstündeyse (devralınan kriterler düşmüş sayılmaz,
-    # sayı azalmış olabilir) GÜNCELLENİR — finalize_interview'daki not yalnız birincil-tek-başına
-    # durumu yansıttığı için burada GÜNCEL kalması gerekir.
+    # İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 1.4 (devam, sonraki tur) — devralma SONRASI
+    # "Puanlama Kapsamı" bölümü (HER ZAMAN vardır — bkz. render_puanlama_kapsami) YENİDEN
+    # HESAPLANIR ve GÜNCELLENİR: devralınan kriterler artık düşmüş sayılmaz.
     try:
-        _still_dropped = len(_DISQUALIFIED_CELL_RE.findall(pos_table_text)) + len(_DISQUALIFIED_CELL_RE.findall(prof_table_text))
+        _dropped_pos2 = []
+        for _ln in pos_table_text.splitlines():
+            if _DISQUALIFIED_CELL_RE.search(_ln):
+                _c0 = _ln.strip().strip("|").split("|")[0].strip()
+                if _c0:
+                    _dropped_pos2.append(_c0)
+        _dropped_prof2 = []
+        for _ln in prof_table_text.splitlines():
+            if _DISQUALIFIED_CELL_RE.search(_ln):
+                _c0 = _ln.strip().strip("|").split("|")[0].strip()
+                if _c0:
+                    _dropped_prof2.append(_c0)
+        _new_kapsami_text = render_puanlama_kapsami(len(position_criteria or []), len(PROFILE_CRITERIA), _dropped_pos2, _dropped_prof2)
+        if _PUANLAMA_KAPSAMI_HEAD in final_report:
+            final_report = _PUANLAMA_KAPSAMI_RE.sub(_PUANLAMA_KAPSAMI_HEAD + "\n" + _new_kapsami_text, final_report, count=1)
+        _still_dropped = len(_dropped_pos2) + len(_dropped_prof2)
         _total_crit_n2 = len(position_criteria or []) + len(PROFILE_CRITERIA)
-        _has_note = _DROP_RATE_NOTE_HEAD in final_report
         if _total_crit_n2 and (_still_dropped / _total_crit_n2) > 0.25:
-            _dropped_names2 = []
-            for _tbl in (pos_table_text, prof_table_text):
-                for _ln in _tbl.splitlines():
-                    if _DISQUALIFIED_CELL_RE.search(_ln):
-                        _c0 = _ln.strip().strip("|").split("|")[0].strip()
-                        if _c0:
-                            _dropped_names2.append(_c0)
-            # NOT — "Puan {rakam}" biçimi ("Puan 1"/"Puan 2") scrub_forbidden_phrases tarafından
-            # (eski terminoloji kalıntısı temizliği) SESSİZCE siliniyordu (sentetik testte
-            # yakalandı: sayı 1 çıktığında "Genel Puan 1 kriter..." → "Genel kriter..." oluyordu).
-            # Cümle bu yüzden "Puan" kelimesini bir rakamın HEMEN ARDINDAN getirmeyecek şekilde kuruldu.
-            _new_note = (f"{_DROP_RATE_NOTE_HEAD}\nGenel puan hesaplamasına {_total_crit_n2 - _still_dropped} kriter dahil edilmiştir; "
-                        f"{_still_dropped} kriter değerlendirilemedi: {', '.join(_dropped_names2)}.")
-            final_report = _DROP_RATE_NOTE_RE.sub(_new_note, final_report, count=1) if _has_note else final_report
             record_system_decision(candidate_id, level, "yuksek_dusme_orani_guncellendi",
-                                   "GÖREV 1.4 — devralma sonrası düşme oranı hâlâ %25'in üzerinde; rapordaki not güncellendi.",
-                                   {"dusen_kriterler": _dropped_names2, "toplam_kriter": _total_crit_n2, "dusen_sayisi": _still_dropped})
-        elif _has_note:
-            final_report = _DROP_RATE_NOTE_RE.sub("", final_report, count=1)
-            final_report = re.sub(r"\n{3,}", "\n\n", final_report)
-            record_system_decision(candidate_id, level, "yuksek_dusme_orani_duzeldi",
-                                   "GÖREV 1.4 — devralma sonrası düşme oranı %25'in ALTINA indi; rapordaki uyarı notu kaldırıldı.",
-                                   {"toplam_kriter": _total_crit_n2, "dusen_sayisi": _still_dropped})
+                                   "GÖREV 1.4 — devralma sonrası düşme oranı hâlâ %25'in üzerinde; Puanlama Kapsamı güncellendi.",
+                                   {"dusen_kriterler": _dropped_pos2 + _dropped_prof2, "toplam_kriter": _total_crit_n2, "dusen_sayisi": _still_dropped})
     except Exception as e:
-        print(f"UYARI (append_reviewer_section düşme oranı güncelleme c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        print(f"UYARI (append_reviewer_section puanlama kapsamı güncelleme c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
     # İş emri GÖREV 5 EK — reviewer_contradiction_unresolved: müfettiş serbest metninde ana
     # rapordan ("...") ALINTILADIĞI bir iddiayı AÇIKÇA "desteklenmiyor/tutarlı değil/abartılı"
@@ -6514,10 +6593,9 @@ _OUT_OF_SCOPE_SCORE_CAP_RATIO = 0.25  # GÖREV 5.2 — alan dışı/devretme: ta
 # append_reviewer_section'dan çağrılır (reviewer SONRADAN, async çalıştığı için burası tek yer).
 _DISQUALIFIED_CELL_RE = re.compile(r"de[ğg]erlendirilemedi \(sistem\) — do[ğg]rulay[ıi]c[ıi] \d+ denemede", re.IGNORECASE)
 
-# GÖREV 1.4 — düşme oranı notunun başlığı; sabit bir marker olarak tutulur ki append_reviewer_section
-# devralma SONRASI bu notu bulup güncelleyebilsin/kaldırabilsin (bkz. orada).
-_DROP_RATE_NOTE_HEAD = "**Not (sistem) — Puanlama Kapsamı:**"
-_DROP_RATE_NOTE_RE = re.compile(re.escape(_DROP_RATE_NOTE_HEAD) + r".*?(?=\n\n|\Z)", re.DOTALL)
+# NOT — GÖREV 1.4'ün önceki turdaki koşullu ("yalnız %25 aşılınca görünen") notu KALDIRILDI;
+# yerine HER ZAMAN üretilen "Puanlama Kapsamı" bölümü geçti (bkz. render_puanlama_kapsami,
+# _PUANLAMA_KAPSAMI_HEAD/_PUANLAMA_KAPSAMI_RE — render_beyan_tutarliligi yakınında tanımlı).
 
 def apply_criterion_takeover(table_text: str, criteria_list: list, rv_scores: dict, rv_gerekce: dict,
                              id_prefix: str) -> tuple:
@@ -6916,20 +6994,30 @@ def apply_scope_clamp_transcript_wide(table_text: str, criteria_list: list, tran
 # ---- GÖREV 4 — Yönetici Özeti: AYRI, bağımsız bir uzunluk doğrulayıcı (kriter gerekçesi
 # sistemiyle KARIŞTIRILMAZ — iş emri açıkça "ayrı akış" istiyor). ----
 def regenerate_yonetici_ozeti(candidate_id: int, level: int, provider: str, model: str, current_text: str,
-                              word_count: int, transcript_text: str) -> Optional[str]:
+                              word_count: int, transcript_text: str, extra_context: str = "") -> Optional[str]:
     """GÖREV 4 — Yönetici Özeti hedef aralık (150-250 kelime) dışındaysa VEYA yasaklı klişe
     içeriyorsa TEK deneme ile yeniden ürettirir; mevcut içeriği koruyarak genişlet/kısalt. Başarısız
     → None (çağıran olduğu gibi basar + loglar — OTOMATİK kısaltma/uzatma YAPILMAZ, cümle ortadan
-    kesilmez)."""
-    prompt = f"""Aşağıdaki 'Yönetici Özeti' metni {word_count} kelime — hedef aralık 150-250 kelime dışında OLABİLİR ve/veya yasaklı klişe ifade içerebilir. İçeriği KORUYARAK (yeni bilgi UYDURMA, var olan gerçek bilgiyi SİLME) metni 150-250 kelime aralığına GENİŞLET/KISALT; klişe ifade varsa somut, transkript kanıtına dayalı cümleyle DEĞİŞTİR. Karar/öneri kelimesi (Reddet/İşe Al/Değerlendir) YAZMA. Dakika damgası kullanma.
+    kesilmez).
+    İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 2.1 (2026-09, sonraki tur) — OLASI KÖK NEDEN (canlı
+    log yok, kesin kanıtlanamadı ama en olası açıklama): kısa (ör. 110 kelime) bir özeti "yeni
+    bilgi UYDURMA" kısıtı ALTINDA 150-250 kelimeye GENİŞLETMEK modelden zor bir görev istiyordu —
+    modelin elinde GENİŞLETECEK somut ek malzeme YOKTU (yalnız kısa özetin kendisi + ham
+    transkript verilmişti, model transkripti YENİDEN taramak zorunda kalıyordu). Fix: extra_context
+    (kriter tablosundan kısa, GERÇEK bulgular) artık AYRICA veriliyor — model UYDURMADAN
+    genişletebileceği somut malzemeye doğrudan sahip oluyor."""
+    _extra_block = (f"\n\n=== EK GERÇEK BULGULAR (genişletirken BUNLARDAN gerçek olanları kullanabilirsin, "
+                    f"yalnız transkriptte GERÇEKTEN doğrulanmış olanları — uydurma YAPMA) ===\n{extra_context[:3000]}") if extra_context else ""
+    prompt = f"""Aşağıdaki 'Yönetici Özeti' metni {word_count} kelime — hedef aralık 150-250 kelime dışında OLABİLİR ve/veya yasaklı klişe/geleceğe-dönük-beklenti ifadesi içerebilir. İçeriği KORUYARAK (yeni bilgi UYDURMA, var olan gerçek bilgiyi SİLME) metni 150-250 kelime aralığına GENİŞLET/KISALT; klişe ifade varsa somut, transkript kanıtına dayalı cümleyle DEĞİŞTİR; "aday X yapmalı/sunmalı/göstermeli" gibi geleceğe dönük beklenti cümlesi varsa "aday NE YAPTI/GÖSTERDİ" biçimine çevir. Karar/öneri kelimesi (Reddet/İşe Al/Değerlendir) YAZMA. Dakika damgası kullanma.
 
 MEVCUT METİN ({word_count} kelime):
 {current_text}
 
 === TRANSKRİPT (ek bağlam için) ===
 {(transcript_text or '')[:8000]}
+{_extra_block}
 
-SADECE yeni Yönetici Özeti metnini yaz (başlık/etiket ekleme, açıklama yapma)."""
+SADECE yeni Yönetici Özeti metnini yaz (başlık/etiket/tırnak EKLEME, açıklama yapma)."""
     try:
         if provider == "claude":
             if not ANTHROPIC_API_KEY:
@@ -6956,7 +7044,13 @@ SADECE yeni Yönetici Özeti metnini yaz (başlık/etiket ekleme, açıklama yap
     except Exception as ex:
         print(f"UYARI (regenerate_yonetici_ozeti c={candidate_id} L{level}): {type(ex).__name__}: {ex}")
         return None
-    return (raw or "").strip() or None
+    # GÖREV 2.1 (devam) — DEFANSİF TEMİZLİK: model talimata rağmen bir başlık/tırnak/açıklama
+    # satırı eklerse (ör. 'Yönetici Özeti:' veya tırnak içinde döndürme) bu, kelime sayımını VE
+    # klişe taramasını BOZAR — temizlenmeden kullanmak retry'ın kendisini anlamsız kılabilir.
+    cleaned = (raw or "").strip()
+    cleaned = re.sub(r'(?im)^\s*(?:\*\*)?yönetici özeti(?:\*\*)?\s*[:：]?\s*\n?', '', cleaned).strip()
+    cleaned = cleaned.strip('"“”\'')
+    return cleaned or None
 
 # ---- GÖREV 3 — Takip Mülakatı Soruları: '[dayanak: mm:ss]' ile transkript-temelli doğrulama ----
 _DAYANAK_RE = re.compile(r"^\s*[-*•]?\s*\[dayanak\s*:\s*(\d{1,3}:[0-5]\d)\]", re.IGNORECASE)
@@ -7458,30 +7552,39 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     except Exception as e:
         print(f"UYARI (finalize_interview ihlal dağılımı c={candidate_id}): {type(e).__name__}: {e}")
 
-    # İş emri GÖREV 1.4 (VALIDATOR KALİBRASYONU) — DÜŞME ORANI TAVANI: tek raporda kriterlerin
-    # %25'inden fazlası "Değerlendirilemedi (sistem)" ise bu SİSTEM HATASIDIR — kanıtlı örnek:
-    # Murat AYZİT raporunda 12 kriterin 5'i (%41.7) düşmüştü, kanıtlı üç kriter dahil. Yönetici
-    # kaydına uyarı + RAPORA GÖRÜNÜR bir not düşülür (kullanıcı 47 puanın kaç kriter üzerinden
-    # çıktığını BİLMELİ). NOT: append_reviewer_section devralma sonrası bu oranı YENİDEN hesaplayıp
-    # notu günceller/kaldırır (bkz. orada) — burası yalnız İLK (birincil-değerlendirici-tek-başına)
-    # durumu yansıtır.
-    _drop_rate_note_text = ""
+    # İş emri GÖREV 1.4 (VALIDATOR KALİBRASYONU, 2026-09) — kanıtlı örnek: Murat AYZİT raporunda
+    # 12 kriterin 5'i (%41.7) düşmüştü. Yönetici kaydına uyarı YİNE yazılır (log-only).
     try:
         _total_crit_n = len(_crit) + len(PROFILE_CRITERIA)
         _dropped_n = len(_disqualified_entries)
         if _total_crit_n and (_dropped_n / _total_crit_n) > 0.25:
-            _dropped_names = [l["kriter"] for l in _disqualified_entries]
             record_system_decision(candidate_id, level, "yuksek_dusme_orani",
                                    f"GÖREV 1.4 — kriterlerin %25'inden fazlası değerlendirilemedi ({_dropped_n}/{_total_crit_n}) — bu SİSTEM HATASI sayılır, normal sonuç değildir.",
-                                   {"dusen_kriterler": _dropped_names, "toplam_kriter": _total_crit_n, "dusen_sayisi": _dropped_n})
-            # NOT — "Puan {rakam}" ("Puan 1"/"Puan 2") scrub_forbidden_phrases'in eski terminoloji
-            # temizliğiyle ÇARPIŞIYOR (sentetik testte yakalandı — kalan kriter sayısı 1 çıktığında
-            # "Genel Puan 1 kriter..." sessizce "Genel kriter..."e dönüşüyordu). "Puan" kelimesi bir
-            # rakamın HEMEN ARDINDAN gelmeyecek şekilde yeniden kuruldu.
-            _drop_rate_note_text = (f"{_DROP_RATE_NOTE_HEAD}\nGenel puan hesaplamasına {_total_crit_n - _dropped_n} kriter dahil edilmiştir; "
-                                    f"{_dropped_n} kriter değerlendirilemedi: {', '.join(_dropped_names)}.")
+                                   {"dusen_kriterler": [l["kriter"] for l in _disqualified_entries], "toplam_kriter": _total_crit_n, "dusen_sayisi": _dropped_n})
     except Exception as e:
         print(f"UYARI (finalize_interview düşme oranı c={candidate_id}): {type(e).__name__}: {e}")
+
+    # İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 1.4 (2026-09, sonraki tur) — Puanlama Kapsamı ARTIK
+    # HER ZAMAN üretilir (düşme oranından BAĞIMSIZ — eski raporda da her zaman vardı, "Değerlendir-
+    # ilmeyen kriter olmadı" durumunda bile). Bu, bir önceki turun YALNIZ %25 aşılınca görünen
+    # koşullu notunun YERİNİ alır (madde 1.4: "GÖREV 3'teki düşme oranı notunun yerini alır").
+    # NOT (bug — sentetik testte yakalandı, düzeltildi): bölümün TAMAMI hiç üretilmediyse (model
+    # "YOK" dediyse veya bölüm ayracı hiç gelmediyse) score_position/score_profile None kalır ve
+    # apply_structured_rationale_gate hiç ÇALIŞMAZ (_val_log_pos/_val_log_prof boş) — bu durumda
+    # "0 kriter düştü, N/N değerlendirildi" YANLIŞ olurdu (aslında hiçbiri değerlendirilmedi).
+    if score_position is None:
+        _dropped_pos_names = [c.get("name") for c in (_crit or []) if c.get("name")]
+    else:
+        _dropped_pos_names = [l["kriter"] for l in (_val_log_pos or []) if l.get("sonuc") == "degerlendirilemedi_sistem"]
+    if score_profile is None:
+        _dropped_prof_names = [pc["name"] for pc in PROFILE_CRITERIA]
+    else:
+        _dropped_prof_names = [l["kriter"] for l in (_val_log_prof or []) if l.get("sonuc") == "degerlendirilemedi_sistem"]
+    try:
+        _puanlama_kapsami_text = render_puanlama_kapsami(len(_crit), len(PROFILE_CRITERIA), _dropped_pos_names, _dropped_prof_names)
+    except Exception as e:
+        print(f"UYARI (finalize_interview puanlama kapsamı c={candidate_id}): {type(e).__name__}: {e}")
+        _puanlama_kapsami_text = ""
 
     # --- TEK KARAR KAYNAĞI (iş emri madde 6+21): Genel Puan = mevcut puanların eşit ağırlıklı
     #     ortalaması; 2. değerlendirici HENÜZ çalışmadı (append_reviewer_section SONRA çalışır ve
@@ -7504,6 +7607,25 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     gy_text = sections.get("guclu_yonler", "")
     ga_text = sections.get("gelisim_alanlari", "")
     tm_text = sections.get("takip_sorulari", "")
+    # İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 1.1-1.3 (2026-09, sonraki tur) — eski (2026-09-08
+    # öncesi) formatta var olan, yeniden tasarımda kaybolan anlatı katmanı GERİ eklendi. Her biri
+    # GÖREV 1.2'nin YENİ kalite kurallarına (yasak kalıp, tekrar yasağı) tabi — cümle bazlı temizlik
+    # (strip_banned_phrase_sentences, kriter hücrelerinin diskalifiye mantığından FARKLI: bu
+    # bölümler serbest paragraf, tüm bölümü değil yalnız ihlalli CÜMLEYİ çıkarır).
+    _narrative_sections = {}
+    for _key in ("analitik_dusunme", "problem_cozme", "kavrama_iletisim", "one_cikan_proje",
+                "cv_mulakat_pozisyon_uyumu", "dil_gozlemi", "genel_kani"):
+        _txt = sections.get(_key, "")
+        if _txt:
+            try:
+                _txt, _dropped_sents = strip_banned_phrase_sentences(_txt)
+                if _dropped_sents:
+                    record_system_decision(candidate_id, level, f"{_key}_klise_cumle_silindi",
+                                           f"GÖREV 1.2 — '{_key}' bölümünde yasaklı klişe içeren cümle(ler) tespit edilip çıkarıldı.",
+                                           {"silinen_cumleler": _dropped_sents})
+            except Exception as e:
+                print(f"UYARI (finalize_interview {_key} klişe taraması c={candidate_id}): {type(e).__name__}: {e}")
+        _narrative_sections[_key] = _txt
     # İş emri GÖREV 5.2 — yasaklı genel-gelişim kalıbı tespiti + AKTİF MÜDAHALE (önceki turda
     # yalnız logluyordu). Her yasaklı soru KENDİ SATIRIDIR (bağımsız madde) — bu satırı bütünüyle
     # çıkarmak, GÖREV 1'deki cümle-İÇİ klişelerin aksine, gramer BOZMAZ (o yüzden orada hâlâ
@@ -7558,31 +7680,36 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         # YOK (cümleyi yarıda keser, daha kötü olur).
         try:
             _wc = len(yo_text.split())
-            _yo_bad = yo_text and (not (150 <= _wc <= 250) or banned_phrase_hits(yo_text))
+            _yo_violations_before = detect_future_expectation(yo_text)
+            _yo_bad = yo_text and (not (150 <= _wc <= 250) or _yo_violations_before)
             if _yo_bad:
                 _new_yo = None
                 try:
-                    _new_yo = regenerate_yonetici_ozeti(candidate_id, level, _gate_provider, _gate_model, yo_text, _wc, _ftx)
+                    # GÖREV 2.1 — retry'a kriter tablosundan GERÇEK, somut malzeme verilir (bkz.
+                    # regenerate_yonetici_ozeti docstring'i — olası kök neden: model UYDURMADAN
+                    # genişletecek malzemeye sahip değildi).
+                    _yo_extra_ctx = strip_markdown(pos_table_display)[:3000] if pos_table_display else ""
+                    _new_yo = regenerate_yonetici_ozeti(candidate_id, level, _gate_provider, _gate_model, yo_text, _wc, _ftx, extra_context=_yo_extra_ctx)
                 except Exception as e:
                     print(f"UYARI (finalize_interview yönetici özeti yeniden üretim c={candidate_id}): {type(e).__name__}: {e}")
                 if _new_yo:
                     _wc2 = len(_new_yo.split())
                     record_system_decision(candidate_id, level, "yonetici_ozeti_yeniden_uretildi",
-                                           f"Yönetici Özeti {_wc} kelimeydi ve/veya klişe içeriyordu; TEK deneme ile yeniden ürettirildi ({_wc2} kelime).",
-                                           {"onceki_kelime": _wc, "yeni_kelime": _wc2})
+                                           f"Yönetici Özeti {_wc} kelimeydi ve/veya klişe/beklenti cümlesi içeriyordu; TEK deneme ile yeniden ürettirildi ({_wc2} kelime).",
+                                           {"onceki_kelime": _wc, "yeni_kelime": _wc2, "onceki_ihlaller": _yo_violations_before})
                     yo_text = _new_yo
                     _wc = _wc2
                 if not (150 <= _wc <= 250):
                     record_system_decision(candidate_id, level, "yonetici_ozeti_uzunluk_disi",
                                            f"Yönetici Özeti {_wc} kelime — hedef aralık (150-250) dışında (yeniden deneme sonrası da; OTOMATİK kısaltma/uzatma YAPILMADI, olduğu gibi basıldı).",
                                            {"kelime_sayisi": _wc})
-                # İş emri GÖREV 3.3 (VALIDATOR KALİBRASYONU) — ikinci denemede de klişe VARSA:
-                # kriter tablosundaki gibi DÜŞÜRÜLMEZ (özet TEK bloktur, düşerse rapor başsız
-                # kalır) — olduğu gibi basılır, yalnız loglanır.
-                _yo_hits_after = banned_phrase_hits(yo_text)
+                # İş emri GÖREV 3.3 (VALIDATOR KALİBRASYONU) — ikinci denemede de klişe/beklenti
+                # cümlesi VARSA: kriter tablosundaki gibi DÜŞÜRÜLMEZ (özet TEK bloktur, düşerse
+                # rapor başsız kalır) — olduğu gibi basılır, yalnız loglanır.
+                _yo_hits_after = detect_future_expectation(yo_text)
                 if _yo_hits_after:
                     record_system_decision(candidate_id, level, "yonetici_ozeti_klise_kaldi",
-                                           "Yönetici Özeti'nde yeniden deneme sonrası da yasaklı klişe kalıp tespit edildi; özet TEK BLOK olduğu için düşürülmedi, olduğu gibi basıldı.",
+                                           "Yönetici Özeti'nde yeniden deneme sonrası da yasaklı klişe/geleceğe-dönük-beklenti kalıbı tespit edildi; özet TEK BLOK olduğu için düşürülmedi, olduğu gibi basıldı.",
                                            {"kalip_eslesmeleri": _yo_hits_after})
         except Exception as e:
             print(f"UYARI (finalize_interview yönetici özeti uzunluk kontrolü c={candidate_id}): {type(e).__name__}: {e}")
@@ -7595,6 +7722,24 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
             except Exception as e:
                 print(f"UYARI (finalize_interview CV özeti yedek c={candidate_id}): {type(e).__name__}: {e}")
                 cv_ozeti_text = ""
+        # İş emri GÖREV 4.1 (KAYIP ANLATI BÖLÜMLERİ) — ayraç DETERMİNİSTİK olarak ':' yapılır
+        # (kök neden: prompt'taki etiket listesi "Eğitim / Deneyim / ..." biçiminde YAZILMIŞTI —
+        # model bunu görsel örnek sanıp '/' ayracını satır formatına da uyguladı).
+        try:
+            cv_ozeti_text = normalize_cv_ozeti_separators(cv_ozeti_text)
+        except Exception as e:
+            print(f"UYARI (finalize_interview CV özeti ayraç normalize c={candidate_id}): {type(e).__name__}: {e}")
+        # İş emri GÖREV 4.2 — sözlü beyandaki SPESİFİK okul türü ("ticaret meslek lisesi") genel
+        # bir kategoriye ("Lise mezunu") indirgenmişse geri konur (bilinen okul-türü listesiyle
+        # sınırlı, bounded bir düzeltme — genel bir anlam-sadakati denetleyicisi DEĞİLDİR).
+        try:
+            cv_ozeti_text, _cv_restored = restore_specific_school_type(cv_ozeti_text, _ftx)
+            if _cv_restored:
+                record_system_decision(candidate_id, level, "cv_ozeti_spesifik_bilgi_geri_kondu",
+                                       "GÖREV 4.2 — CV Özeti'ndeki 'Eğitim' satırı sözlü beyandaki daha spesifik okul türünü genelleştirmişti; spesifik ifade geri kondu.",
+                                       {})
+        except Exception as e:
+            print(f"UYARI (finalize_interview CV özeti spesifik bilgi c={candidate_id}): {type(e).__name__}: {e}")
 
         # Beyan Tutarlılığı — TAMAMEN deterministik (iş emri madde 14); model bunu YAZMAZ.
         try:
@@ -7623,6 +7768,22 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         except Exception as e:
             print(f"UYARI (finalize_interview güçlü yönler dayanaksızlık taraması c={candidate_id}): {type(e).__name__}: {e}")
 
+        # İş emri GÖREV 5 — evaluated_vs_narrative_conflict: bir kriter "Değerlendirilemedi
+        # (sistem)" ise o kriterin KONUSUNDA olumlu hüküm cümlesi Güçlü Yönler'de/Yönetici
+        # Özeti'nde BASILMAZ (kanıtlı örnek: "İletişim" Değerlendirilemedi iken Güçlü Yönler
+        # "iletişim becerileri...olumlu bir izlenim bırakmıştır" diyordu).
+        try:
+            _all_dropped_names = _dropped_pos_names + _dropped_prof_names
+            gy_text, _dropped_conflict_gy = strip_narrative_conflicts_with_disqualified(gy_text, _all_dropped_names)
+            yo_text, _dropped_conflict_yo = strip_narrative_conflicts_with_disqualified(yo_text, _all_dropped_names)
+            _dropped_conflict = _dropped_conflict_gy + _dropped_conflict_yo
+            if _dropped_conflict:
+                record_system_decision(candidate_id, level, "evaluated_vs_narrative_conflict",
+                                       "GÖREV 5 — Değerlendirilemedi sayılan bir kriterin konusunda Güçlü Yönler/Yönetici Özeti'nde olumlu hüküm cümlesi tespit edildi ve çıkarıldı.",
+                                       {"silinen_cumleler": _dropped_conflict, "dusen_kriterler": _all_dropped_names})
+        except Exception as e:
+            print(f"UYARI (finalize_interview evaluated_vs_narrative_conflict c={candidate_id}): {type(e).__name__}: {e}")
+
         # İş emri GÖREV 3 — Gelişim Alanları'ndaki RİSK paragrafları transkriptte GERÇEKTEN var
         # olan bir [mm:ss] damgasına dayanmak ZORUNDA; dayanaksız/uydurma risk iddiası ÇIKARILIR.
         try:
@@ -7648,17 +7809,50 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         except Exception as e:
             print(f"UYARI (finalize_interview zorunlu risk ekleme c={candidate_id}): {type(e).__name__}: {e}")
 
+        # İş emri GÖREV 1.7 — Profil Veto Kontrolü: DETERMİNİSTİK, profil tablosunun kendisinden
+        # (bkz. render_profile_veto_control). Ayrı bir bölüm/başlık DEĞİL — eski mimaride de PUAN 2
+        # bloğunun bir PARÇASIYDI; burada da Kişisel ve Bilişsel Profil metninin sonuna eklenir.
+        try:
+            _profile_veto_text = render_profile_veto_control(prof_table_display) if prof_table_display.strip() else ""
+        except Exception as e:
+            print(f"UYARI (finalize_interview profil veto kontrolü c={candidate_id}): {type(e).__name__}: {e}")
+            _profile_veto_text = ""
+
+        # İş emri GÖREV 1.5 — Öneri Gerekçesi: DETERMİNİSTİK, skor/öneriden TÜRETİLİR (bkz.
+        # render_oneri_gerekcesi) — öneriyle ÇELİŞEN bir gerekçe YAPI GEREĞİ imkânsız.
+        try:
+            _oneri_gerekcesi_text = render_oneri_gerekcesi(recommendation, score, score_position, score_profile)
+        except Exception as e:
+            print(f"UYARI (finalize_interview öneri gerekçesi c={candidate_id}): {type(e).__name__}: {e}")
+            _oneri_gerekcesi_text = ""
+
         parts = []
         if yo_text:
             parts.append("**Yönetici Özeti:**\n" + yo_text)
+        # İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 1.1 — Puanlama Kapsamı (deterministik, HER
+        # ZAMAN) + 6 model-yazımlı anlatı bölümü, Yönetici Özeti'nden SONRA, kriter tablolarından
+        # ÖNCE (eski rapor formatındaki yerleri).
+        if _puanlama_kapsami_text:
+            parts.append(f"{_PUANLAMA_KAPSAMI_HEAD}\n{_puanlama_kapsami_text}")
+        if _narrative_sections.get("analitik_dusunme"):
+            parts.append("**Analitik Düşünme ve Muhakeme:**\n" + _narrative_sections["analitik_dusunme"])
+        if _narrative_sections.get("problem_cozme"):
+            parts.append("**Problem Çözme ve Karar Verme Yaklaşımı:**\n" + _narrative_sections["problem_cozme"])
+        if _narrative_sections.get("kavrama_iletisim"):
+            parts.append("**Kavrama ve İletişim:**\n" + _narrative_sections["kavrama_iletisim"])
+        if _narrative_sections.get("one_cikan_proje"):
+            parts.append("**Öne Çıkan Proje ve Deneyimler:**\n" + _narrative_sections["one_cikan_proje"])
+        if _narrative_sections.get("cv_mulakat_pozisyon_uyumu"):
+            parts.append("**CV ↔ Mülakat ↔ Pozisyon Uyumu:**\n" + _narrative_sections["cv_mulakat_pozisyon_uyumu"])
+        if _narrative_sections.get("dil_gozlemi"):
+            parts.append("**Dil Gözlemi:**\n" + _narrative_sections["dil_gozlemi"])
         if pos_table_display.strip():
             parts.append("**Pozisyon Yetkinlikleri:**\n" + pos_table_display.strip())
         if prof_table_display.strip():
-            parts.append("**Kişisel ve Bilişsel Profil:**\n" + prof_table_display.strip())
-        # İş emri GÖREV 1.4 — düşme oranı %25'i aşarsa RAPORA GÖRÜNÜR bir not (append_reviewer_section
-        # devralma sonrasında bu notu günceller/kaldırır — bkz. orada).
-        if _drop_rate_note_text:
-            parts.append(_drop_rate_note_text)
+            _prof_block = "**Kişisel ve Bilişsel Profil:**\n" + prof_table_display.strip()
+            if _profile_veto_text:
+                _prof_block += "\n\nProfil Veto Kontrolü: " + _profile_veto_text
+            parts.append(_prof_block)
         # İkinci Değerlendirici Görüşü buraya (Profil'den hemen sonra) ait — henüz üretilmedi;
         # append_reviewer_section bu YER TUTUCUYU bulup değiştirir/kaldırır (bkz. tanımı).
         parts.append(_REVIEWER_SLOT_MARK)
@@ -7672,6 +7866,12 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
             parts.append("**CV Özeti:**\n" + cv_ozeti_text.strip())
         if beyan_tutarliligi_text:
             parts.append("**Beyan Tutarlılığı:**\n" + beyan_tutarliligi_text)
+        # İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 1.1 — Genel Kanı (model) + Öneri Gerekçesi
+        # (deterministik) raporun SONUNDA, Takip Soruları'ndan ÖNCE (eski rapor formatındaki yeri).
+        if _narrative_sections.get("genel_kani"):
+            parts.append("**Genel Kanı:**\n" + _narrative_sections["genel_kani"])
+        if _oneri_gerekcesi_text:
+            parts.append("**Öneri Gerekçesi:**\n" + _oneri_gerekcesi_text)
         if tm_text:
             parts.append("**Takip Mülakatı İçin Önerilen Sorular:**\n" + tm_text)
         report = scrub_forbidden_phrases("\n\n".join(parts))
@@ -8987,6 +9187,55 @@ def render_cv_ozeti_fallback(candidate: dict, transcript: str = "") -> str:
         lines.append("Diller: " + "; ".join(langs))
     return "\n".join(lines)
 
+# İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 4 (2026-09, sonraki tur) — CV Özeti ayraç formatı.
+# KÖK NEDEN: prompt, etiketleri "Eğitim / Deneyim / Teknik Yetkinlikler / ..." biçiminde
+# LİSTELİYORDU (etiket adlarını "/" ile ayırarak) — model bunu satır formatının KENDİSİ sanıp
+# "Eğitim / Lise mezunu" yazdı (ayraç ":" olacaktı). Prompt netleştirildi (bkz.
+# build_report_content_prompt) AMA model yine de eski davranışı sürdürebilir — bu yüzden ayraç
+# burada DA deterministik olarak düzeltilir (modelin yazdığı ayraç GÜVENİLMEZ).
+_CV_OZETI_LABELS = ["Eğitim", "Deneyim", "Teknik Yetkinlikler", "Sektör Yetkinlikleri", "Diller", "Sertifikalar"]
+_CV_OZETI_LABEL_SEP_RE = re.compile(
+    r"^(\s*(?:" + "|".join(re.escape(l) for l in _CV_OZETI_LABELS) + r"))\s*[/\-–—]\s*", re.IGNORECASE)
+
+def normalize_cv_ozeti_separators(text: str) -> str:
+    """GÖREV 4.1 — CV Özeti satırlarındaki etiket/içerik ayracı DETERMİNİSTİK olarak ':' yapılır;
+    modelin yazdığı ayraç (ör. '/') güvenilmez. Yalnız BİLİNEN etiketlerle (Eğitim/Deneyim/...)
+    başlayan satırlara uygulanır — zaten ':' kullanan satırlarda no-op, başka metni bozmaz."""
+    if not text:
+        return text
+    out = []
+    for ln in text.splitlines():
+        m = _CV_OZETI_LABEL_SEP_RE.match(ln)
+        out.append(_CV_OZETI_LABEL_SEP_RE.sub(m.group(1).strip() + ": ", ln, count=1) if m else ln)
+    return "\n".join(out)
+
+# GÖREV 4.2 — bilinen okul-türü adları; SINIRLI/bounded bir liste — genel bir anlam-sadakati
+# denetleyicisi DEĞİLDİR, yalnız bu turda raporlanan somut vakayı ("ticaret meslek lisesi" →
+# "Lise mezunu" genellemesi) ve benzer sık görülen okul türlerini kapsar.
+_SPECIFIC_SCHOOL_TYPE_RE = re.compile(
+    r"(ticaret meslek lisesi|anadolu lisesi|fen lisesi|imam hatip lisesi|meslek lisesi|"
+    r"end[üu]stri meslek lisesi|sosyal bilimler lisesi|g[üu]zel sanatlar lisesi|spor lisesi)",
+    re.IGNORECASE)
+
+def restore_specific_school_type(cv_ozeti_text: str, transcript: str) -> tuple:
+    """GÖREV 4.2 — aday transkriptte SPESİFİK bir okul türü belirtmişse ama CV Özeti'nin Eğitim
+    satırı bunu genel bir kategoriye ('Lise mezunu') İNDİRGEMİŞSE, spesifik ifade GERİ konur.
+    Dönüş: (yeni_metin, değişti_mi)."""
+    if not cv_ozeti_text or not transcript:
+        return cv_ozeti_text, False
+    m_specific = _SPECIFIC_SCHOOL_TYPE_RE.search(transcript)
+    if not m_specific:
+        return cv_ozeti_text, False
+    specific = m_specific.group(1)
+    lines = cv_ozeti_text.splitlines()
+    changed = False
+    for i, ln in enumerate(lines):
+        if re.match(r"^\s*E[ğg]itim\s*:", ln, re.IGNORECASE) and specific.lower() not in ln.lower():
+            if re.search(r"\blise\b", ln, re.IGNORECASE):
+                lines[i] = re.sub(r"\blise\b", specific.title(), ln, count=1, flags=re.IGNORECASE)
+                changed = True
+    return ("\n".join(lines), True) if changed else (cv_ozeti_text, False)
+
 def render_beyan_tutarliligi(disc: dict) -> str:
     """Beyan Tutarlılığı — TAMAMEN deterministik (iş emri madde 14): yalnızca GERÇEK çelişki
     varsa satır üretir; 'tutarlı'/'karşılaştırılamadı' satırları hiç basılmaz (rapora tekrar/
@@ -9000,13 +9249,156 @@ def render_beyan_tutarliligi(disc: dict) -> str:
         lines.append(f"{r['alan']} — {src}" + (f" ({r['not']})" if r.get("not") else ""))
     return "\n".join(lines)
 
+# İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 1.4 (2026-09, sonraki tur) — Puanlama Kapsamı TAMAMEN
+# DETERMİNİSTİK: hangi kriterler değerlendirildi/değerlendirilemedi, puan kaç kriter üzerinden
+# hesaplandı — bu bilgi zaten sistemde var (apply_structured_rationale_gate/apply_criterion_
+# takeover'ın log'ları), modelden İSTENMEZ. Bu bölüm hem eski "Puanlama Kapsamı" hem "Değerlendir-
+# ilemeyen Alanlar" bölümlerinin YERİNİ alır (aynı bilgiyi iki ayrı başlıkta TEKRARLAMAMAK için —
+# bkz. _REPORT_SECTION_ALIASES'taki not) HEM DE bir önceki turun "yuksek_dusme_orani" görünür
+# notunun yerini alır (GÖREV 1.4: "Bu madde GÖREV 3'teki düşme oranı notunun yerini alır").
+_PUANLAMA_KAPSAMI_HEAD = "**Puanlama Kapsamı:**"
+_PUANLAMA_KAPSAMI_RE = re.compile(re.escape(_PUANLAMA_KAPSAMI_HEAD) + r".*?(?=\n\n|\Z)", re.DOTALL)
+
+def render_puanlama_kapsami(total_pos: int, total_prof: int, dropped_pos_names: list, dropped_prof_names: list) -> str:
+    """GÖREV 1.4 — eski raporun 'Puanlama Kapsamı' + 'Değerlendirilemeyen Alanlar' bölümlerinin
+    TAMAMEN deterministik, tek-bölümlü karşılığı. Eski raporun kendi cümle kalıbına sadık kalır
+    ('... kriterleri değerlendirildi. Değerlendirilmeyen kriter olmadı. Puanlama, değerlendirilen
+    kriterlerin ağırlığına göre normalize edilmiştir.')."""
+    dropped = list(dropped_pos_names) + list(dropped_prof_names)
+    total = total_pos + total_prof
+    evaluated = total - len(dropped)
+    lines = [f"{evaluated}/{total} kriter değerlendirildi (pozisyon: {total_pos - len(dropped_pos_names)}/{total_pos}, "
+            f"profil: {total_prof - len(dropped_prof_names)}/{total_prof})."]
+    if dropped:
+        lines.append(f"Değerlendirilemeyen kriterler: {', '.join(dropped)}.")
+    else:
+        lines.append("Değerlendirilmeyen kriter olmadı.")
+    lines.append("Puanlama, değerlendirilen kriterlerin ağırlığına göre normalize edilmiştir.")
+    return "\n".join(lines)
+
+# GÖREV 1.7 — Profil Veto Kontrolü: eski mimaride modelin kendi yazdığı "[VETO: ...]" etiketine
+# dayanıyordu (detect_profile_veto, artık orphan — 2026-09 yeniden tasarımında ÇAĞRILMAZ hale
+# geldi). Yeni mimaride profil kriterleri artık G/K/E/S yapısıyla GERÇEK, normalize edilmiş bir
+# puana sahip — bu yüzden veto artık TABLODAN doğrudan, DETERMİNİSTİK hesaplanır (modelin kendi
+# etiketlemesine güvenmek gerekmiyor): bir profil kriteri tavanının %20'sinin altına düşerse uyarı.
+_VETO_THRESHOLD_RATIO = 0.20
+
+def render_profile_veto_control(profile_table_text: str) -> str:
+    """GÖREV 1.7 — profil tablosundaki (zaten normalize edilmiş) puanları tarar; herhangi bir
+    kriter tavanının %20'sinin ALTINDAYSA (ve gerçekten puanlanmışsa — 'Değerlendirilemedi' olan
+    satırlar hariç, onlar veri eksikliğidir, düşük performans değil) veto uyarısı üretir."""
+    if not profile_table_text:
+        return "Veto yok."
+    worst = None
+    for ln in profile_table_text.splitlines():
+        if ln.count("|") < 2:
+            continue
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        m = re.search(r"(?<![\d/])(\d+)\s*/\s*(\d+)(?![\d/])", cells[1])
+        if not m:
+            continue
+        awarded, cap = _safe_int(m.group(1)), _safe_int(m.group(2))
+        if cap <= 0:
+            continue
+        ratio = awarded / cap
+        if ratio < _VETO_THRESHOLD_RATIO and (worst is None or ratio < worst[2]):
+            worst = (cells[0], awarded, ratio, cap)
+    if worst:
+        name, awarded, _ratio, cap = worst
+        return f"[VETO UYARISI: \"{name}\" kriteri tavanının %20'sinin altında kaldı ({awarded}/{cap}) — kurumsal ortamda çalışmaya engel olabilecek düzeyde ciddi bir zayıflık işareti.]"
+    return "Veto yok."
+
+# GÖREV 1.5 — Öneri Gerekçesi: TAMAMEN deterministik, skor/öneriden TÜRETİLİR — bu, "öneriyle
+# TUTARLI olmak zorunda" şartını (madde 1.5) YAPI GEREĞİ sağlar (modelin bağımsız yazdığı bir
+# gerekçe metniyle karar arasında çelişki riski hiç oluşmaz, çünkü ikisi AYNI sayılardan üretilir).
+def render_oneri_gerekcesi(recommendation: str, score, score_position, score_profile) -> str:
+    parts_ = []
+    if recommendation == "Reddet":
+        parts_.append(f"Adayın Genel Puanı ({score}/100) pozisyon için gerekli eşiğin (40) altında kalmıştır.")
+    elif recommendation == "İşe Al":
+        parts_.append(f"Adayın Genel Puanı ({score}/100) pozisyon için gerekli eşiğin (80) üzerindedir.")
+    elif recommendation == "Değerlendir":
+        parts_.append(f"Adayın Genel Puanı ({score}/100), doğrudan işe alım veya ret için yeterli olmayan, değerlendirmeye açık bir aralıktadır (40-79).")
+    else:
+        return ""
+    if score_position is not None:
+        parts_.append(f"Pozisyon yetkinlikleri puanı {score_position}/100.")
+    if score_profile is not None:
+        parts_.append(f"Kişisel ve bilişsel profil puanı {score_profile}/100.")
+    return " ".join(parts_)
+
+# GÖREV 1.2/1.3 — bu turda geri eklenen anlatı bölümleri (Analitik Düşünme, Problem Çözme,
+# Kavrama ve İletişim, Öne Çıkan Proje, CV↔Mülakat↔Pozisyon Uyumu, Dil Gözlemi, Genel Kanı) SERBEST
+# PARAGRAF — G/K/E/S yapısında DEĞİL. Kriter hücreleri gibi tüm hücreyi diskalifiye etmek yerine
+# CÜMLE bazlı temizlik yeterli ve daha az yıkıcı (bkz. _strip_unsupported_strength_sentences'ın
+# GÜÇLÜ YÖNLER için kurduğu emsal — burada GENELLEŞTİRİLDİ).
+def strip_banned_phrase_sentences(text: str) -> tuple:
+    """Serbest metin bölümlerinde yasak kalıp/klişe içeren CÜMLEYİ çıkarır. Dönüş: (yeni_metin, çıkarılan[])."""
+    if not text:
+        return text, []
+    sents = re.split(r'(?<=[.!?])\s+', text)
+    kept, dropped = [], []
+    for s in sents:
+        if banned_phrase_hits(s):
+            dropped.append(s.strip())
+        else:
+            kept.append(s)
+    return " ".join(kept).strip(), dropped
+
+# GÖREV 5 — evaluated_vs_narrative_conflict: bir kriter "Değerlendirilemedi (sistem)" ise, o
+# kriterin KONUSU hakkında Güçlü Yönler/Yönetici Özeti'nde OLUMLU HÜKÜM cümlesi basılmaz (kanıtlı
+# örnek: "İletişim" kriteri Değerlendirilemedi iken Güçlü Yönler'de "iletişim becerileri...olumlu
+# bir izlenim bırakmıştır" yazılmıştı — sistem BİR yandan ölçemediğini söylüyor, ÖTE yandan o
+# konuda olumlu hüküm veriyordu).
+_POSITIVE_JUDGMENT_CUE_RE = re.compile(
+    r"olumlu\b|başar[ıi]l[ıi]|g[öo]stermektedir|izlenim b[ıi]rak|yetene[ğg]ini g[öo]ster|"
+    r"g[üu][çc]l[üu] bir [şs]ekilde|etkili\b|iyi bir [şs]ekilde",
+    re.IGNORECASE)
+
+def strip_narrative_conflicts_with_disqualified(text: str, disqualified_names: list) -> tuple:
+    """GÖREV 5.1/5.2 (evaluated_vs_narrative_conflict) — diskalifiye edilmiş kriterlerin
+    KONUSUYLA örtüşen (EN AZ 1 ortak anahtar kelime) VE olumlu-hüküm ipucu taşıyan cümleleri
+    çıkarır. NOT (sentetik testte yakalandı): ilk tasarımda %50 ORAN eşiği kullanılıyordu — çok
+    kelimeli kriter adlarında (ör. "İletişim ve ifade netliği" → 3 anahtar kelime: iletişim/ifade/
+    netliği) gerçek bir çelişki cümlesi genelde SADECE kriterin ANA kelimesini (ör. "iletişim")
+    tekrarlar, diğer ikisini değil — 1/3 oranı %50'nin altında kaldığı için GERÇEK bir çelişki
+    KAÇIYORDU. _POSITIVE_JUDGMENT_CUE_RE zaten güçlü bir ikinci filtre olduğu için EN AZ 1 ortak
+    kelime + olumlu-hüküm ipucu BİRLİKTE yeterli kabul edildi (yanlış pozitif riski düşük).
+    Dönüş: (yeni_metin, çıkarılan[])."""
+    if not text or not disqualified_names:
+        return text, []
+    name_kws = [(name, [w for w in _norm_name(name).split() if len(w) >= 4]) for name in disqualified_names]
+    name_kws = [(n, k) for n, k in name_kws if k]
+    if not name_kws:
+        return text, []
+    sents = re.split(r'(?<=[.!?])\s+', text)
+    kept, dropped = [], []
+    for s in sents:
+        norm = _norm_name(s)
+        conflict = False
+        if _POSITIVE_JUDGMENT_CUE_RE.search(s):
+            for _name, kws in name_kws:
+                if sum(1 for w in kws if w in norm) >= 1:
+                    conflict = True
+                    break
+        if conflict:
+            dropped.append(s.strip())
+        else:
+            kept.append(s)
+    return " ".join(kept).strip(), dropped
+
 # İş emri madde 3 — rapor gövdesinin bölüm başlıkları TEK KAYNAK burada listelenir; PDF renderer
 # assemble_final_report/finalize_interview ile AYNI isimleri kullanır (strip_markdown '**' işaretini
 # kaldırdığı için burada çıplak "Ad:" biçiminde eşleşir).
-_KNOWN_REPORT_HEADINGS = ("Yönetici Özeti", "Pozisyon Yetkinlikleri", "Kişisel ve Bilişsel Profil",
+_KNOWN_REPORT_HEADINGS = ("Yönetici Özeti", "Puanlama Kapsamı", "Analitik Düşünme ve Muhakeme",
+                          "Problem Çözme ve Karar Verme Yaklaşımı", "Kavrama ve İletişim",
+                          "Öne Çıkan Proje ve Deneyimler", "CV ↔ Mülakat ↔ Pozisyon Uyumu",
+                          "Dil Gözlemi", "Pozisyon Yetkinlikleri", "Kişisel ve Bilişsel Profil",
                           "İkinci Değerlendirici Görüşü", "Güçlü Yönler", "Gelişim Alanları",
-                          "Görüntü ve Ses Gözlemi", "CV Özeti", "Beyan Tutarlılığı",
-                          "Takip Mülakatı İçin Önerilen Sorular")
+                          "Görüntü ve Ses Gözlemi", "CV Özeti", "Beyan Tutarlılığı", "Genel Kanı",
+                          "Öneri Gerekçesi", "Takip Mülakatı İçin Önerilen Sorular")
 _REPORT_HEAD_LOOKUP = {h + ":": h for h in _KNOWN_REPORT_HEADINGS}
 
 def _split_report_sections(lines: list) -> dict:
