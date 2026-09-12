@@ -2505,28 +2505,65 @@ CRITERION_SCORING_RULE = (
 # İki çalıştırma arasında aynı transkriptte puanların gerekçesiz oynamasını (69→80, Süreç Yönetimi
 # 5→10/10) önler. Bantlar kriterden BAĞIMSIZ geneldir; tam puan için kanıt zorunluluğu KESİN.
 SCORING_RUBRIC = (
-    "PUANLAMA RUBRİĞİ (KESİN — her PUAN 1 ve PUAN 2 kriteri için uygula, AYNI transkript her seferinde "
-    "AYNI puanı üretmeli — 'yeterli' / 'sınırlı' gibi öznel kelimelerle DEĞİL, aşağıdaki GÖZLENEBİLİR "
+    "PUANLAMA RUBRİĞİ (KESİN — her kriter için uygula, AYNI transkript her seferinde AYNI puanı "
+    "üretmeli — 'yeterli' / 'sınırlı' gibi öznel kelimelerle DEĞİL, aşağıdaki GÖZLENEBİLİR "
     "ölçütlerle karar ver):\n"
     "- TAM PUANA YAKIN (tavanın %85-100'ü) — GÖZLENEBİLİR ÖLÇÜT (ÜÇÜ BİRDEN şart): (1) transkriptten "
-    "EN AZ İKİ ayrı [dk] damgalı somut örnek, (2) anlattığı yaklaşımda EN AZ 2 ayrı adım/aşama sayılabiliyor "
+    "EN AZ İKİ ayrı somut örnek/detay, (2) anlattığı yaklaşımda EN AZ 2 ayrı adım/aşama sayılabiliyor "
     "(ör. '1) ekstreye bakarım 2) karşı tarafla mutabakat yaparım'), (3) aday kendiliğinden bir istisna/zor "
     "durumu ('ama şöyle olursa...') ele alıp doğru yönetti. Üçü birlikte yoksa bu bandı VERME.\n"
-    "- ORTA (tavanın %45-70'i) — GÖZLENEBİLİR ÖLÇÜT: EN AZ 1 [dk] damgalı somut örnek VE en az 1 "
+    "- ORTA (tavanın %45-70'i) — GÖZLENEBİLİR ÖLÇÜT: EN AZ 1 somut örnek VE en az 1 "
     "adım/aşama sayılabiliyor, ama istisna/zor durum yönetimi YOK veya örnek TEK.\n"
     "- DÜŞÜK (tavanın %15-40'ı) — GÖZLENEBİLİR ÖLÇÜT VE ZORUNLU KANIT (TAM PUAN bandıyla AYNI titizlikte): "
     "cevapta somut adım/örnek YOK (yalnızca genel-geçer bir cümle) VEYA aday soruyu kısmen/hiç yanıtlayamadı. "
-    "Bu bandı verirken 'Kanıt ve Analiz' hücresinde AYNEN şunlar ZORUNLUDUR: (a) [dk] damgasıyla HANGİ SORU "
-    "soruldu, (b) adayın cevabında SOMUT olarak NEYİN eksik/yanlış/yetersiz kaldığı. Tek kelimelik gerekçe "
+    "Bu bandı verirken 'Kanıt ve Analiz' hücresinde AYNEN şunlar ZORUNLUDUR: (a) HANGİ SORU soruldu, (b) "
+    "adayın cevabında SOMUT olarak NEYİN eksik/yanlış/yetersiz kaldığı. Tek kelimelik gerekçe "
     "('yüzeysel', 'yetersiz', 'sınırlı' vb. TEK BAŞINA) YETERSİZDİR ve KABUL EDİLMEZ.\n"
     "- 0 / Değerlendirilemedi: yukarıdaki TEK KURAL'a göre.\n"
-    "TAM PUAN KISITI (KESİN): Bir kritere tavan puanı (ör. 10/10, 20/20) verebilmen için o "
-    "kriterin 'Kanıt ve Analiz' hücresinde transkriptten EN AZ İKİ farklı [dk] dakika damgalı "
-    "somut kanıt göstermen ZORUNLUDUR. İki damgalı kanıt yoksa en fazla tavanın %80'i verilebilir.\n"
-    "KANIT ZORUNLULUĞU (KESİN, TÜM BANTLAR — yalnız TAM PUAN değil): Her kriter puanının 'Kanıt ve "
-    "Analiz' hücresinde EN AZ BİR [dk] dakika damgası bulunmalıdır — DÜŞÜK puan da dahil. Damgasız "
-    "puan KABUL EDİLMEZ — damga koyamıyorsan o kriter 'Değerlendirilemedi (sistem)'dir."
+    "\n"
+    "GEREKÇE (Kanıt ve Analiz hücresi) YAZIM KURALLARI (KESİN):\n"
+    "1) YASAK KALIPLAR — bunları veya eş anlamlılarını YAZMA (her adayda aynı çıkıyor, hiçbir şey "
+    "söylemiyor): \"daha fazla detay gerekmektedir\", \"daha fazla derinlik gerekmektedir\", \"daha fazla "
+    "netlik gerekmektedir\", \"daha fazla açıklık gerekmektedir\", \"daha fazla detaylandırma gerekmektedir\", "
+    "\"daha fazla bilgi verilmemiştir\", \"daha derin anlatmamıştır\", \"somut delil verememiştir\", "
+    "\"yeterince açıklamamıştır\", \"daha fazla esneklik gerekmektedir\".\n"
+    "2) \"ANCAK\" KALIBI YASAK — her gerekçe 'X yapmıştır. Ancak Y eksiktir.' yapısında OLMAYACAK; cümle "
+    "yapısını kriterden kritere DEĞİŞTİR. Altı-sekiz kriterin hepsi aynı cümle iskeletinde çıkarsa HATADIR.\n"
+    "3) ODAK OLANA: gerekçenin ağırlığı adayın NE YAPABİLDİĞİ / NE BİLDİĞİ / NASIL YAKLAŞTIĞI üzerinde "
+    "olsun; tek kelimelik bir eksik-kapanışı YETMEZ.\n"
+    "4) Gerçekten eksik varsa SOMUT yaz: hangi soru soruldu, aday ne cevap verdi/veremedi, bu NEDEN eksik "
+    "sayıldı. Genel 'yetersiz kaldı' YASAK.\n"
+    "5) TAM veya tama yakın puan alan kriterde eksik/'ancak' cümlesi KURMA — yalnız güçlü yönü anlat.\n"
+    "6) Aynı transkript anını/kanıtını birden fazla kriterde OTOMATİK tekrar KULLANMA. Gerçekten iki kriter "
+    "için de bağımsız kanıt oluşturuyorsa kullanılabilir, ama HER kriterde NEYİ gösterdiğini AYRI anlat — "
+    "cümleyi kopyalama.\n"
+    "\n"
+    "DAKİKA DAMGASI (KESİN, GEVŞETİLDİ): Damga (ör. [8:21]) YALNIZCA şu üç durumda kullanılır: bir puanı "
+    "DOĞRUDAN gerekçelendiren somut alıntı, adayın kendi ağzıyla belirttiği önemli bir beyan, bir risk/"
+    "çelişki tespiti. Anlatı akarken her cümlenin başına/sonuna damga EKLEME. Bir gerekçede EN FAZLA 1-2 "
+    "damga yeterlidir — 3+ damganın art arda yığılması (\"[1:21] ... [3:15] ... [8:21]\") YASAK. Damganın "
+    "rapora BASILMAMASI kanıtın kullanılmadığı anlamına GELMEZ — puanı yine transkriptteki gerçek bir ana "
+    "dayandır, yalnızca o anı METİNDE her seferinde işaretleme."
 )
+
+# İş emri GÖREV 1.1 — kriter gerekçelerinde klişe kalıp DETEKSİYONU (siler/düzeltmez — bir kalıbı
+# cümle ORTASINDAN çıkarmak grameri bozar; bu, GÖREV 5'in takip-sorusu SATIRLARINI çıkarmasından
+# FARKLI bir durum — orada tüm satır bağımsız bir madde, burada kalıp cümlenin İÇİNDE). Yalnız
+# teşhis için record_system_decision'a loglanır.
+_FORBIDDEN_EVIDENCE_CLICHE_RE = re.compile(
+    r"daha fazla (?:detay|derinlik|netlik|aç[ıi]kl[ıi]k|detayland[ıi]rma|esneklik) gerekmektedir"
+    r"|daha fazla bilgi verilmemi[şs]tir"
+    r"|daha derin anlatmam[ıi][şs]t[ıi]r"
+    r"|somut delil verememi[şs]tir"
+    r"|yeterince aç[ıi]klamam[ıi][şs]t[ıi]r",
+    re.IGNORECASE)
+
+def detect_evidence_cliches(text: str) -> list:
+    """Pozisyon/Profil kriter tablosu METNİNDE (Kanıt ve Analiz hücreleri) yukarıdaki yasaklı
+    klişe kalıplarından biri geçen SATIRLARI döner (boş liste = temiz). Kaldırmaz — çağıran loglar."""
+    if not text:
+        return []
+    return [ln.strip() for ln in text.splitlines() if ln.strip() and _FORBIDDEN_EVIDENCE_CLICHE_RE.search(ln)]
 
 def build_criteria_table_filled(criteria: list, evidence_header: str = "Kanıt ve Analiz") -> str:
     """DETERMİNİSTİK kriter tablosu: satırlar pozisyondan gelir, model AYNEN doldurur.
@@ -2614,7 +2651,7 @@ def build_report_content_prompt(criteria_table_filled: str, profile_table_filled
     return f"""Aşağıdaki YEDİ bölümü, TAM OLARAK bu sırayla ve TAM OLARAK bu ayraçlarla üret. Ayraç satırlarını (===...===) AYNEN kopyala; başka hiçbir başlık/ayraç EKLEME. Bir bölümde yazacak GERÇEKTEN somut bir şey yoksa o bölümün içeriğine SADECE "YOK" yaz (sistem o bölümü rapordan çıkarır) — asla "belirtilecek bir şey yok" gibi dolgu cümle kurma, asla "-", "—" veya "bulunmamaktadır" yazma.
 
 ===YÖNETİCİ ÖZETİ===
-Tek paragraf, 4-6 cümle: adayın kim olduğu ve deneyimi; pozisyon açısından en güçlü yönü; en belirgin zayıf yönü; sonuç. Dakika damgası KULLANMA. Bir karar/öneri kelimesi (Reddet/İşe Al/Değerlendir vb.) YAZMA — karar ayrı, sistem tarafından üretilir. Aşağıdaki bölümlerdeki cümleleri AYNEN kopyalama.
+2-3 kısa paragraf, TOPLAM yaklaşık 150-250 kelime (bu sınırı AŞMA). İçerik: aday kim, hangi deneyime sahip; mülakatta NEYİ SOMUT OLARAK gösterdi; hangi konularda güçlü, hangi konularda değil; pozisyona uygunluk açısından sonuç. Dakika damgası KULLANMA (detay aşağıdaki bölümlerde). Bir karar/öneri kelimesi (Reddet/İşe Al/Değerlendir vb.) YAZMA — karar ayrı, sistem tarafından üretilir. Boş/klişe ifade YASAK (aşağıdaki "YASAK KALIPLAR" listesi burada da geçerli). Aşağıdaki bölümlerdeki cümleleri AYNEN kopyalama.
 
 ===POZİSYON YETKİNLİKLERİ===
 {criteria_table_filled}
@@ -2625,34 +2662,47 @@ Tek paragraf, 4-6 cümle: adayın kim olduğu ve deneyimi; pozisyon açısından
 ===KİŞİSEL VE BİLİŞSEL PROFİL===
 (Pozisyon yetkinliklerinden AYRI, pozisyondan bağımsız, her aday için SABİT kriter seti — işe alım kararını TEK BAŞINA belirlemez, yalnızca destekleyici bir puandır.)
 {profile_table_filled}
-(YUKARIDAKİ TABLOYU AYNEN KULLAN.) Aynı kanıt standardı geçerlidir: dakika damgası ZORUNLU, yüksek puanda ≥2 bağımsız kanıt, düşük puanda somut gerekçe, tahmin YOK. Dayanaksız çıkarım, kişilik teşhisi, IQ/zekâ yorumu YASAK.
+(YUKARIDAKİ TABLOYU AYNEN KULLAN.) Aynı kanıt standardı ve GEREKÇE YAZIM KURALLARI (yukarıda, SCORING_RUBRIC içinde) burada da geçerlidir: yüksek puanda ≥2 bağımsız kanıt, düşük puanda somut gerekçe, tahmin YOK, klişe kalıp YOK, damga yalnız kritik kanıtta. Dayanaksız çıkarım, kişilik teşhisi, IQ/zekâ yorumu YASAK.
 
 ===GÜÇLÜ YÖNLER===
-Kısa liste — yalnız GERÇEKTEN güçlü, somut bulgular. Her madde tek satır + dakika damgası.
+Her madde PARAGRAF halinde (tek satır/etiket DEĞİL) — bir madde: (a) aday NE YAPABİLİYOR, (b) bunu mülakatın neresinden anlıyoruz (somut örnek/alıntı), (c) pozisyon açısından ne anlama geliyor. Yalnız GERÇEKTEN güçlü, somut bulgular — genel ifade YASAK ("Luca kullanıyor" değil, "Luca'da e-fatura iptal/iade süreçlerini bağımsız yürütebilir" gibi somut ve pozisyona bağlanmış). Madde sayısı gerçekten olan kadar — üçe tamamlama YOK. Kriter gerekçelerinin (yukarıdaki tablolardaki) TEKRARI OLMAYACAK — orada puan gerekçesi var, burada yöneticinin göreceği "bu aday işe başlayınca ne yapabilir" var. Damga yalnız gerçekten kritik bir alıntı için (GÖREV 2 kuralı — zorunlu değil).
 
 ===GELİŞİM ALANLARI===
-Kısa liste, her madde dakika damgalı. Risk niteliğinde bir bulgu varsa (tutarsız beyan, mevzuata aykırı yaklaşım, iç kontrol zaafı, kurumsal ortamda çalışmayı zorlaştıracak somut bir tutum/davranış vb.) maddenin başına "RİSK:" yaz. Kanıtsız gelişim alanı üretme.
+Her madde PARAGRAF halinde: (a) aday NE YAPAMIYOR/NEREDE ZORLANDI, (b) hangi somut senaryoda/soruda kendini gösterdi, (c) bu eksiğin işte YARATABİLECEĞİ SOMUT RİSK. Risk niteliğinde bir bulgu varsa (tutarsız beyan, mevzuata aykırı yaklaşım, iç kontrol zaafı, kurumsal ortamda çalışmayı zorlaştıracak somut bir tutum/davranış vb.) paragrafın başına "RİSK:" yaz. Kanıtsız gelişim alanı üretme; madde sayısı gerçekten olan kadar. Kriter gerekçelerinin TEKRARI OLMAYACAK (yukarıdaki not — Güçlü Yönler için de geçerli). Genel ifade YASAK ("analitik düşünmede derinlik eksikliği" değil, hangi senaryoda nasıl zorlandığı). Damga yalnız gerçekten kritik bir alıntı için.
 
 ===CV ÖZETİ===
 CV metninden ve/veya adayın mülakatta SÖZLÜ beyan ettiğinden yalnızca GERÇEKTEN bilgi olan alanları, her biri ayrı satırda, şu etiketlerle yaz: Eğitim / Deneyim / Teknik Yetkinlikler / Sektör Yetkinlikleri / Diller / Sertifikalar. Bilgi CV'de yoksa ama adayın SÖZLÜ beyanından geliyorsa satırın sonuna "(kaynak: sözlü beyan)" ekle. Bir alanda hiç bilgi YOKSA o satırı hiç YAZMA (atla). Bu bölümde DEĞERLENDİRME/yorum yapma, yalnız özetle.
 
 ===TAKİP MÜLAKATI SORULARI===
 En fazla 3-5 soru (üst sınır — hedef DEĞİL: somut belirsizlik azsa 3'ten az da yazabilirsin, hatta hiç olmayabilir). YALNIZ bu mülakatta ortaya çıkan SOMUT belirsizliklere yönelik olsun. Her soru şu kaynaklardan birine dayanmalı: (a) adayın cevap veremediği/atladığı bir soru, (b) adayın kendi ağzıyla belirttiği bir bilgi eksikliği, (c) örnek istenip alınamayan/yüzeysel kalmış bir cevap, (d) CV'de yazılı olup mülakatta doğrulanamayan bir yetkinlik, (e) ikinci değerlendiricinin işaret edebileceği türden bir belirsizlik. Her sorunun transkriptte somut bir dayanağı olmalı.
-Sorular adayın GEÇMİŞİNE ve BİLDİKLERİNE yönelik olsun, GELECEK PLANINA değil. Yanlış: "Bu konuda nasıl gelişeceksiniz?" Doğru: "Şu yöntemi bildiğinizi belirttiniz; hangi koşullarda ve hangi kayıtla uyguladığınızı somut bir örnek üzerinden açıklar mısınız?"
-KESİNLİKLE YASAK — bu kalıplarla veya eş anlamlılarıyla SORU YAZMA (bunlar genel kariyer-koçluğu sorularıdır, adayı değerlendirmeye yaramaz): "hangi adımları atmayı planlıyorsunuz", "nasıl bir gelişim planı oluşturabilirsiniz", "hangi kaynakları kullanabilirsiniz", "hangi eğitim veya kaynaklardan yararlanmayı düşünüyorsunuz", "kendinizi nasıl geliştirmeyi planlıyorsunuz", "hangi stratejileri uygulayabilirsiniz".
+KURAL: Sorular adayın GEÇMİŞİNE ve BİLDİKLERİNE yönelik olsun, GELECEK PLANINA değil.
+  Yanlış (GELECEK PLANI sorusu): "Bu konuda kendinizi nasıl geliştirmeyi planlıyorsunuz?"
+  Doğru (GEÇMİŞE/BİLGİYE dayalı): "Şu yöntemi bildiğinizi belirttiniz; hangi koşullarda ve hangi kayıtla uyguladığınızı somut bir örnek üzerinden açıklar mısınız?"
+KESİNLİKLE YASAK — aşağıdaki kalıplarla veya eş anlamlılarıyla SORU YAZMA (bunlar genel kariyer-koçluğu sorularıdır, HER adaya sorulabilir, BU adayı değerlendirmeye yaramaz — sistem bu kalıplardan birini tespit ederse o SORUYU RAPORDAN SİLER):
+  - "hangi adımları atmayı planlıyorsunuz"
+  - "nasıl bir gelişim planı oluşturabilirsiniz"
+  - "hangi kaynakları kullanabilirsiniz"
+  - "hangi eğitim veya kaynaklardan yararlanmayı düşünüyorsunuz"
+  - "kendinizi nasıl geliştirmeyi planlıyorsunuz"
+  - "hangi stratejileri uygulayabilirsiniz"
 Somut bir belirsizlik YOKSA "YOK" yaz — sayıyı tamamlamak için soru uydurma.
 ===BÖLÜM SONU==="""
 
-# İş emri GÖREV 2.3+2.5 — takip mülakatı sorularındaki YASAK (genel gelişim koçluğu) kalıplarının
-# deterministik tespiti. Bulunca SATIRI SİLMEZ (madde 25 — sessizce yeni kural uydurma yasağı
-# gereği, otomatik silme yerine loglama tercih edildi) — yalnız teşhis için system_decision'a yazar.
+# Takip mülakatı sorularındaki YASAK (genel gelişim koçluğu) kalıplarının deterministik tespiti.
+# İş emri GÖREV 5.2 (bu tur) — artık aktif müdahale eder (bkz. finalize_interview: satırı SİLER,
+# madde 25'teki "sessizce yeni kural uydurma" yasağı bu SATIR-BAZLI silmeye uygulanmaz çünkü bu,
+# şartnamenin AÇIKÇA istediği davranış). KAPSAM GENİŞLETİLDİ: önceki tur yalnız 6 SABİT kalıbı
+# birebir arıyordu; model bunları paraphrase edince (ör. "hangi kaynaklardan yararlanmayı
+# düşünüyorsunuz" / "nasıl aşmayı planlıyorsunuz") kaçıyordu — canlı-benzeri sentetik testte
+# yakalandı. Artık GÖREV 5.4'ün ayırt edici ilkesine (GELECEK PLANI vs GEÇMİŞ/BİLGİ) göre genel
+# desenler de yakalanıyor: "...planlıyorsunuz" (planlamak HER ZAMAN gelecek-yönelimlidir) ve
+# "yararlanmayı/kullanmayı/geliştirmeyi/uygulamayı düşünüyorsunuz" (gelecek niyeti sorgusu).
 _FORBIDDEN_FOLLOWUP_RE = re.compile(
-    r"hangi ad[ıi]mlar[ıi] atmay[ıi] planl[ıi]yorsunuz"
+    r"planl[ıi]yorsunuz"
+    r"|(?:yararlanmay[ıi]|kullanmay[ıi]|geli[şs]tirmeyi|uygulamay[ıi]|a[şs]may[ıi]) d[üu][şs][üu]n[üu]yorsunuz"
     r"|nas[ıi]l bir geli[şs]im plan[ıi]"
-    r"|hangi kaynaklar[ıi] kullanabilirsiniz"
-    r"|hangi e[ğg]itim(?:ler)?(?:den|'?den)? (?:veya kaynaklardan )?yararlanmay[ıi] d[üu][şs][üu]n[üu]yorsunuz"
-    r"|kendinizi nas[ıi]l geli[şs]tirmeyi planl[ıi]yorsunuz"
-    r"|hangi stratejileri uygulayabilirsiniz",
+    r"|hangi kaynaklar[ıi]?(?:dan)? kullanabilirsiniz"
+    r"|hangi strateji(?:leri)? uygulayabilirsiniz",
     re.IGNORECASE)
 
 def detect_forbidden_followup_patterns(text: str) -> list:
@@ -3253,7 +3303,8 @@ def get_candidates(payload=Depends(verify_admin), org_id: Optional[int] = None, 
         SELECT c.*, i.score, i.score_position, i.score_profile, i.recommendation, i.completed_at as interview_completed,
                i.completed_at as interview_completed_at, i.total_input_tokens, i.total_output_tokens,
                i.processing_status, i.processing_error, i.started_at,
-               i.partial, i.completion_pct, i.technical_error_ref
+               i.partial, i.completion_pct, i.technical_error_ref,
+               i.reviewer_score_position, i.reviewer_score_profile
         FROM candidates c
         LEFT JOIN interviews i ON c.id = i.candidate_id AND i.level = c.level
         WHERE c.org_id=?
@@ -3282,7 +3333,8 @@ def get_person(person_id: int, payload=Depends(verify_admin), db=Depends(db_dep)
                c.interview_start_count, c.last_start_at, c.invite_expires_at,
                i.score, i.score_position, i.score_profile, i.recommendation, i.completed_at as interview_completed_at,
                i.processing_status, i.processing_error, i.started_at,
-               i.partial, i.completion_pct, i.technical_error_ref
+               i.partial, i.completion_pct, i.technical_error_ref,
+               i.reviewer_score_position, i.reviewer_score_profile
         FROM candidates c
         LEFT JOIN interviews i ON i.candidate_id = c.id AND i.level = c.level
         WHERE c.person_id = ?
@@ -5245,6 +5297,19 @@ def _tr_lower_first(s: str) -> str:
         c2 = c.lower()
     return c2 + s[1:]
 
+def _relative_time_bin(t_sn, total_min) -> Optional[str]:
+    """İş emri GÖREV 7 — ham [mm:ss] damgası yerine GÖRECELİ konum ('başında'/'ortasında'/
+    'sonlarında') döner. total_min bilinmiyorsa None (çağıran o zaman zaman ifadesi eklemez,
+    UYDURMAZ)."""
+    if not isinstance(t_sn, (int, float)) or not total_min:
+        return None
+    frac = (t_sn / 60.0) / total_min
+    if frac < 0.33:
+        return "başında"
+    if frac < 0.66:
+        return "ortasında"
+    return "sonlarında"
+
 def build_modality_prose(candidate_id: int, level: int) -> str:
     """Mimik + ses + mülakatçı gözlemlerinden İNSAN DİLİYLE, JSON ALAN ADI/ETİKETİ SIZDIRMAYAN,
     GÖRÜNTÜ ve SES ayrı paragraflarda bir 'Görüntü ve Ses Gözlemi' bölümü üretir. Ham SAYILAR bu
@@ -5254,6 +5319,7 @@ def build_modality_prose(candidate_id: int, level: int) -> str:
     veri yoksa TÜM bölüm boş döner (üst katman boş başlık basmaz)."""
     mimic, metrics, obs = _read_modality_json(candidate_id, level)
     cov = compute_modality_coverage(candidate_id, level) if _level_has_camera(level) else {}
+    total_min = cov.get("toplam_dk")
 
     # ── Görüntü paragrafı (yalnız kamera yakalayan seviyelerde) ──
     goruntu = []
@@ -5278,32 +5344,38 @@ def build_modality_prose(candidate_id: int, level: int) -> str:
             if _parcalar:
                 goruntu.append("Görüntüde " + ", ".join(_parcalar) + " gözlendi.")
 
-            # belirgin_anlar — İŞ EMRİ madde 1.3+1.4: "Öne çıkan anlar:" gibi bir ETİKET/liste
-            # başlığı YOK; aynı gözlem birden çok zaman damgasında geçiyorsa TEK cümlede
-            # toplanır (madde 1.3), cümle içinde doğal bir bağlaçla akışa eklenir (madde 1.4).
+            # belirgin_anlar — İş emri GÖREV 7 (+ önceki tur madde 1.3+1.4): "Öne çıkan anlar:"
+            # gibi bir ETİKET/liste başlığı YOK, [mm:ss] damgası da YOK (GÖREV 2/7.2 — bu bölümde
+            # damga gerekli değil); aynı gözlem birden çok anda geçiyorsa TEK cümlede toplanır,
+            # ne zaman geçtiği HAM DAMGA değil GÖRECELİ konum (oturumun başında/ortasında/
+            # sonlarında) ile, tam cümle içine gömülü olarak anlatılır.
             _anlar = [a for a in (mimic.get("belirgin_anlar") or []) if isinstance(a, dict) and a.get("gozlem")]
-            _groups = []  # [{"text","times":[...],"yorum"}]
+            _groups = []  # [{"text","secs":[...],"yorum"}]
             for a in _anlar[:8]:
                 gtxt = str(a["gozlem"]).strip().rstrip(".")
                 if not gtxt:
                     continue
-                _t = a.get("t_sn")
-                ts = f"{int(_t)//60}:{int(_t)%60:02d}" if isinstance(_t, (int, float)) else None
+                _t = a.get("t_sn") if isinstance(a.get("t_sn"), (int, float)) else None
                 yr = str(a.get("yorum") or "").strip().rstrip(".")
                 if yr.lower() in ("nötr", "notr"):
                     yr = ""
                 grp = next((g for g in _groups if _is_near_duplicate(gtxt, [g["text"]], threshold=0.55)), None)
                 if grp:
-                    if ts and ts not in grp["times"]:
-                        grp["times"].append(ts)
+                    if _t is not None:
+                        grp["secs"].append(_t)
                 else:
-                    _groups.append({"text": gtxt, "times": [ts] if ts else [], "yorum": yr})
+                    _groups.append({"text": gtxt, "secs": [_t] if _t is not None else [], "yorum": yr})
             if _groups:
                 clauses = []
                 for g in _groups[:3]:
-                    when = f"[{', '.join(g['times'])}] " if g["times"] else ""
+                    _bins = []
+                    for _s in g["secs"]:
+                        _b = _relative_time_bin(_s, total_min)
+                        if _b and _b not in _bins:
+                            _bins.append(_b)
+                    when_txt = f" (oturumun {' ve '.join(_bins)})" if _bins else ""
                     yr_txt = f" ({g['yorum']})" if g["yorum"] else ""
-                    clauses.append(f"{when}{g['text']}{yr_txt}")
+                    clauses.append(f"{_tr_lower_first(g['text'])}{yr_txt}{when_txt}")
                 goruntu.append("Ayrıca " + "; ".join(clauses) + ".")
 
             _izlenim = str(mimic.get("genel_izlenim") or "").strip().rstrip(".")
@@ -5317,7 +5389,6 @@ def build_modality_prose(candidate_id: int, level: int) -> str:
     if _level_has_voice(level):
         if metrics and _safe_int(metrics.get("tur_sayisi")) > 0:
             talk = metrics.get("aday_konusma_toplam_sn")
-            total_min = cov.get("toplam_dk")
             _pct = round(100 * (talk / 60.0) / total_min) if (talk is not None and total_min) else None
             if _pct is not None:
                 # İş emri madde 3 — yüzde/sayı yerine niteliksel bant (ham sayı EK 3'te kalır).
@@ -5517,14 +5588,18 @@ def _set_reviewer_status(candidate_id: int, level: int, status: str, error: Opti
         print(f"UYARI (_set_reviewer_status c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
 def _reviewer_criteria_block(position_criteria: list) -> str:
-    """GÖREV 1.6 — müfettişe GPT ile AYNI kriter setini ve AYNI maksimum puanları verir."""
-    lines = ["PUAN 1 (pozisyon) kriterleri ve tavanları:"]
-    for c in (position_criteria or []):
+    """Müfettişe GPT ile AYNI kriter setini ve AYNI maksimum puanları, KİMLİK (ID) ile verir.
+    İş emri GÖREV 6.1 — kriter eşleştirmesi artık GÖRÜNEN ADA göre YAPILMAZ (benzer isimli
+    pozisyon/profil kriterleri — ör. 'Analitik Yaklaşım' ↔ 'Analitik yapı ve muhakeme' —
+    birbirine karışıyordu). Müfettiş KRITER_PUAN/KRITER_GEREKCE satırlarında kriter ADINI değil
+    bu P#/K# kimliğini yazar; kimlik→ad→tavan eşleşmesi sistemde SABİT ve tekildir."""
+    lines = ["POZİSYON kriterleri ve tavanları — KRITER_PUAN/KRITER_GEREKCE satırlarında kriter ADI DEĞİL, buradaki KİMLİĞİ (P1, P2, ...) yaz:"]
+    for i, c in enumerate((position_criteria or []), start=1):
         if c.get("name"):
-            lines.append(f"- {c['name']}: __/{_safe_int(c.get('weight'))}")
-    lines.append("PUAN 2 (kişisel/bilişsel profil) kriterleri ve tavanları:")
-    for pc in PROFILE_CRITERIA:
-        lines.append(f"- {pc['name']}: __/{pc['weight']}")
+            lines.append(f"- P{i}: {c['name']} — __/{_safe_int(c.get('weight'))}")
+    lines.append("KİŞİSEL VE BİLİŞSEL PROFİL kriterleri ve tavanları — aynı şekilde KİMLİĞİ (K1, K2, ...) yaz:")
+    for i, pc in enumerate(PROFILE_CRITERIA, start=1):
+        lines.append(f"- K{i}: {pc['name']} — __/{pc['weight']}")
     return "\n".join(lines)
 
 def run_report_reviewer(candidate_id: int, level: int, transcript_text: str, final_report: str, modality_block: str,
@@ -5560,9 +5635,9 @@ Bunun DIŞINDA, yukarıdaki görüşün olup olmamasından TAMAMEN BAĞIMSIZ ola
 Mülakatın TAMAMINA (akış baskısı olmadan, dışarıdan) bakarak adayın özgüvenine dair gözlemini yaz: kendinden emin mi/tereddütlü mü, kararlarını savunabiliyor mu/geri adım atıyor mu, belirsizlik veya zorlayıcı bir soru karşısındaki tutumu, bilmediğini açıkça kabul edebiliyor mu, görüşünü gerekçelendirerek mi savunuyor yoksa sadece tekrarlıyor mu, mülakatçı zorladığında pozisyonunu koruyor mu. Bu bir KONTROL LİSTESİ DEĞİLDİR — yalnız transkriptte GERÇEKTEN karşılığı olan yönleri yaz, karşılığı olmayan madde için cümle KURMA. KESİN KİŞİLİK HÜKMÜ YASAK (ör. "özgüveni düşük bir kişi" YAZMA) — somut davranış + [dk] damgası yaz, ör: "zorlayıcı sorularda pozisyonunu değiştirmeden savundu [12:36], ancak gerekçesini yeni bir örnekle desteklemek yerine aynı ifadeyi tekrarladı [13:47]". EN AZ BİR [dk] damgası ZORUNLU — damgasız genel yorum YAZMA. 1-2 paragraf, doldurma yok. SADECE transkript bu izlenimi kurmaya gerçekten yetmiyorsa (aday neredeyse hiç konuşmadı / mülakat çok kısa kesildi) bu bloğa SADECE "YETERSİZ VERİ" yaz — zorla üretme.
 
 === KRİTER PUANLARI ===
-KRITER_PUAN: <kriter adı> = <senin puanın>/<maksimum>
-KRITER_GEREKCE: <kriter adı> = <2-3 cümle gerekçe, en az bir [dk] damgalı somut kanıt>
-(YALNIZCA birincil değerlendirmeden GERÇEKTEN FARKLI puan verdiğin kriterler için — aynı puanı veriyorsan o kriter için HİÇBİR satır yazma, atla; rapordaki puanları KOPYALAMA, transkripte göre KENDİ değerlendirmeni yap.)
+KRITER_PUAN: <KİMLİK, ör. P1 veya K3 — AŞAĞIDAKİ LİSTEDEN, kriter ADINI YAZMA> = <senin puanın>/<maksimum>
+KRITER_GEREKCE: <AYNI KİMLİK> = <2-3 cümle gerekçe, en az bir [dk] damgalı somut kanıt>
+(YALNIZCA birincil değerlendirmeden GERÇEKTEN FARKLI puan verdiğin kriterler için — aynı puanı veriyorsan o kriter için HİÇBİR satır yazma, atla; rapordaki puanları KOPYALAMA, transkripte göre KENDİ değerlendirmeni yap. KRITER_PUAN yazıp KRITER_GEREKCE YAZMAMAK KABUL EDİLMEZ — her KRITER_PUAN satırının hemen altında AYNI kimlikle bir KRITER_GEREKCE satırı OLMALI.)
 GUVEN_DUZEYI: <yüksek|orta|düşük> — <kendi değerlendirmene duyduğun güven düşükse KISA neden; yüksekse yalnızca 'yüksek' yaz> (bu satır ADAYIN değil SENİN kendi değerlendirmene duyduğun güvendir — rapora BASILMAZ, yalnız yönetici kaydı için)
 
 {_reviewer_criteria_block(position_criteria)}
@@ -5597,24 +5672,26 @@ GUVEN_DUZEYI: <yüksek|orta|düşük> — <kendi değerlendirmene duyduğun güv
         return "", "failed", f"{type(e).__name__}: {e}"
 
 def parse_reviewer_criterion_scores(notes: str) -> dict:
-    """Müfettiş çıktısındaki 'KRITER_PUAN: <ad> = <p>/<max>' satırlarını ayrıştırır.
-    Dönüş: {kriter_adı: (puan, maks)}."""
+    """Müfettiş çıktısındaki 'KRITER_PUAN: <KİMLİK> = <p>/<max>' satırlarını ayrıştırır — iş emri
+    GÖREV 6.1: kimlik (P1, K3, ...) ile, ARTIK ada göre DEĞİL (benzer isimli pozisyon/profil
+    kriterleri karışıyordu). Dönüş: {kimlik: (puan, model_maks)} — model_maks yalnız teşhis
+    içindir, gerçek tavan HER ZAMAN kriter listesinden (build_reviewer_diff_block/
+    compute_reviewer_overall) okunur, modelin yazdığı sayı GÜVENİLMEZ."""
     out = {}
-    for m in re.finditer(r"KR[İI]TER_PUAN\s*:\s*(.+?)\s*=\s*(\d+)\s*/\s*(\d+)", notes or "", re.IGNORECASE):
-        name = re.sub(r"[*_`]", "", m.group(1)).strip()
-        if name:
-            out[name] = (int(m.group(2)), int(m.group(3)))
+    for m in re.finditer(r"KR[İI]TER_PUAN\s*:\s*\**\s*([PK]\d+)\s*\**\s*=\s*(\d+)\s*/\s*(\d+)", notes or "", re.IGNORECASE):
+        cid = m.group(1).upper()
+        out[cid] = (int(m.group(2)), int(m.group(3)))
     return out
 
 def parse_reviewer_criterion_gerekce(notes: str) -> dict:
-    """İş emri madde 9 — müfettişin 'KRITER_GEREKCE: <ad> = <metin>' satırlarını ayrıştırır
-    (yalnız birincilden FARKLI puan verdiği kriterler için beklenir). Dönüş: {kriter_adı: metin}."""
+    """Müfettişin 'KRITER_GEREKCE: <KİMLİK> = <metin>' satırlarını kimliğe göre ayrıştırır
+    (yalnız birincilden FARKLI puan verdiği kriterler için beklenir). Dönüş: {kimlik: metin}."""
     out = {}
-    for m in re.finditer(r"(?m)^\s*KR[İI]TER_GEREKCE\s*:\s*(.+?)\s*=\s*(.+)$", notes or "", re.IGNORECASE):
-        name = re.sub(r"[*_`]", "", m.group(1)).strip()
+    for m in re.finditer(r"(?m)^\s*KR[İI]TER_GEREKCE\s*:\s*\**\s*([PK]\d+)\s*\**\s*=\s*(.+)$", notes or "", re.IGNORECASE):
+        cid = m.group(1).upper()
         text = m.group(2).strip()
-        if name and text:
-            out[name] = text
+        if text:
+            out[cid] = text
     return out
 
 # TUR 3 / GÖREV 3 — müfettiş "susmuş" (yalnızca klişe / boş) mu? Bu kalıplar ve <40 kr → sus.
@@ -5706,28 +5783,29 @@ def build_reviewer_diff_block(rv_scores: dict, rv_gerekce: dict, position_criter
                               pos_table_text: str, prof_table_text: str) -> str:
     """İş emri madde 9 — yalnızca İKİ değerlendirici arasında GERÇEK puan farkı olan kriterler
     için satır üretir: 'Kriter adı — ikinci puan (birincil: X)' + varsa 2-3 cümlelik gerekçe.
-    Aynı puan verilen kriterlerden HİÇ bahsetmez. Fark yoksa boş döner (çağıran atlar)."""
-    def _find(d: dict, name: str):
-        v = d.get(name)
-        if v is not None:
-            return v
-        nn = _norm_name(name)
-        for k, val in d.items():
-            if nn[:12] and nn[:12] in _norm_name(k):
-                return val
-        return None
+    Aynı puan verilen kriterlerden HİÇ bahsetmez. Fark yoksa boş döner (çağıran atlar).
+    GÖREV 6.1+6.2 — eşleştirme KİMLİK (P#/K#) üzerinden, ADA göre DEĞİL (benzer isimli pozisyon/
+    profil kriterleri artık karışamaz); tavan HER ZAMAN kriter listesinden (modelin kendi
+    yazdığı 'maksimum' asla güvenilmez — GÖREV 6.2)."""
     lines = []
-    for criteria_list, table_text in ((position_criteria or [], pos_table_text), (profile_criteria or [], prof_table_text)):
-        for c in criteria_list:
-            name = c["name"] if isinstance(c, dict) else c
-            rv = _find(rv_scores, name)
+    for criteria_list, table_text, prefix in ((position_criteria or [], pos_table_text, "P"),
+                                              (profile_criteria or [], prof_table_text, "K")):
+        for i, c in enumerate(criteria_list, start=1):
+            cid = f"{prefix}{i}"
+            rv = rv_scores.get(cid)
             if rv is None:
                 continue
+            name = c["name"] if isinstance(c, dict) else c
+            real_cap = _safe_int(c.get("weight")) if isinstance(c, dict) else None
             prim = _criterion_award(name, table_text)
-            if prim is None or rv[0] == prim[0]:
-                continue  # gerçek fark yok (ya da birincil bu kriteri hiç puanlamadı — kıyaslanamaz)
-            lines.append(f"**{name}** — {rv[0]}/{rv[1]} (birincil: {prim[0]}/{prim[1]})")
-            gerekce = _find(rv_gerekce, name)
+            if prim is None:
+                continue  # birincil bu kriteri hiç puanlamadı — kıyaslanamaz
+            eff_cap = real_cap or prim[1]
+            rv_awarded = max(0, min(rv[0], eff_cap))
+            if rv_awarded == prim[0]:
+                continue  # gerçek fark yok
+            lines.append(f"**{name}** — {rv_awarded}/{eff_cap} (birincil: {prim[0]}/{prim[1]})")
+            gerekce = rv_gerekce.get(cid)
             if gerekce:
                 lines.append(str(gerekce).strip())
     return "\n\n".join(lines)
@@ -5816,8 +5894,8 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
 
     # İkinci değerlendiricinin GENEL pozisyon/profil puanları — Genel Puan'a girer (madde 6),
     # birincilin KENDİ puanını DEĞİŞTİRMEZ (madde 21).
-    reviewer_score_position = compute_reviewer_overall(position_criteria or [], pos_table_text, rv_scores) if position_criteria else None
-    reviewer_score_profile = compute_reviewer_overall(PROFILE_CRITERIA, prof_table_text, rv_scores)
+    reviewer_score_position = compute_reviewer_overall(position_criteria or [], pos_table_text, rv_scores, id_prefix="P") if position_criteria else None
+    reviewer_score_profile = compute_reviewer_overall(PROFILE_CRITERIA, prof_table_text, rv_scores, id_prefix="K")
 
     # DOKUNULMAYACAKLAR — müfettişin KENDİ güven düzeyi ana rapora GİRMEZ, yalnız burada
     # (yönetici kaydı, system_decision) tutulur.
@@ -6259,6 +6337,17 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     score = compute_genel_puan(score_position, score_profile)
     recommendation = decide_recommendation(score) or "Değerlendirilemedi"
 
+    # İş emri GÖREV 1.1 — kriter gerekçelerinde klişe kalıp tespiti (siler değil, loglar — bkz.
+    # detect_evidence_cliches tanımı: cümle ortasından çıkarmak grameri bozar).
+    try:
+        _cliche_hits = detect_evidence_cliches(pos_table_display) + detect_evidence_cliches(prof_table_display)
+        if _cliche_hits:
+            record_system_decision(candidate_id, level, "kriter_gerekcesi_klise_kalip",
+                                   "Kriter gerekçelerinde klişe/kalıplaşmış ifade tespit edildi (loglama amaçlı; içerik OTOMATİK değiştirilmedi).",
+                                   {"satirlar": _cliche_hits})
+    except Exception as e:
+        print(f"UYARI (finalize_interview klişe taraması c={candidate_id}): {type(e).__name__}: {e}")
+
     db = get_db()
     messages = get_interview_messages(db, candidate_id, level)
 
@@ -6267,13 +6356,18 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     gy_text = sections.get("guclu_yonler", "")
     ga_text = sections.get("gelisim_alanlari", "")
     tm_text = sections.get("takip_sorulari", "")
-    # İş emri GÖREV 2.5 — yasaklı genel-gelişim kalıbı tespiti (siler değil, loglar).
+    # İş emri GÖREV 5.2 — yasaklı genel-gelişim kalıbı tespiti + AKTİF MÜDAHALE (önceki turda
+    # yalnız logluyordu). Her yasaklı soru KENDİ SATIRIDIR (bağımsız madde) — bu satırı bütünüyle
+    # çıkarmak, GÖREV 1'deki cümle-İÇİ klişelerin aksine, gramer BOZMAZ (o yüzden orada hâlâ
+    # yalnız loglama tercih edildi — bkz. detect_evidence_cliches, burada ise satır tamamen atılır).
     try:
         _forbidden_followups = detect_forbidden_followup_patterns(tm_text)
         if _forbidden_followups:
-            record_system_decision(candidate_id, level, "takip_sorulari_yasakli_kalip",
-                                   "Takip Mülakatı Soruları'nda genel gelişim-koçluğu kalıbı tespit edildi (loglama amaçlı; içerik OTOMATİK değiştirilmedi).",
-                                   {"satirlar": _forbidden_followups})
+            _kept = [ln for ln in tm_text.splitlines() if not (ln.strip() and _FORBIDDEN_FOLLOWUP_RE.search(ln))]
+            tm_text = "\n".join(_kept).strip()
+            record_system_decision(candidate_id, level, "takip_sorulari_yasakli_kalip_silindi",
+                                   "Takip Mülakatı Soruları'nda genel gelişim-koçluğu kalıbı tespit edildi ve o SORU rapordan çıkarıldı (GÖREV 5.3 — tümü çıkarsa bölüm hiç basılmaz).",
+                                   {"silinen_satirlar": _forbidden_followups})
     except Exception as e:
         print(f"UYARI (finalize_interview takip sorulari kalip taramasi c={candidate_id}): {type(e).__name__}: {e}")
     cv_ozeti_text = ""
@@ -6289,6 +6383,17 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
             ga_text = repair_report_spacing(ga_text, glue_terms=_glue)
         except Exception as e:
             print(f"UYARI (finalize_interview boşluk onarımı c={candidate_id}): {type(e).__name__}: {e}")
+
+        # İş emri GÖREV 4.1 — Yönetici Özeti 150-250 kelime sınırı: DETECT+LOG (kısaltmak cümleyi
+        # yarıda keser, daha kötü olur — bkz. GÖREV 1'in aynı "silme değil teşhis" ilkesi).
+        try:
+            _wc = len(yo_text.split())
+            if yo_text and not (150 <= _wc <= 250):
+                record_system_decision(candidate_id, level, "yonetici_ozeti_uzunluk_disi",
+                                       f"Yönetici Özeti {_wc} kelime — hedef aralık (150-250) dışında (loglama amaçlı; içerik OTOMATİK kısaltılmadı/uzatılmadı).",
+                                       {"kelime_sayisi": _wc})
+        except Exception as e:
+            print(f"UYARI (finalize_interview yönetici özeti uzunluk kontrolü c={candidate_id}): {type(e).__name__}: {e}")
 
         # CV Özeti — model ürettiyse kullan, yoksa/çok kısaysa deterministik yedek (iş emri madde 13).
         cv_ozeti_text = (sections.get("cv_ozeti") or "").strip()
@@ -7583,27 +7688,27 @@ def _criterion_award(name: str, table_text: str):
             best = (score_c0, cand)
     return best[1] if best else None
 
-def compute_reviewer_overall(criteria_list: list, primary_table_text: str, reviewer_scores: dict):
+def compute_reviewer_overall(criteria_list: list, primary_table_text: str, reviewer_scores: dict, id_prefix: str = "P"):
     """İkinci değerlendiricinin GENEL puanını (pozisyon YA DA profil — çağıran hangi kriter
-    listesini/tabloyu verirse o) türetir: her kriter için reviewer'ın KENDİ puanı varsa onu,
-    yoksa birincilin (zaten normalize edilmiş) puanını kullanır — reviewer'ın hiç değinmediği
-    kriterlerde 'sessizce aynı fikirde' varsayımı GENEL KURAL olarak uygulanır (iş emri madde 21
-    — bir katman diğerinin puanını DEĞİŞTİRMEZ; bu yalnızca reviewer'ın KENDİ toplamını hesaplamak
-    için birincilin sayısını ödünç alır, birincilin kendi puanına dokunmaz).
+    listesini/tabloyu/kimlik önekini ('P' ya da 'K') verirse o) türetir: her kriter için
+    reviewer'ın KENDİ puanı varsa onu, yoksa birincilin (zaten normalize edilmiş) puanını
+    kullanır — reviewer'ın hiç değinmediği kriterlerde 'sessizce aynı fikirde' varsayımı GENEL
+    KURAL olarak uygulanır (madde 21 — bir katman diğerinin puanını DEĞİŞTİRMEZ; bu yalnızca
+    reviewer'ın KENDİ toplamını hesaplamak için birincilin sayısını ödünç alır).
+    GÖREV 6.1+6.2 — eşleştirme KİMLİK üzerinden (ADA göre değil); tavan HER ZAMAN kriter
+    listesinden (modelin kendi yazdığı 'maksimum' asla güvenilmez).
     Dönüş: normalize edilmiş puan (0-100) | None (değerlendirilebilir kriter yok)."""
     awarded_sum, cap_sum = 0, 0
-    for c in criteria_list:
+    for i, c in enumerate(criteria_list, start=1):
+        cid = f"{id_prefix}{i}"
         name = c["name"] if isinstance(c, dict) else c
         cap = _safe_int(c.get("weight")) if isinstance(c, dict) else None
-        rv = reviewer_scores.get(name)
-        if rv is None:
-            for k, v in reviewer_scores.items():
-                if _norm_name(k)[:12] and _norm_name(k)[:12] in _norm_name(name):
-                    rv = v
-                    break
+        rv = reviewer_scores.get(cid)
         if rv is not None:
-            awarded, rcap = rv
-            eff_cap = cap or rcap
+            awarded, _rcap_reported_by_model = rv
+            eff_cap = cap
+            if eff_cap is None or eff_cap <= 0:
+                continue
             awarded = max(0, min(awarded, eff_cap))
         else:
             prim = _criterion_award(name, primary_table_text)
@@ -7612,7 +7717,7 @@ def compute_reviewer_overall(criteria_list: list, primary_table_text: str, revie
             awarded, eff_cap = prim
             if cap:
                 eff_cap = cap
-        if eff_cap <= 0:
+        if eff_cap is None or eff_cap <= 0:
             continue
         awarded_sum += awarded
         cap_sum += eff_cap
