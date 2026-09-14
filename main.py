@@ -5930,13 +5930,19 @@ def parse_reviewer_criterion_scores(notes: str) -> dict:
         out[cid] = (int(m.group(2)), int(m.group(3)))
     return out
 
+# İş emri — KANIT BÜTÜNLÜĞÜ VE İKİNCİ DEĞERLENDİRİCİ ÇIKTISI / KALEM 4a — KÖK NEDEN: model bazen
+# kendi genel güven damgasını ("GUVEN_DUZEYI: ...", DOKUNULMAYACAK — yalnız yönetici kaydı içindir)
+# KRITER_GEREKCE satırının SONUNA köşeli parantezle ekliyor; bu satır tek satır REGEX'iyle ('.+$')
+# yakalandığı için ham etiket doğrudan müşteri tablosuna (devralma) veya diff bloğuna sızıyordu.
+_INLINE_GUVEN_DUZEYI_TAG_RE = re.compile(r"\[\s*GUVEN_DUZEYI\s*:[^\]]*\]\s*", re.IGNORECASE)
+
 def parse_reviewer_criterion_gerekce(notes: str) -> dict:
     """Müfettişin 'KRITER_GEREKCE: <KİMLİK> = <metin>' satırlarını kimliğe göre ayrıştırır
     (yalnız birincilden FARKLI puan verdiği kriterler için beklenir). Dönüş: {kimlik: metin}."""
     out = {}
     for m in re.finditer(r"(?m)^\s*KR[İI]TER_GEREKCE\s*:\s*\**\s*([PK]\d+)\s*\**\s*=\s*(.+)$", notes or "", re.IGNORECASE):
         cid = m.group(1).upper()
-        text = m.group(2).strip()
+        text = _INLINE_GUVEN_DUZEYI_TAG_RE.sub("", m.group(2).strip()).strip()
         if text:
             out[cid] = text
     return out
@@ -6065,6 +6071,53 @@ def build_reviewer_diff_block(rv_scores: dict, rv_gerekce: dict, position_criter
 _REVIEWER_SLOT_MARK = "<<İKİNCİ_DEĞERLENDİRİCİ_GÖRÜŞÜ_YERİ>>"
 _REVIEWER_HEAD = "**İkinci Değerlendirici Görüşü:**"
 
+# İş emri — KANIT BÜTÜNLÜĞÜ VE İKİNCİ DEĞERLENDİRİCİ ÇIKTISI / KALEM 4b — KÖK NEDEN: bölüm başlığı
+# zaten _REVIEWER_HEAD ile ayrıca basılıyor; model serbest metninin İLK SATIRINA da kendi başlığını
+# ("İKİNCİ DEĞERLENDİRİCİ GÖRÜŞÜ") yazınca başlık İKİ KEZ çıkıyordu.
+_REVIEWER_HEAD_TEXT_NORM = _tr_upper(re.sub(r"[*:]", "", _REVIEWER_HEAD)).strip()
+
+def _strip_duplicate_reviewer_heading(text: str) -> str:
+    if not text:
+        return text
+    parts = text.split("\n", 1)
+    first_clean = re.sub(r"[*:#\-\s]+$", "", re.sub(r"^[*:#\-\s]+", "", parts[0]))
+    if _tr_upper(first_clean).strip() == _REVIEWER_HEAD_TEXT_NORM:
+        return parts[1].strip() if len(parts) > 1 else ""
+    return text
+
+# İş emri — KANIT BÜTÜNLÜĞÜ VE İKİNCİ DEĞERLENDİRİCİ ÇIKTISI / KALEM 3 — KÖK NEDEN: müfettiş
+# bazen ADAY hakkında değil RAPORUN/PUANIN KENDİSİ hakkında konuşuyor (ör. "raporda X kriteri
+# 'değerlendirilemeyen' arasında yok, ancak...", "bu puan görece yüksek görünüyor", "...
+# işaretlenmesi daha uygun olurdu") — bu iç kalite-denetimi dili müşteri Ek Görüş'üne AYNEN
+# giriyordu, rapor kendi güvenilirliğine gölge düşürüyordu. Müşteriye giden Ek Görüş yalnız ADAY
+# hakkında gözlem içermeli.
+# NOT (kendi bulunan regresyon, testte yakalandı): bare "raporda" ÇOK GENİŞTİ — reviewer_
+# contradiction_unresolved mekanizmasının dayandığı MEŞRU bir cümle kalıbını da yakalıyordu
+# ('Raporda "..." iddiası transkriptte desteklenmiyor' — bu adayla İLGİLİ bir kanıt-denetimi,
+# raporun KENDİ yapısal/etiketleme kararını eleştiren KALEM 3 örneklerinden FARKLI). Desen artık
+# yalnız "raporda ... yer almıyor" (raporun KENDİ listeleme/etiketleme eksikliğini eleştiren) gibi
+# KALEM 3'ün somut örnekleriyle eşleşen, DAHA DAR kalıpları arar.
+_REPORT_META_COMMENTARY_RE = re.compile(
+    r"raporda[^.\n]{0,80}yer\s+almıyor|\braporun\s+kendisi|"
+    r"i[şs]aretlenmesi\s+daha\s+uygun|olarak\s+i[şs]aretlenmesi\s+daha\s+uygun|"
+    r"bu\s+puan\s+(?:g[öo]rece\s+)?(?:y[üu]ksek|d[üu][şs][üu]k)\s+g[öo]r[üu]n[üu]yor|"
+    r"gerek[çc]elendirilmi[şs]\s*;?\s*ancak",
+    re.IGNORECASE)
+
+def strip_report_meta_commentary(text: str) -> tuple:
+    """KALEM 3 — RAPORUN/PUANIN KENDİSİ hakkında konuşan cümleleri çıkarır (adayı DEĞİL). Dönüş:
+    (temiz_metin, çıkarılan_cümleler[])."""
+    if not text:
+        return text, []
+    sents = re.split(r'(?<=[.!?])\s+', text)
+    kept, dropped = [], []
+    for s in sents:
+        if _REPORT_META_COMMENTARY_RE.search(s):
+            dropped.append(s.strip())
+        else:
+            kept.append(s)
+    return " ".join(kept).strip(), dropped
+
 def recompute_overall_decision(candidate_id: int, level: int, reviewer_score_position=None, reviewer_score_profile=None):
     """TEK KARAR KAYNAĞI'nın 2. çağrısı (iş emri madde 6+21) — append_reviewer_section reviewer'ın
     kendi pozisyon/profil puanlarını türettikten SONRA burayı çağırır; Genel Puan artık mevcut
@@ -6110,6 +6163,22 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     if _REVIEWER_HEAD in final_report or _REVIEWER_SLOT_MARK not in final_report:
         return  # zaten işlendi (yeniden üretim/kurtarma taraması çift eklemez)
 
+    # İş emri — KANIT BÜTÜNLÜĞÜ VE İKİNCİ DEĞERLENDİRİCİ ÇIKTISI / KALEM 2 — devralmanın (aşağıda)
+    # ikinci değerlendiricinin gerekçesindeki [mm:ss] referansını doğrulayabilmesi için transkript
+    # GÖRÜNÜMÜ (rol+elapsed_ms) gerekir — önceden bu fonksiyona hiç verilmiyordu.
+    try:
+        db_tv = get_db()
+        try:
+            _iv_tv = db_tv.execute("SELECT messages, started_at FROM interviews WHERE candidate_id=? AND level=?",
+                                   (candidate_id, level)).fetchone()
+        finally:
+            db_tv.close()
+        transcript_view = build_transcript_view(_iv_tv["messages"] if _iv_tv else "[]", level,
+                                                 _iv_tv["started_at"] if _iv_tv else None, for_report=True)
+    except Exception as e:
+        print(f"UYARI (append_reviewer_section transcript_view c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        transcript_view = []
+
     def _save(updated_report: str):
         db2 = get_db()
         try:
@@ -6132,6 +6201,16 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     notes_wo_confidence = _strip_confidence_block(notes)
 
     free_raw, scores_raw = _split_reviewer_output(notes_wo_confidence)
+    # KALEM 4b — model kendi serbest metninin başına bölüm başlığını da yazmışsa (başlık zaten
+    # _REVIEWER_HEAD ile ayrıca basılıyor) o satır çıkarılır.
+    free_raw = _strip_duplicate_reviewer_heading(free_raw)
+    # KALEM 3 — RAPORUN/PUANIN KENDİSİ hakkında konuşan (adayı değil) cümleler müşteri bölümünden
+    # çıkarılır; iç kayıt olarak (yönetici görebilir) system_decision'a taşınır.
+    free_raw, _dropped_meta_sents = strip_report_meta_commentary(free_raw)
+    if _dropped_meta_sents:
+        record_system_decision(candidate_id, level, "reviewer_meta_yorum_cikarildi",
+                               "KALEM 3 — ikinci değerlendiricinin RAPORUN/PUANIN KENDİSİ hakkında konuşan cümleleri müşteri Ek Görüş bölümünden çıkarıldı (yalnız yönetici kaydı).",
+                               {"cikarilan_cumleler": _dropped_meta_sents})
     rv_scores = parse_reviewer_criterion_scores(scores_raw or notes_wo_confidence)
     rv_gerekce = parse_reviewer_criterion_gerekce(scores_raw or notes_wo_confidence)
     has_view = reviewer_has_substance(free_raw)
@@ -6146,9 +6225,9 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     # "Değerlendirilemedi" KALMIYOR (bkz. apply_criterion_takeover). Sessizce olmaz — loglanır.
     try:
         _new_pos_tbl, _new_score_pos_tk, _log_pos_tk = apply_criterion_takeover(
-            pos_table_text, position_criteria or [], rv_scores, rv_gerekce, "P")
+            pos_table_text, position_criteria or [], rv_scores, rv_gerekce, "P", transcript_view)
         _new_prof_tbl, _new_score_prof_tk, _log_prof_tk = apply_criterion_takeover(
-            prof_table_text, PROFILE_CRITERIA, rv_scores, rv_gerekce, "K")
+            prof_table_text, PROFILE_CRITERIA, rv_scores, rv_gerekce, "K", transcript_view)
         _takeover_log = _log_pos_tk + _log_prof_tk
         if _takeover_log:
             if _new_pos_tbl != pos_table_text:
@@ -6411,6 +6490,39 @@ def check_timestamp_grounded(ts: str, transcript_view: list, role: Optional[str]
             return True
     return False
 
+# İş emri — KANIT BÜTÜNLÜĞÜ VE İKİNCİ DEĞERLENDİRİCİ ÇIKTISI / KALEM 2 — KÖK NEDEN:
+# check_timestamp_grounded yalnız damganın role'e YAKIN olup olmadığına bakıyor, alıntılanan
+# METNİN o role'e GERÇEKTEN ait olup olmadığına DEĞİL. Gerçek örnek: bir kriterin K alanı
+# mülakatçının SORUSUNUN TAMAMINI alıntıladı ("...hangi geçici kontrolü koyarsınız?") ama damga
+# ([4:21]) yakınında BİR aday satırı da olduğu için (proximite) doğrulama geçti — alıntının
+# İÇERİĞİ hiç kontrol edilmedi. _CRIT_EVIDENCE_HINT formatı K'nin "kısa alıntı/özet" olmasına
+# izin verir (her zaman tırnaklı birebir alıntı ZORUNLU değildir) — bu yüzden alıntı YALNIZ
+# tırnak işareti VARSA doğrulanır (yoksa geriye uyum: yalnız proximite).
+_QUOTE_RE = re.compile(r'["“]([^"”]{5,300})["”]')
+
+def _timestamp_field_grounded(field_text: str, transcript_view: list, role: str, tolerance_s: int = 8) -> bool:
+    """G/K/E/S alanındaki [mm:ss] damgasının GERÇEK bir <role> satırına yakın olup olmadığını VE
+    (alanda tırnaklı bir alıntı varsa) o alıntının o role'e ait bir satırda GERÇEKTEN (boşluk-
+    normalize, birebir alt-string — bkz. _verbatim_in) geçip geçmediğini doğrular. check_timestamp_
+    grounded'ın YAPTIĞI proximite kontrolünü İÇERİR, üstüne alıntı-içerik doğrulaması EKLER."""
+    ts = _extract_timestamp(field_text)
+    if not ts:
+        return False
+    m_ts = _TS_RE.search(ts)
+    if not m_ts:
+        return False
+    target = int(m_ts.group(1)) * 60 + int(m_ts.group(2))
+    near_rows = [row for row in (transcript_view or [])
+                if row.get("role") == role and row.get("elapsed_ms") is not None
+                and abs(row["elapsed_ms"] // 1000 - target) <= tolerance_s]
+    if not near_rows:
+        return False
+    qm = _QUOTE_RE.search(field_text or "")
+    if not qm:
+        return True  # alıntı yok (yalnız özet) — proximite yeterli, geriye uyum
+    quote = qm.group(1)
+    return any(_verbatim_in(quote, row.get("text") or "") for row in near_rows)
+
 # ---- GÖREV 1 — yapısal hücre ayrıştırma + render ----
 def parse_structured_evidence_cell(cell_text: str) -> Optional[dict]:
     """'Kanıt ve Analiz' hücresindeki YAPISAL alanları ayrıştırır: G (gösterdiği, zorunlu), K
@@ -6458,6 +6570,30 @@ def render_criterion_rationale(fields: dict, template_idx: int) -> str:
     base = f"{g}. Kanıt: {k}."
     return base + (f" Eksik kalan yön: {e}." if e else "")
 
+# İş emri — KANIT BÜTÜNLÜĞÜ VE İKİNCİ DEĞERLENDİRİCİ ÇIKTISI / KALEM 1 — G alanı bir OLUMSUZLUK/
+# eksik belirtmeden (E boş), AÇIK ve KOŞULSUZ bir olumlu hüküm cümlesiyle ("...olduğunu
+# belirtmiştir/göstermiştir/sergilemiştir/ortaya koymuştur/kanıtlamıştır/ifade etmiştir") BİTİYORSA
+# ve buna rağmen tavanın ÇOK altında (<%34) bir puan verilmişse, metin ile puan ZIT yöne işaret
+# eder. Kasıtlı DAR (yalnız G'nin doğrudan bu kalıpla BİTTİĞİ, ortasında geçen serbest övgü
+# DEĞİL) — G format gereği zaten çoğu zaman "adayın ne yapabildiği" gibi olumlu-görünümlü bir
+# cümle olduğundan (bu formatın doğası), geniş bir "olumlu kelime" taraması aşırı yanlış-pozitif
+# üretirdi; yalnız KOŞULSUZ, hedge'siz bir KAPANIŞ hükmü + boş E + belirgin düşük puan üçlüsü
+# yakalanır.
+_STRONG_POSITIVE_CLOSING_RE = re.compile(
+    r"(?:oldu[ğg]unu|yeteneğine sahip oldu[ğg]unu|yatk[ıi]n oldu[ğg]unu|yeterli oldu[ğg]unu|"
+    r"ba[şs]ar[ıi]l[ıi] oldu[ğg]unu)\s*"
+    r"(?:belirtmi[şs]tir|g[öo]stermi[şs]tir|sergilemi[şs]tir|ortaya koymu[şs]tur|kan[ıi]tlam[ıi][şs]t[ıi]r|"
+    r"ifade etmi[şs]tir)\.?\s*$",
+    re.IGNORECASE)
+_LOW_SCORE_DIRECTION_RATIO = 0.34  # SCORING_RUBRIC'in DÜŞÜK bant eşiğiyle tutarlı
+
+def _score_direction_conflict(g: str, e: str, cap, awarded) -> bool:
+    if not g or (e or "").strip() or cap is None or awarded is None or cap <= 0:
+        return False
+    if (awarded / cap) >= _LOW_SCORE_DIRECTION_RATIO:
+        return False
+    return bool(_STRONG_POSITIVE_CLOSING_RE.search(g.strip()))
+
 # ---- GÖREV 2 — DOĞRULAYICI (validator): LOG değil KAPI ----
 def validate_criterion_fields(fields: Optional[dict], cap: int, awarded: Optional[int], transcript_view: list,
                               prior_claims: list) -> list:
@@ -6479,23 +6615,40 @@ def validate_criterion_fields(fields: Optional[dict], cap: int, awarded: Optiona
         violations.append("banned_phrase_found")
     if _TRANSITION_WORD_RE.search(g) or _TRANSITION_WORD_RE.search(e):
         violations.append("forbidden_transition_found")
-    # İş emri — RAPOR İÇERİK STANDARDI / B2 — KÖK NEDEN: role= verilmiyordu, yani KANIT'taki [mm:ss]
-    # damgası transkriptte HERHANGİ BİR satıra (mülakatçının KENDİ sorusu dahil) denk gelse validasyonu
-    # geçiyordu — gerçek örnekte model bir kriterin kanıtı olarak mülakatçının SORUSUNU alıntıladı,
-    # bu geçerli sayıldı. Kanıt yalnız ADAY'ın kendi cevabına dayanabilir; role="aday" ile artık bir
-    # mülakatçı satırına denk gelen damga GEÇERSİZ sayılır (kriter retry'a girer, düzelmezse
-    # 'Değerlendirilemedi (sistem)' olur — uydurma/yanlış-konuşmacı kanıtla puanlanmaz).
+    # İş emri — RAPOR İÇERİK STANDARDI / B2 (KALEM GERİYE UYUM) + KANIT BÜTÜNLÜĞÜ / KALEM 2 — KÖK
+    # NEDEN: role= verilmiyordu (B2 fix'i role="aday" ekledi) AMA yalnız PROXİMİTE kontrol ediyordu
+    # — alıntılanan METNİN o role'e GERÇEKTEN ait olduğu hiç doğrulanmıyordu. Gerçek örnek: K alanı
+    # mülakatçının SORUSUNUN TAMAMINI alıntıladı, damga yakınında BİR aday satırı da olduğu için
+    # proximite geçti. _timestamp_field_grounded artık (tırnaklı alıntı varsa) alıntının o role'ün
+    # GERÇEK bir satırında birebir geçtiğini de doğruluyor (bkz. yukarıdaki tanım/gerekçe).
     k_ts = _extract_timestamp(k)
-    if not k_ts or not check_timestamp_grounded(k_ts, transcript_view, role="aday"):
+    if not k_ts or not _timestamp_field_grounded(k, transcript_view, role="aday"):
         violations.append("evidence_timestamp_invalid")
     if e:
         if cap and awarded is not None and cap > 0 and (awarded / cap) >= 0.85:
             violations.append("full_score_has_eksik")
         s_ts = _extract_timestamp(s)
-        if not s_ts or not check_timestamp_grounded(s_ts, transcript_view, role="mulakatci"):
+        if not s_ts or not _timestamp_field_grounded(s, transcript_view, role="mulakatci"):
             violations.append("unsourced_eksik")
+    # KALEM 2 (devam) — G/E, K/S gibi [mm:ss] taşıması BEKLENMEZ (_CRIT_EVIDENCE_HINT) ama model
+    # bazen yine de sızdırıyor; sızdırdıysa AYNI kontrolden geçer (tek kapı — iş emri: "Tek bir
+    # kapı kalmayacak"). evidence_timestamp_invalid'i TEKRAR eklemez (zaten varsa).
+    if "evidence_timestamp_invalid" not in violations:
+        for _extra in (g, e):
+            if _extra and _extract_timestamp(_extra) and not _timestamp_field_grounded(_extra, transcript_view, role="aday"):
+                violations.append("evidence_timestamp_invalid")
+                break
     if _is_near_duplicate(g, prior_claims):
         violations.append("duplicate_claim")
+    # İş emri — KANIT BÜTÜNLÜĞÜ VE İKİNCİ DEĞERLENDİRİCİ ÇIKTISI / KALEM 1 — G AÇIK, KOŞULSUZ bir
+    # olumlu hüküm cümlesiyle bitiyor (ör. "...yatkın olduğunu belirtmiştir") VE E (eksik) BOŞ VE
+    # puan tavanın ÇOK altındaysa (<%34, DÜŞÜK bant eşiği) — okuyucu puanın neden düşük olduğunu
+    # METİNDEN anlayamaz (gerçek örnek: ikinci değerlendirici BAĞIMSIZ olarak aynı çelişkiyi
+    # yakaladı: "işbirliğine aktif katkı örneği yok... bağımsızlık eksikliğine işaret ediyor").
+    # Yalnız YÖN'e bakar, puanı DEĞİŞTİRMEZ (iş emrinin açık notu) — kriter retry'a girer,
+    # düzelmezse 'Değerlendirilemedi (sistem)' sayılır (puan UYDURMA anlatıyla KORUNMAZ).
+    if _score_direction_conflict(g, e, cap, awarded):
+        violations.append("score_direction_conflict")
     # GÖREV 5 EK — alan dışı/devretme beyanı varken yüksek puan (tavanın >%25'i) verilmişse: bu
     # DETERMİNİSTİK bir ihlal (LLM'e "puanı düşür" demek GÜVENİLMEZ, bkz. apply_structured_rationale_gate
     # içindeki sabit %25 kelepçesi — burada yalnız TESPİT edilir, düzeltme çağıran tarafta).
@@ -6508,11 +6661,12 @@ _VIOLATION_TR = {
     "structure_invalid": "Alanlar (G/K/E/S) doğru biçimde ayrıştırılamadı — biçimi TAM UY: 'G: ... ~~ K: ... ~~ E: ... ~~ S: ...'.",
     "banned_phrase_found": "Yasaklı klişe kalıp kullanıldı (ör. 'daha fazla ... gerekmektedir/sunmamıştır', '... beklenmiştir').",
     "forbidden_transition_found": "G veya E alanı İÇİNDE 'ancak/fakat/ne var ki' bağlacı kullanıldı — YASAK, bu bağlaçları rapor derleyici (kod) ekler, sen ASLA ekleme.",
-    "evidence_timestamp_invalid": "KANIT alanındaki [mm:ss] damgası transkriptte GERÇEKTEN yok YA DA mülakatçının kendi sözüne ait — SADECE ADAYIN cevabına ait, transkriptte var olan bir ana damga koy.",
+    "evidence_timestamp_invalid": "KANIT alanındaki [mm:ss] damgası transkriptte GERÇEKTEN yok, mülakatçının kendi sözüne ait, YA DA tırnaklı alıntı o andaki ADAY sözüyle BİREBİR UYUŞMUYOR (ör. mülakatçının sorusunu alıntılayıp yakın bir aday anına damga atmak GEÇERSİZDİR) — SADECE ADAYIN GERÇEKTEN söylediği bir cümleyi, doğru damgasıyla alıntıla.",
     "full_score_has_eksik": "Bu kriter tavanın %85+'ini almış ama EKSİK doldurulmuş — tutarsız: EKSİK'i BOŞ bırak (gerçekten tam performans varsa).",
     "unsourced_eksik": "EKSİK doldurulmuş ama SORU_DAMGASI mülakatçının GERÇEKTEN sorduğu bir soruya denk gelmiyor — ya EKSİK'i GERÇEK bir mülakatçı sorusuna dayandır (gerçek [mm:ss] ver) ya da EKSİK'i BOŞ bırak.",
     "duplicate_claim": "GÖSTERDİĞİ alanı başka bir kriterde ZATEN kullanılan kanıtla neredeyse AYNI — bu kriter için FARKLI, bağımsız bir kanıt/gözlem yaz.",
     "out_of_scope_high_score": "Adayın cevabı ALAN DIŞI/DEVRETME beyanı içeriyor (örn. 'benim alanım değil' / 'yöneticime sorarım') — G/K alanların bunu AÇIKÇA yansıtsın (puanı SEN değiştiremezsin, sistem düzeltir).",
+    "score_direction_conflict": "G alanı KOŞULSUZ olumlu bir hükümle bitiyor ('...olduğunu belirtmiştir/göstermiştir' vb.) ama puan tavanın ÇOK altında — bu ÇELİŞKİLİ. E alanına GERÇEK bir eksik/zayıflık yaz (neden düşük olduğunu açıkla) YA DA G'yi puanla TUTARLI, hedge'li bir cümleye çevir (ör. 'X konusunda sınırlı bir gözlem sundu').",
 }
 
 # İş emri — VALIDATOR KALİBRASYONU / GÖREV 1.2 — retry'da modele YALNIZ ihlal ADI vermek yetersiz
@@ -6675,12 +6829,21 @@ _DISQUALIFIED_CELL_RE = re.compile(r"de[ğg]erlendirilemedi \(sistem\)", re.IGNO
 # _PUANLAMA_KAPSAMI_HEAD/_PUANLAMA_KAPSAMI_RE — render_beyan_tutarliligi yakınında tanımlı).
 
 def apply_criterion_takeover(table_text: str, criteria_list: list, rv_scores: dict, rv_gerekce: dict,
-                             id_prefix: str) -> tuple:
+                             id_prefix: str, transcript_view: Optional[list] = None) -> tuple:
     """GÖREV 1.3 — yalnız apply_structured_rationale_gate'in diskalifiye ettiği (_DISQUALIFIED_CELL_RE
     eşleşen) satırlara dokunur; sistem/aday kaynaklı farklı eksik türlerine (hiç sorulmadı vb.)
     DOKUNMAZ. İkinci değerlendiricide o kimlik (P#/K#) için hem puan HEM gerekçe yoksa devralma
     YAPILMAZ (yalnız puan olup gerekçe yoksa da devralma yapılmaz — iş emri: 'puanı VE gerekçesi
-    kullanılır'). Dönüş: (yeni_table_text, yeni_score_veya_None, log[])."""
+    kullanılır'). Dönüş: (yeni_table_text, yeni_score_veya_None, log[]).
+    İş emri — KANIT BÜTÜNLÜĞÜ VE İKİNCİ DEĞERLENDİRİCİ ÇIKTISI / KALEM 2 — KÖK NEDEN (atlanan yol):
+    bu fonksiyon hiçbir transcript_view PARAMETRESİ almıyordu — ikinci değerlendiricinin kendi
+    gerekçesindeki [mm:ss] referansı (VARSA) HİÇ doğrulanmadan doğrudan müşteri tablosuna
+    yazılıyordu. validate_criterion_fields'ın role="aday" + alıntı-içerik kontrolü (bkz.
+    _timestamp_field_grounded) BİRİNCİL değerlendiricinin çıktısını korusa da, DEVRALMA yolu bu
+    kontrolün TAMAMEN DIŞINDAYDI — 'tek kapı' değildi. Artık transcript_view verilirse, rv_g
+    içinde bir [mm:ss] damgası varsa AYNI kontrolden geçirilir; geçemezse devralma REDDEDİLİR
+    (kriter 'Değerlendirilemedi (sistem)' olarak KALIR — uydurma/yanlış-konuşmacı kanıtla
+    puanlanmaz). Damga yoksa (reviewer yalnız genel bir değerlendirme yazdıysa) davranış DEĞİŞMEZ."""
     if not table_text or not criteria_list:
         return table_text, None, []
     lines = table_text.splitlines()
@@ -6724,6 +6887,12 @@ def apply_criterion_takeover(table_text: str, criteria_list: list, rv_scores: di
         rv_g = rv_gerekce.get(cid)
         if rv is None or not (rv_g or "").strip():
             row_info.append((cap, None))  # devralma yapılamadı — hâlâ diskalifiye
+            continue
+        # KALEM 2 — rv_g'de bir [mm:ss] damgası varsa AYNI kapıdan (role="aday" + alıntı-içerik)
+        # geçmek ZORUNDA; geçemezse devralma REDDEDİLİR, kriter diskalifiye KALIR.
+        if _extract_timestamp(rv_g) and not _timestamp_field_grounded(rv_g, transcript_view or [], role="aday"):
+            log.append({"kriter": cname, "kimlik": cid, "sonuc": "devralma_reddedildi_kanit_gecersiz"})
+            row_info.append((cap, None))
             continue
         rv_awarded = max(0, min(_safe_int(rv[0]), cap))
         cells[1] = f"{rv_awarded}/{cap}"
@@ -6864,7 +7033,7 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
         if fields and (_OUT_OF_SCOPE_RE.search(f"{fields.get('k','')} {fields.get('g','')}")
                       or _DELEGATION_RE.search(f"{fields.get('k','')} {fields.get('g','')}")):
             _k_ts_scope = _extract_timestamp(fields.get("k") or "")
-            if not _k_ts_scope or check_timestamp_grounded(_k_ts_scope, transcript_view, role="aday"):
+            if not _k_ts_scope or _timestamp_field_grounded(fields.get("k") or "", transcript_view, role="aday"):
                 flagged_scope.append({"kriter": cname, "kanit": (fields.get("k") or "")[:200]})
 
         if violations:
