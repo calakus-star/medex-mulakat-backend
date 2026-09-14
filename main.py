@@ -2592,6 +2592,21 @@ _DELEGATION_RE = re.compile(
     r"y[öo]neticim(?:le| ile)? konu[şs]urum|y[öo]neticim karar verir|y[öo]neticime sorar[ıi]m|"
     r"o bana y[öo]nlendirir|(?:ekibim|arkada[şs][ıi]m|meslekta[şs][ıi]m)(?:a|e) (?:sorar[ıi]m|b[ıi]rak[ıi]r[ıi]m)",
     re.IGNORECASE)
+
+# İş emri — RAPOR İÇERİK STANDARDI / B3 — KAVRAM AYRIŞTIRMASI: "devretme" (ör. "yöneticime
+# sorarım" — kararı BAŞKASINA bırakma) ile "alan dışı" (ör. "benim alanım değil" — konunun kendi
+# mesleki alanı OLMADIĞI iddiası) KAVRAMSAL OLARAK farklıdır; önceki turda ikisi de tek bir
+# "alan dışı/devretme beyanı" etiketiyle sunuluyordu — hangisinin gerçekleştiği belirsizleşiyordu.
+def _scope_declaration_label(text: str) -> str:
+    is_oos = bool(_OUT_OF_SCOPE_RE.search(text or ""))
+    is_del = bool(_DELEGATION_RE.search(text or ""))
+    if is_oos and is_del:
+        return "alan dışı ve devretme"
+    if is_del:
+        return "devretme"
+    if is_oos:
+        return "alan dışı"
+    return "alan dışı/devretme"  # eşleşme metinde (kanıt kırpıldığı için) yeniden bulunamadıysa güvenli varsayılan
 # GÖREV 5 EK — yasak kalıp listesine "beklenmiştir" ailesi (önceki tur 8 kriterde bunu üretti,
 # mevcut regex'lerin HİÇBİRİNE takılmadı): "daha <X> ... beklenmiştir" / "... sunması/yapması/
 # göstermesi/alması beklenmiştir" — araya giren kelimelerden BAĞIMSIZ.
@@ -5083,6 +5098,29 @@ def visible_result_events(events) -> list:
         out.append(e)
     return out
 
+# İş emri — RAPOR İÇERİK STANDARDI / A4 — KÖK NEDEN: bu iş emrinden önceki turda regenerate_report'un
+# result_reason'a yazdığı iç-süreç dilindeki cümle ("...rapor yeniden üretiminde düzeltildi: önceki
+# 'erken sonlandırma' tespiti hatalıydı...") nötrleştirilmişti — AMA yalnız KAYNAK (yeni yazımlar)
+# düzeltilmişti. DB'de bu eski metinle KAYITLI SATIRLAR (ör. Murat) hiç geriye dönük düzeltilmedi
+# (bu ortamdan prod DB'ye erişim yok) — 12.09 21:46 raporunda eski metin AYNEN basılı çıktı. Fix:
+# müşteriye giden metin, KAYITTAKİ değer ne olursa olsun, BASIM ANINDA (aşağıda _make_report_pdf
+# içinde) bu desenlerden biriyle eşleşiyorsa nötr cümleyle değiştirilir — kayıt DEĞİŞMEZ (geriye
+# dönük veri migrasyonu bu iş emrinin kapsamında değil, yalnız BASIM normalize edilir).
+_INTERNAL_PROCESS_LANGUAGE_RE = re.compile(
+    r"rapor yeniden [üu]retim\w*|[öo]nceki[^.]{0,40}tespit\w*\s+hatal[ıi]\w*|tespiti hatal[ıi]\w*|"
+    r"d[üu]zeltildi\s*[:\(]",
+    re.IGNORECASE)
+
+def sanitize_result_reason_for_customer(text: str) -> str:
+    """A4 — result_reason'da iç-süreç/debug dili tespit edilirse (ör. 'rapor yeniden üretiminde
+    düzeltildi', '...tespiti hatalıydı') TÜM metin nötr, sonuç-odaklı bir cümleyle değiştirilir.
+    Kayıttaki değeri DEĞİŞTİRMEZ — yalnız müşteriye giden PDF'e basılırken uygulanır."""
+    if not text:
+        return text
+    if _INTERNAL_PROCESS_LANGUAGE_RE.search(text):
+        return "Mülakat normal şekilde tamamlanmıştır."
+    return text
+
 def strip_report_system_lines(text: str) -> str:
     """KALEM 5 — müşteri raporundan iç sistem satırlarını çıkarır:
       - '[SİSTEM: ... transkripsiyon halüsinasyonu ...]' işaretli satırlar
@@ -6027,24 +6065,29 @@ def build_reviewer_diff_block(rv_scores: dict, rv_gerekce: dict, position_criter
 _REVIEWER_SLOT_MARK = "<<İKİNCİ_DEĞERLENDİRİCİ_GÖRÜŞÜ_YERİ>>"
 _REVIEWER_HEAD = "**İkinci Değerlendirici Görüşü:**"
 
-def recompute_overall_decision(candidate_id: int, level: int, reviewer_score_position=None, reviewer_score_profile=None) -> None:
+def recompute_overall_decision(candidate_id: int, level: int, reviewer_score_position=None, reviewer_score_profile=None):
     """TEK KARAR KAYNAĞI'nın 2. çağrısı (iş emri madde 6+21) — append_reviewer_section reviewer'ın
     kendi pozisyon/profil puanlarını türettikten SONRA burayı çağırır; Genel Puan artık mevcut
     OLAN 4 puana kadar (1. pozisyon/profil + 2. pozisyon/profil) genişler ve karar YENİDEN üretilir.
     finalize_interview'daki İLK hesaplama (yalnız 1. değerlendirici) YANLIŞ değildi — bu sadece
-    onu daha fazla veriyle GÜNCELLER; aynı TEK fonksiyondan (compute_genel_puan) geçer."""
+    onu daha fazla veriyle GÜNCELLER; aynı TEK fonksiyondan (compute_genel_puan) geçer.
+    Dönüş: (genel_puan, recommendation, score_position, score_profile) — YOK ise None. İş emri —
+    RAPOR İÇERİK STANDARDI / A2: çağıran (append_reviewer_section) bu DEĞERLERİ artık Öneri
+    Gerekçesi'ni yeniden üretmek için KULLANIR — önceden bu fonksiyon None dönüyordu, DB'yi
+    güncelliyordu ama rapor METNİNDEKİ (zaten basılmış) Öneri Gerekçesi asla haberdar olmuyordu."""
     db = get_db()
     try:
         row = db.execute("SELECT score_position, score_profile FROM interviews WHERE candidate_id=? AND level=?",
                          (candidate_id, level)).fetchone()
         if not row:
-            return
+            return None
         genel_puan = compute_genel_puan(row["score_position"], row["score_profile"], reviewer_score_position, reviewer_score_profile)
         recommendation = decide_recommendation(genel_puan) or "Değerlendirilemedi"
         db.execute("UPDATE interviews SET score=?, recommendation=?, reviewer_score_position=?, reviewer_score_profile=? "
                   "WHERE candidate_id=? AND level=?",
                   (genel_puan, recommendation, reviewer_score_position, reviewer_score_profile, candidate_id, level))
         db.commit()
+        return genel_puan, recommendation, row["score_position"], row["score_profile"]
     finally:
         db.close()
 
@@ -6147,7 +6190,7 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
                 _c0 = _ln.strip().strip("|").split("|")[0].strip()
                 if _c0:
                     _dropped_prof2.append(_c0)
-        _new_kapsami_text = render_puanlama_kapsami(len(position_criteria or []), len(PROFILE_CRITERIA), _dropped_pos2, _dropped_prof2)
+        _new_kapsami_text = render_puanlama_kapsami(position_criteria or [], PROFILE_CRITERIA, _dropped_pos2, _dropped_prof2)
         if _PUANLAMA_KAPSAMI_HEAD in final_report:
             final_report = _PUANLAMA_KAPSAMI_RE.sub(_PUANLAMA_KAPSAMI_HEAD + "\n" + _new_kapsami_text, final_report, count=1)
         _still_dropped = len(_dropped_pos2) + len(_dropped_prof2)
@@ -6208,7 +6251,8 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
         record_system_decision(candidate_id, level, "ikinci_degerlendirici_atlandi",
                                "İkinci değerlendirici somut bir görüş/özgüven izlenimi bildirmedi ve kriter puanları birincille örtüşüyor — bölüm rapora eklenmedi.",
                                {"reviewer_status": status, "free_len": len(free_raw or "")})
-        _save(final_report.replace(_REVIEWER_SLOT_MARK, "").strip())
+        final_report = final_report.replace(_REVIEWER_SLOT_MARK, "").strip()
+        _save(final_report)
     else:
         block = _REVIEWER_HEAD + "\n\n"
         if diff_block:
@@ -6224,16 +6268,30 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
         if ek_gorus_parts:
             block += "**Ek Görüş:**\n" + "\n\n".join(ek_gorus_parts) + "\n"
         block = scrub_forbidden_phrases(block.strip())
-        _save(final_report.replace(_REVIEWER_SLOT_MARK, block))
+        final_report = final_report.replace(_REVIEWER_SLOT_MARK, block)
+        _save(final_report)
         record_system_decision(candidate_id, level, "ikinci_degerlendirici_eklendi",
                                "İkinci değerlendirici görüşü nihai rapora eklendi; genel puana (varsa) katıldı.",
                                {"reviewer_status": status, "gorus_var": has_view,
                                 "reviewer_score_position": reviewer_score_position, "reviewer_score_profile": reviewer_score_profile})
 
+    # İş emri — RAPOR İÇERİK STANDARDI / A2 — KÖK NEDEN: Öneri Gerekçesi finalize_interview'da
+    # YALNIZ 1. değerlendiriciyle DONDURULUYORDU; recompute_overall_decision (hemen altta) Genel
+    # Puan'ı 2. değerlendiriciyle GÜNCELLEDİĞİNDE bu metin hiç yeniden üretilmiyordu (Puanlama
+    # Kapsamı'nın A1'deki hatasıyla AYNI sınıf — bir metin dondurulur, veri sonradan değişir, metin
+    # değişmez). Fix: Puanlama Kapsamı'nın kendi re-patch deseniyle (_PUANLAMA_KAPSAMI_RE) AYNI
+    # yöntemle Öneri Gerekçesi de recompute_overall_decision'ın DÖNDÜRDÜĞÜ (yani DB'ye yazılanla
+    # AYNI) değerlerle yeniden üretilip rapora patchlenir.
     try:
-        recompute_overall_decision(candidate_id, level, reviewer_score_position, reviewer_score_profile)
+        _rc = recompute_overall_decision(candidate_id, level, reviewer_score_position, reviewer_score_profile)
+        if _rc:
+            _new_genel_puan, _new_recommendation, _new_score_pos, _new_score_prof = _rc
+            _new_oneri_text = render_oneri_gerekcesi(_new_recommendation, _new_genel_puan, _new_score_pos, _new_score_prof)
+            if _new_oneri_text and _ONERI_GEREKCESI_HEAD in final_report:
+                final_report = _ONERI_GEREKCESI_RE.sub(_ONERI_GEREKCESI_HEAD + "\n" + _new_oneri_text, final_report, count=1)
+                _save(final_report)
     except Exception as e:
-        print(f"UYARI (recompute_overall_decision c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        print(f"UYARI (append_reviewer_section öneri gerekçesi güncelleme c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
 def parse_reviewer_meta(notes: str) -> dict:
     """Denetçi çıktısının sonundaki 'OZET_TON:' / 'DUSUK_PUAN:' etiketlerini ayrıştırır.
@@ -6421,8 +6479,14 @@ def validate_criterion_fields(fields: Optional[dict], cap: int, awarded: Optiona
         violations.append("banned_phrase_found")
     if _TRANSITION_WORD_RE.search(g) or _TRANSITION_WORD_RE.search(e):
         violations.append("forbidden_transition_found")
+    # İş emri — RAPOR İÇERİK STANDARDI / B2 — KÖK NEDEN: role= verilmiyordu, yani KANIT'taki [mm:ss]
+    # damgası transkriptte HERHANGİ BİR satıra (mülakatçının KENDİ sorusu dahil) denk gelse validasyonu
+    # geçiyordu — gerçek örnekte model bir kriterin kanıtı olarak mülakatçının SORUSUNU alıntıladı,
+    # bu geçerli sayıldı. Kanıt yalnız ADAY'ın kendi cevabına dayanabilir; role="aday" ile artık bir
+    # mülakatçı satırına denk gelen damga GEÇERSİZ sayılır (kriter retry'a girer, düzelmezse
+    # 'Değerlendirilemedi (sistem)' olur — uydurma/yanlış-konuşmacı kanıtla puanlanmaz).
     k_ts = _extract_timestamp(k)
-    if not k_ts or not check_timestamp_grounded(k_ts, transcript_view):
+    if not k_ts or not check_timestamp_grounded(k_ts, transcript_view, role="aday"):
         violations.append("evidence_timestamp_invalid")
     if e:
         if cap and awarded is not None and cap > 0 and (awarded / cap) >= 0.85:
@@ -6444,7 +6508,7 @@ _VIOLATION_TR = {
     "structure_invalid": "Alanlar (G/K/E/S) doğru biçimde ayrıştırılamadı — biçimi TAM UY: 'G: ... ~~ K: ... ~~ E: ... ~~ S: ...'.",
     "banned_phrase_found": "Yasaklı klişe kalıp kullanıldı (ör. 'daha fazla ... gerekmektedir/sunmamıştır', '... beklenmiştir').",
     "forbidden_transition_found": "G veya E alanı İÇİNDE 'ancak/fakat/ne var ki' bağlacı kullanıldı — YASAK, bu bağlaçları rapor derleyici (kod) ekler, sen ASLA ekleme.",
-    "evidence_timestamp_invalid": "KANIT alanındaki [mm:ss] damgası transkriptte GERÇEKTEN yok — SADECE transkriptte var olan bir ana damga koy.",
+    "evidence_timestamp_invalid": "KANIT alanındaki [mm:ss] damgası transkriptte GERÇEKTEN yok YA DA mülakatçının kendi sözüne ait — SADECE ADAYIN cevabına ait, transkriptte var olan bir ana damga koy.",
     "full_score_has_eksik": "Bu kriter tavanın %85+'ini almış ama EKSİK doldurulmuş — tutarsız: EKSİK'i BOŞ bırak (gerçekten tam performans varsa).",
     "unsourced_eksik": "EKSİK doldurulmuş ama SORU_DAMGASI mülakatçının GERÇEKTEN sorduğu bir soruya denk gelmiyor — ya EKSİK'i GERÇEK bir mülakatçı sorusuna dayandır (gerçek [mm:ss] ver) ya da EKSİK'i BOŞ bırak.",
     "duplicate_claim": "GÖSTERDİĞİ alanı başka bir kriterde ZATEN kullanılan kanıtla neredeyse AYNI — bu kriter için FARKLI, bağımsız bir kanıt/gözlem yaz.",
@@ -6591,7 +6655,20 @@ _OUT_OF_SCOPE_SCORE_CAP_RATIO = 0.25  # GÖREV 5.2 — alan dışı/devretme: ta
 # düştü ama ikinci değerlendirici İnisiyatif için ayrı blok, Baskı altında için [9:11] ile
 # sorunsuz gerekçelendirdi — kanıt VARDI, sorun yalnız birincilin doğrulayıcıdan geçememesiydi).
 # append_reviewer_section'dan çağrılır (reviewer SONRADAN, async çalıştığı için burası tek yer).
-_DISQUALIFIED_CELL_RE = re.compile(r"de[ğg]erlendirilemedi \(sistem\) — do[ğg]rulay[ıi]c[ıi] \d+ denemede", re.IGNORECASE)
+# İş emri — RAPOR İÇERİK STANDARDI / A1 — KÖK NEDEN: bu regex "— doğrulayıcı N denemede..." GEREKÇE
+# EKİNİN varlığını ŞART koşuyordu. Ama tablo hücresi CUSTOMER-FACING görünüme (pos_table_display/
+# prof_table_display, finalize_interview) girmeden ÖNCE _strip_total_line_for_display bu eki HER
+# ZAMAN siliyor ("| Değerlendirilemedi (sistem) — ... |" → "| Değerlendirilemedi (sistem) |") —
+# yani interviews.report'a (ve dolayısıyla append_reviewer_section'ın okuduğu final_report'a) kayıtlı
+# hücrede bu ek ZATEN YOK. Sonuç: (a) devralma (apply_criterion_takeover) HİÇBİR disklaifiye satırı
+# BULAMIYORDU (regex hiç eşleşmediği için tüm satırlar "zaten puanlı" sayılıp atlanıyordu — devralma
+# sessizce HİÇ ÇALIŞMIYORDU), (b) Puanlama Kapsamı'nın devralma-sonrası yeniden hesaplaması
+# (append_reviewer_section, _dropped_pos2/_dropped_prof2) da aynı nedenle HER ZAMAN boş çıkıyor,
+# "12/12 değerlendirildi" yazıyordu — Değerlendirilemeyen Alanlar (ilk üretimdeki doğru listeyi
+# hâlâ taşıyan, hiç yeniden hesaplanmayan _dropped_pos_names/_dropped_prof_names'ten türer) ile
+# ÇELİŞİYORDU. Fix: regex artık YALNIZ çıplak "Değerlendirilemedi (sistem)" işaretini arar — gerekçe
+# eki varsa da yoksa da eşleşir (üç kullanım yerinin tümü zaten yalnız bir tablo SATIRINDA arıyor).
+_DISQUALIFIED_CELL_RE = re.compile(r"de[ğg]erlendirilemedi \(sistem\)", re.IGNORECASE)
 
 # NOT — GÖREV 1.4'ün önceki turdaki koşullu ("yalnız %25 aşılınca görünen") notu KALDIRILDI;
 # yerine HER ZAMAN üretilen "Puanlama Kapsamı" bölümü geçti (bkz. render_puanlama_kapsami,
@@ -6778,9 +6855,17 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
         # GÖREV 5.5 — alan dışı/devretme leksik imzası puan zaten düşük olsa BİLE (5.2'de
         # "tespit edilirse" diyor, "puan yüksekse" DEĞİL) toplanır — Gelişim Alanları'nda RİSK
         # olarak raporlanmalı; raporlanmadıysa aşağıda (finalize_interview) sistem kendisi ekler.
+        # İş emri — RAPOR İÇERİK STANDARDI / B3 — KÖK NEDEN (B2 ile AYNI kök): bu kontrol
+        # 'violations' hâlâ dolu olsa (ör. kriter sonunda diskalifiye olsa) BİLE çalışıyordu — K
+        # alanı henüz doğrulanmamış/yanlış-konuşmacıya ait bir damga taşısa bile flagged_scope'a
+        # (ve oradan CV↔Uyum enjeksiyonuna) sızabiliyordu. Artık yalnız K'nin damgası GERÇEKTEN
+        # adaya ait bir transkript satırına denk geliyorsa (B2'nin aynı role="aday" kontrolü)
+        # flagged_scope'a eklenir.
         if fields and (_OUT_OF_SCOPE_RE.search(f"{fields.get('k','')} {fields.get('g','')}")
                       or _DELEGATION_RE.search(f"{fields.get('k','')} {fields.get('g','')}")):
-            flagged_scope.append({"kriter": cname, "kanit": (fields.get("k") or "")[:200]})
+            _k_ts_scope = _extract_timestamp(fields.get("k") or "")
+            if not _k_ts_scope or check_timestamp_grounded(_k_ts_scope, transcript_view, role="aday"):
+                flagged_scope.append({"kriter": cname, "kanit": (fields.get("k") or "")[:200]})
 
         if violations:
             log.append({"kriter": cname, "kimlik": cid, "sonuc": "degerlendirilemedi_sistem", "ihlaller": violations})
@@ -7089,8 +7174,14 @@ def render_scope_risk_paragraph(flagged: list) -> str:
     belirleyen en önemli sinyal'). `flagged`: [{"kriter","kanit"}]."""
     parts = []
     for f in flagged:
-        parts.append(f"RİSK: \"{f['kriter']}\" kriterinde aday, bu alanın kendi sorumluluğunda "
-                     f"olmadığını veya kararı başkasına devrettiğini beyan etti ({f['kanit']}). "
+        _label = _scope_declaration_label(f.get("kanit", ""))
+        if _label == "devretme":
+            _iddia = "kararı başkasına devrettiğini"
+        elif _label == "alan dışı":
+            _iddia = "bu alanın kendi mesleki alanı olmadığını"
+        else:
+            _iddia = "bu alanın kendi sorumluluğunda olmadığını veya kararı başkasına devrettiğini"
+        parts.append(f"RİSK: \"{f['kriter']}\" kriterinde aday, {_iddia} beyan etti ({f['kanit']}). "
                      f"Pozisyonun bu alandaki beklentisi bu mülakatta doğrulanamadı.")
     return "\n\n".join(parts)
 
@@ -7581,7 +7672,7 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     else:
         _dropped_prof_names = [l["kriter"] for l in (_val_log_prof or []) if l.get("sonuc") == "degerlendirilemedi_sistem"]
     try:
-        _puanlama_kapsami_text = render_puanlama_kapsami(len(_crit), len(PROFILE_CRITERIA), _dropped_pos_names, _dropped_prof_names)
+        _puanlama_kapsami_text = render_puanlama_kapsami(_crit or [], PROFILE_CRITERIA, _dropped_pos_names, _dropped_prof_names)
     except Exception as e:
         print(f"UYARI (finalize_interview puanlama kapsamı c={candidate_id}): {type(e).__name__}: {e}")
         _puanlama_kapsami_text = ""
@@ -7748,6 +7839,19 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         except Exception as e:
             print(f"UYARI (finalize_interview beyan tutarlılığı c={candidate_id}): {type(e).__name__}: {e}")
             beyan_tutarliligi_text = ""
+            _disc = {}
+
+        # İş emri — RAPOR İÇERİK STANDARDI / B4 — Yönetici Özeti, Beyan Tutarlılığı'nın çelişki
+        # bulduğu bir alanda (henüz kendisi çelişkiden HABERSİZ üretildiği için) taraf tutmuşsa
+        # düzeltilir (bkz. strip_yonetici_ozeti_discrepancy_bias) — çelişkiye NÖTR atıf yapılır.
+        try:
+            yo_text, _yo_bias_changed = strip_yonetici_ozeti_discrepancy_bias(yo_text, _disc)
+            if _yo_bias_changed:
+                record_system_decision(candidate_id, level, "yonetici_ozeti_celiski_tarafsizlastirildi",
+                                       "GÖREV B4 — Yönetici Özeti, Beyan Tutarlılığı'nın çelişki bulduğu bir alanda tek bir kaynağın değerini iddia ediyordu; nötr atıfla değiştirildi.",
+                                       {})
+        except Exception as e:
+            print(f"UYARI (finalize_interview yönetici özeti çelişki tarafsızlaştırma c={candidate_id}): {type(e).__name__}: {e}")
 
         # Görüntü ve Ses Gözlemi — insan diliyle, ham sayı yok (TUR 3/4'ten değişmedi).
         try:
@@ -7844,7 +7948,9 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
             if _scope_flagged:
                 _mentioned = any(f["kriter"] in _cv_uyum for f in _scope_flagged) or re.search(r"alan d[ıi][şs][ıi]|devret", _cv_uyum, re.IGNORECASE)
                 if not _mentioned:
-                    _add = " ".join(f"\"{f['kriter']}\" kriterinde aday alan dışı/devretme beyanında bulundu ({f['kanit']})." for f in _scope_flagged)
+                    # B3 — "devretme" ve "alan dışı" kavramsal olarak ayrı; hangisi geçerliyse O yazılır
+                    # (bkz. _scope_declaration_label — Gelişim Alanları'ndaki RİSK enjeksiyonuyla AYNI ilke).
+                    _add = " ".join(f"\"{f['kriter']}\" kriterinde aday {_scope_declaration_label(f['kanit'])} beyanında bulundu ({f['kanit']})." for f in _scope_flagged)
                     _cv_uyum = (_add if _cv_uyum in (_NO_NARRATIVE_EVIDENCE_FALLBACK,) else _cv_uyum + "\n\n" + _add)
                     record_system_decision(candidate_id, level, "cv_uyum_alan_disi_zorunlu_eklendi",
                                            "CV ↔ Mülakat ↔ Pozisyon Uyumu'nda alan dışı/devretme beyanı tespit edildi ama belirtilmemişti; sistem ekledi.",
@@ -9285,6 +9391,49 @@ def render_beyan_tutarliligi(disc: dict) -> str:
         lines.append(f"{r['alan']} — {src}" + (f" ({r['not']})" if r.get("not") else ""))
     return "\n".join(lines)
 
+# İş emri — RAPOR İÇERİK STANDARDI / B4 — KÖK NEDEN: Yönetici Özeti serbest metin olarak üretiliyor,
+# Beyan Tutarlılığı'nın (deterministik) bir alanda ÇELİŞKİ tespit ettiğinden HABERSİZ — model
+# genellikle kaynaklardan BİRİNİ (ör. CV'deki "10 yıl") seçip özete taraf tutarak yazıyor (gerçek
+# örnek: özet "yaklaşık 10 yıllık deneyim" derken Beyan Tutarlılığı "Sözlü 8 / CV 10" çelişkisini
+# ayrıca kaydediyordu — okuyucu ikisini yan yana görmeden fark edemez). Model bunu YAZAMAZ çünkü
+# çelişki tespiti kendisinden SONRA, deterministik olarak yapılıyor — çözüm PROMPT değil, ÜRETİLEN
+# METNİ bu bilgiyle SONRADAN denetlemek.
+_FIELD_TOPIC_HINT_RE = {
+    "Deneyim yılı": re.compile(r"deneyim|tecr[üu]be|y[ıi]ld[ıi]r|senedir", re.IGNORECASE),
+    "Eğitim (seviye)": re.compile(r"mezun|e[ğg]itim|okul|lise|lisans|[üu]niversite|yüksekokul", re.IGNORECASE),
+}
+
+def strip_yonetici_ozeti_discrepancy_bias(text: str, disc: dict) -> tuple:
+    """B4 — Yönetici Özeti'nde, Beyan Tutarlılığı'nın 'çelişki' işaretlediği bir alan (Deneyim
+    yılı/Eğitim seviyesi) hakkında TEK BİR KAYNAĞIN değerini iddia eden cümle varsa (taraf
+    seçiyorsa) bu cümle çıkarılır, yerine çelişkiye NÖTR biçimde atıf yapan bir cümle konur.
+    Dönüş: (yeni_metin, değişti_mi)."""
+    rows = [r for r in ((disc or {}).get("rows") or []) if r.get("durum") == "çelişki"]
+    if not rows or not text:
+        return text, False
+    sents = re.split(r'(?<=[.!?])\s+', text)
+    changed = False
+    out_sents = []
+    for s in sents:
+        hit = None
+        for r in rows:
+            hint = _FIELD_TOPIC_HINT_RE.get(r.get("alan", ""))
+            if not hint or not hint.search(s):
+                continue
+            for v in (r.get("kaynaklar") or {}).values():
+                v = str(v).strip()
+                if v and re.search(r'(?<!\w)' + re.escape(v) + r'(?!\w)', s, re.IGNORECASE):
+                    hit = r
+                    break
+            if hit:
+                break
+        if hit:
+            changed = True
+            out_sents.append(f"{hit['alan']} konusunda kaynaklar arasında çelişki bulunmaktadır (bkz. Tutarlılık / Çelişki Analizi).")
+        else:
+            out_sents.append(s)
+    return (" ".join(out_sents).strip(), changed)
+
 # İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 1.4 (2026-09, sonraki tur) — Puanlama Kapsamı TAMAMEN
 # DETERMİNİSTİK: hangi kriterler değerlendirildi/değerlendirilemedi, puan kaç kriter üzerinden
 # hesaplandı — bu bilgi zaten sistemde var (apply_structured_rationale_gate/apply_criterion_
@@ -9295,15 +9444,28 @@ def render_beyan_tutarliligi(disc: dict) -> str:
 _PUANLAMA_KAPSAMI_HEAD = "**Puanlama Kapsamı:**"
 _PUANLAMA_KAPSAMI_RE = re.compile(re.escape(_PUANLAMA_KAPSAMI_HEAD) + r".*?(?=\n\n|\Z)", re.DOTALL)
 
-def render_puanlama_kapsami(total_pos: int, total_prof: int, dropped_pos_names: list, dropped_prof_names: list) -> str:
+# İş emri — RAPOR İÇERİK STANDARDI / A2 — Puanlama Kapsamı ile AYNI desen: append_reviewer_section
+# 2. değerlendirici Genel Puan'ı güncellediğinde Öneri Gerekçesi'ni bu regex'le YERİNDE yeniden yazar.
+_ONERI_GEREKCESI_HEAD = "**Öneri Gerekçesi:**"
+_ONERI_GEREKCESI_RE = re.compile(re.escape(_ONERI_GEREKCESI_HEAD) + r".*?(?=\n\n|\Z)", re.DOTALL)
+
+def render_puanlama_kapsami(pos_criteria: list, prof_criteria: list, dropped_pos_names: list, dropped_prof_names: list) -> str:
     """GÖREV 1.4 — eski raporun 'Puanlama Kapsamı' bölümünün TAMAMEN deterministik karşılığı. Eski
     raporun kendi cümle kalıbına sadık kalır ('... kriterleri değerlendirildi. Değerlendirilmeyen
-    kriter olmadı. Puanlama, değerlendirilen kriterlerin ağırlığına göre normalize edilmiştir.').
+    kriter olmadı. ...').
     NOT (RAPOR ANLATI KATMANI GERİ EKLEME turu, sonraki iş emri) — önceki turda bu fonksiyon
     'Değerlendirilemeyen Alanlar'ın da YERİNE geçiyordu (ayrı bölüm açılmamıştı); bu turda iş emri
     AÇIKÇA 'Değerlendirilemeyen Alanlar' bölümünü AYRI istedi — render_degerlendirilemeyen_alanlar
     AYNI dropped_pos_names/dropped_prof_names girdisini kullanır (iş emri: 'ikisi asla farklı şey
-    söylemeyecek') ama KENDİ başlığı altında basılır."""
+    söylemeyecek') ama KENDİ başlığı altında basılır.
+    NOT (RAPOR İÇERİK STANDARDI turu, BÖLÜM C — normalizasyon şeffaflığı): önceki sürüm yalnızca
+    kriter SAYISI (int) alıyordu, PAYDA (ağırlık toplamı) hiç yazılmıyordu — aynı transkript, düşen
+    kriter sayısı 3'ten 4'e çıkınca farklı paydayla (50→30 puan) puanlanabiliyordu ve rapor bunu HİÇ
+    açıklamıyordu. Artık kriter LİSTESİ (ad+ağırlık) alınır, değerlendirilen kriterlerin toplam
+    ağırlığı (asıl normalizasyon paydası) AÇIKÇA yazılır."""
+    pos_criteria = pos_criteria or []
+    prof_criteria = prof_criteria or []
+    total_pos, total_prof = len(pos_criteria), len(prof_criteria)
     dropped = list(dropped_pos_names) + list(dropped_prof_names)
     total = total_pos + total_prof
     evaluated = total - len(dropped)
@@ -9313,7 +9475,12 @@ def render_puanlama_kapsami(total_pos: int, total_prof: int, dropped_pos_names: 
         lines.append(f"Değerlendirilemeyen kriterler: {', '.join(dropped)}.")
     else:
         lines.append("Değerlendirilmeyen kriter olmadı.")
-    lines.append("Puanlama, değerlendirilen kriterlerin ağırlığına göre normalize edilmiştir.")
+    pos_w = sum(_safe_int(c.get("weight")) for c in pos_criteria if c.get("name") not in dropped_pos_names)
+    prof_w = sum(_safe_int(c.get("weight")) for c in prof_criteria if c.get("name") not in dropped_prof_names)
+    if pos_criteria:
+        lines.append(f"Pozisyon puanı, değerlendirilen {total_pos - len(dropped_pos_names)} kriterin toplam {pos_w} ağırlık puanı üzerinden normalize edilmiştir.")
+    if prof_criteria:
+        lines.append(f"Profil puanı, değerlendirilen {total_prof - len(dropped_prof_names)} kriterin toplam {prof_w} ağırlık puanı üzerinden normalize edilmiştir.")
     return "\n".join(lines)
 
 def render_degerlendirilemeyen_alanlar(dropped_pos_names: list, dropped_prof_names: list) -> str:
@@ -9329,7 +9496,15 @@ def render_tutarlilik_celiski_analizi(disc: dict) -> str:
     """ADIM 2 — Beyan Tutarlılığı (render_beyan_tutarliligi) İLE AYNI kaynak veriden (disc —
     compute_field_discrepancies çıktısı) türer; iş emri kuralı: 'Beyan Tutarlılığı bölümündeki
     tespitlerle aynı kaynaktan beslenecek, çelişki varsa burada da görünecek. Çelişki yoksa bunu
-    açıkça yazacak.'"""
+    açıkça yazacak.'
+    NOT (RAPOR İÇERİK STANDARDI turu, B1 — KÖK NEDEN): önceki sürüm satırları " | " ile TEK SATIRDA
+    birleştiriyordu. _make_report_pdf'in _emit_report_block'u her bölüm içeriğini önce
+    parse_markdown_table'a verir; o fonksiyon YALNIZ "bir satırda en az bir '|' var mı, bölününce
+    ≥2 hücre çıkıyor mu" bakar (başlık/ayraç satırı ZORUNLU DEĞİL) — 2 çelişkili kriterle birleşen
+    tek satır YANLIŞLIKLA 2 hücreli bir tablo SATIRI sanılıyordu; ne "Kriter" içerdiği için tabloya
+    (clean_rows) alınıyor ne düz metin olarak akıyordu (consumed edildiği için) — İÇERİK TAMAMEN
+    KAYBOLUYORDU, yalnız başlık kalıyordu (gerçek PDF'te doğrulandı). Fix: satırları "\\n" ile ayır
+    (Beyan Tutarlılığı'nın zaten yaptığı gibi) — hiçbir satırda "|" karakteri OLMAZ."""
     rows = [r for r in ((disc or {}).get("rows") or []) if r.get("durum") == "çelişki"]
     if not rows:
         return "Çelişki taraması yapıldı; CV, sözlü beyan ve kayıt formu arasında belirgin bir çelişki tespit edilmedi."
@@ -9337,13 +9512,21 @@ def render_tutarlilik_celiski_analizi(disc: dict) -> str:
     for r in rows:
         src = "; ".join(f"{k}: {v}" for k, v in (r.get("kaynaklar") or {}).items())
         lines.append(f"{r['alan']} — {src}" + (f" ({r['not']})" if r.get("not") else ""))
-    return "Beyan Tutarlılığı bölümündeki tespitlerle aynı kaynaktan: " + " | ".join(lines)
+    return "Beyan Tutarlılığı bölümündeki tespitlerle aynı kaynaktan:\n" + "\n".join(lines)
 
 # ADIM 2 — "Dil Gözlemi kendi içinde çelişmeyecek (gözlem yazıp ardından 'belirtilecek dil gözlemi
 # yok' demek yasak)". Model artık UNCONDITIONAL olarak basılan bölümlerde bazen gerçek bir gözlem
 # YAZIP ardından eski alışkanlıkla kendini çürüten bir dolgu cümlesi de ekleyebilir — bu cümle
 # (yalnız KENDİSİ, gerçek gözlem cümlesi DEĞİL) çıkarılır.
 _SELF_NEGATING_FILLER_RE = re.compile(r"belirtilecek (?:bir )?[\wçğıöşü ]{0,30}\byok\b\.?", re.IGNORECASE)
+# İş emri — RAPOR İÇERİK STANDARDI / A3 — KÖK NEDEN: önceki sürüm eşleşen cümleyi BÜTÜNÜYLE atıyordu.
+# Model çoğunlukla TEK bir cümle içinde gerçek gözlemi bir bağlaçla ("ancak/fakat/ayrıca/bunun
+# dışında") dolgu ifadesine bağlıyor ("Aday X yaptı ancak ... belirtilecek bir gözlem yok.") —
+# cümle bazlı atma bu durumda GERÇEK GÖZLEMİ DE siliyordu (gerçek örnekte Dil Gözlemi İKİ raporda
+# da tamamen boş kaldı, "başka bölümler iletişim netliği hakkında bolca hüküm veriyor" olmasına
+# rağmen). Fix: cümle TAMAMEN dolgu değilse (eşleşmeden ÖNCE bağlaçtan arındırılmış, en az 2
+# kelimelik GERÇEK içerik varsa) yalnız bağlaç+dolgu kısmı çıkarılır, öndeki gözlem KORUNUR.
+_FILLER_LEADING_CONNECTOR_RE = re.compile(r"[,;]?\s*(?:ancak|fakat|ama|ayr[ıi]ca|bunun d[ıi][şs][ıi]nda|ve)\s*$", re.IGNORECASE)
 
 def strip_self_negating_filler(text: str) -> tuple:
     if not text:
@@ -9351,10 +9534,15 @@ def strip_self_negating_filler(text: str) -> tuple:
     sents = re.split(r'(?<=[.!?])\s+', text)
     kept, dropped = [], []
     for s in sents:
-        if _SELF_NEGATING_FILLER_RE.search(s):
-            dropped.append(s.strip())
-        else:
+        m = _SELF_NEGATING_FILLER_RE.search(s)
+        if not m:
             kept.append(s)
+            continue
+        before = _FILLER_LEADING_CONNECTOR_RE.sub("", s[:m.start()].rstrip()).rstrip(" ,;")
+        if len(before.split()) >= 2:
+            # gerçek gözlem + sonradan eklenmiş dolgu köprüsü -> yalnız köprü+dolgu çıkar, gözlem KALIR.
+            kept.append(before if before.endswith((".", "!", "?")) else before + ".")
+        dropped.append(s.strip())
     return " ".join(kept).strip(), dropped
 
 _NO_TIMESTAMP_EVIDENCE_FALLBACK = "Doğrulanabilir kanıt bulunamadı."
@@ -10137,10 +10325,16 @@ def detect_repeated_questions(candidate_id: int, level: int) -> list:
                 ov = _stem_overlap(base, ck)
                 if ov > best_ov:
                     best_crit, best_ov = cn, ov
+            # İş emri — RAPOR İÇERİK STANDARDI / A5 — KÖK NEDEN: best_crit bulunamadığında ("bir konu"
+            # yer tutucusu) bu satır ESKİDEN yine de eklenip EK 3'e "Mülakatçı 'bir konu' konusunda
+            # N kez ısrar etti" diye AYNEN basılıyordu — literal placeholder müşteri raporunda kaldı.
+            # Fix: eşleşen kriter YOKSA bu bulgu tamamen ATLANIR (uydurma/placeholder isim BASILMAZ).
+            if not best_crit:
+                continue
             ts0 = q_items[run[0]]["ts"]
             ts1 = q_items[run[-1]]["ts"]
             span = f"[{ts0}]–[{ts1}]" if ts0 and ts1 else ""
-            out.append({"kriter": best_crit or "bir konu", "count": len(run), "span": span})
+            out.append({"kriter": best_crit, "count": len(run), "span": span})
     return out[:4]
 
 def build_l2_report_prompt(candidate, candidate_level: int, transcript: str,
@@ -10658,7 +10852,7 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
         _events = visible_result_events(json.loads(interview.get("result_events_json") or "[]"))
     except Exception:
         _events = []
-    _rreason = (interview.get("result_reason") or "").strip()
+    _rreason = sanitize_result_reason_for_customer((interview.get("result_reason") or "").strip())
     _partial = _safe_int(interview.get("partial"))
     _cpct = interview.get("completion_pct")
     if _events or _rreason or _partial:
