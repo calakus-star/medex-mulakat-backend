@@ -8738,7 +8738,7 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "instructions": instructions,
             # MADDE 1 — mülakatçının tek yanıtta üretebileceği çıktı (metin+ses) tavanı; anormal
             # uzun monologları keser, normal/örnekli tur çok altında kalır (bkz. sabit tanımı).
-            "max_response_output_tokens": REALTIME_MAX_RESPONSE_TOKENS,
+            "max_output_tokens": REALTIME_MAX_RESPONSE_TOKENS,
             "audio": {
                 "output": {"voice": OPENAI_REALTIME_VOICE},
                 "input": {
