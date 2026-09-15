@@ -2607,6 +2607,29 @@ def _scope_declaration_label(text: str) -> str:
     if is_oos:
         return "alan dışı"
     return "alan dışı/devretme"  # eşleşme metinde (kanıt kırpıldığı için) yeniden bulunamadıysa güvenli varsayılan
+
+# İş emri — KAPI EŞİĞİ VE SON TUTARLILIK / MADDE 5 — KÖK NEDEN: CV↔Uyum enjeksiyonu _scope_flagged
+# listesindeki HER kriter için AYRI bir cümle üretiyordu; birden fazla kriter AYNI beyana (aynı
+# alıntı, aynı [mm:ss]) dayandığında (gerçek örnek: 6-8 kriter, hepsi AYNI alıntıyla) paragraf
+# okunamaz hale geliyordu. Fix: AYNI (beyan türü, kanıt) çiftini paylaşan kriterler TEK cümlede,
+# birlikte sayılarak yazılır.
+def _render_scope_flagged_sentences(flagged: list) -> str:
+    groups, order = {}, []
+    for f in flagged:
+        key = (_scope_declaration_label(f["kanit"]), f["kanit"])
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(f["kriter"])
+    sentences = []
+    for label, kanit in order:
+        kriterler = groups[(label, kanit)]
+        if len(kriterler) == 1:
+            sentences.append(f"\"{kriterler[0]}\" kriterinde aday {label} beyanında bulundu ({kanit}).")
+        else:
+            sentences.append(f"Aday, birden fazla kriterde ({', '.join(kriterler)}) {label} beyanında bulundu ({kanit}).")
+    return " ".join(sentences)
+
 # GÖREV 5 EK — yasak kalıp listesine "beklenmiştir" ailesi (önceki tur 8 kriterde bunu üretti,
 # mevcut regex'lerin HİÇBİRİNE takılmadı): "daha <X> ... beklenmiştir" / "... sunması/yapması/
 # göstermesi/alması beklenmiştir" — araya giren kelimelerden BAĞIMSIZ.
@@ -5936,13 +5959,42 @@ def parse_reviewer_criterion_scores(notes: str) -> dict:
 # yakalandığı için ham etiket doğrudan müşteri tablosuna (devralma) veya diff bloğuna sızıyordu.
 _INLINE_GUVEN_DUZEYI_TAG_RE = re.compile(r"\[\s*GUVEN_DUZEYI\s*:[^\]]*\]\s*", re.IGNORECASE)
 
+# İş emri — KAPI EŞİĞİ VE SON TUTARLILIK / MADDE 3 — KÖK NEDEN: yukarıdaki (eski) regex TEK
+# SATIRLA sınırlıydı ('.+$', DOTALL yok) — prompt KRITER_GEREKCE için "2-3 cümle" istiyor (bkz.
+# reviewer prompt'u), model bu metni bazen kendi çıktısında satır kaydırıyor; regex İLK satırdan
+# sonrasını SESSİZCE atıyordu — gerekçe cümle/kelime ortasında (görünürde "karakter sınırına
+# takılmış gibi") kesiliyordu. Fix: değer, bir SONRAKİ KRITER_PUAN/KRITER_GEREKCE/GUVEN_DUZEYI
+# satırına ya da metnin sonuna kadar (satır atlamalarını da İÇEREREK) yakalanır.
+_KRITER_GEREKCE_RE = re.compile(
+    r"(?ms)^\s*KR[İI]TER_GEREKCE\s*:\s*\**\s*([PK]\d+)\s*\**\s*=\s*(.+?)"
+    r"(?=\n\s*KR[İI]TER_(?:PUAN|GEREKCE)\s*:|\n\s*GUVEN_DUZEYI\s*:|\Z)",
+    re.IGNORECASE)
+# Rejenerasyon güvenlik ağı — kök neden (yukarıda) çözülse de model PATOLOJİK derecede uzun tek
+# bir gerekçe üretirse müşteri tablosu şişmesin; kesme HER ZAMAN cümle sonunda yapılır, yarım
+# cümle YAZILMAZ (sınır aşılan cümle tamamen atılır).
+_GEREKCE_MAX_LEN = 600
+
+def _truncate_at_sentence_boundary(text: str, max_len: int) -> str:
+    t = (text or "").strip()
+    if len(t) <= max_len:
+        return t
+    sents = re.split(r'(?<=[.!?])\s+', t)
+    out, total = [], 0
+    for s in sents:
+        if total + len(s) + 1 > max_len:
+            break
+        out.append(s)
+        total += len(s) + 1
+    return " ".join(out).strip() if out else t[:max_len].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
 def parse_reviewer_criterion_gerekce(notes: str) -> dict:
     """Müfettişin 'KRITER_GEREKCE: <KİMLİK> = <metin>' satırlarını kimliğe göre ayrıştırır
     (yalnız birincilden FARKLI puan verdiği kriterler için beklenir). Dönüş: {kimlik: metin}."""
     out = {}
-    for m in re.finditer(r"(?m)^\s*KR[İI]TER_GEREKCE\s*:\s*\**\s*([PK]\d+)\s*\**\s*=\s*(.+)$", notes or "", re.IGNORECASE):
+    for m in _KRITER_GEREKCE_RE.finditer(notes or ""):
         cid = m.group(1).upper()
         text = _INLINE_GUVEN_DUZEYI_TAG_RE.sub("", m.group(2).strip()).strip()
+        text = _truncate_at_sentence_boundary(text, _GEREKCE_MAX_LEN)
         if text:
             out[cid] = text
     return out
@@ -6097,11 +6149,17 @@ def _strip_duplicate_reviewer_heading(text: str) -> str:
 # raporun KENDİ yapısal/etiketleme kararını eleştiren KALEM 3 örneklerinden FARKLI). Desen artık
 # yalnız "raporda ... yer almıyor" (raporun KENDİ listeleme/etiketleme eksikliğini eleştiren) gibi
 # KALEM 3'ün somut örnekleriyle eşleşen, DAHA DAR kalıpları arar.
+# İş emri — KAPI EŞİĞİ VE SON TUTARLILIK / MADDE 6 — desen genişletilmedi (bir önceki turun geniş
+# desenin meşru cümle sildiği dersi hâlâ geçerli), YALNIZ gerçek örnekle eşleşen iki DAR kalıp
+# eklendi: "raporda ... değerlendirilemedi olarak bırakılmış" ve "genel puanının ... olduğundan
+# daha zayıf görünmesine".
 _REPORT_META_COMMENTARY_RE = re.compile(
     r"raporda[^.\n]{0,80}yer\s+almıyor|\braporun\s+kendisi|"
     r"i[şs]aretlenmesi\s+daha\s+uygun|olarak\s+i[şs]aretlenmesi\s+daha\s+uygun|"
     r"bu\s+puan\s+(?:g[öo]rece\s+)?(?:y[üu]ksek|d[üu][şs][üu]k)\s+g[öo]r[üu]n[üu]yor|"
-    r"gerek[çc]elendirilmi[şs]\s*;?\s*ancak",
+    r"gerek[çc]elendirilmi[şs]\s*;?\s*ancak|"
+    r"raporda[^.\n]{0,120}de[ğg]erlendirilemedi['’]?\s+olarak\s+b[ıi]rak[ıi]lm[ıi][şs]|"
+    r"genel\s+puan[ıi]n[ıi]n[^.\n]{0,60}oldu[ğg]undan\s+daha\s+zay[ıi]f\s+g[öo]r[üu]nmesine",
     re.IGNORECASE)
 
 def strip_report_meta_commentary(text: str) -> tuple:
@@ -6272,6 +6330,11 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
         _new_kapsami_text = render_puanlama_kapsami(position_criteria or [], PROFILE_CRITERIA, _dropped_pos2, _dropped_prof2)
         if _PUANLAMA_KAPSAMI_HEAD in final_report:
             final_report = _PUANLAMA_KAPSAMI_RE.sub(_PUANLAMA_KAPSAMI_HEAD + "\n" + _new_kapsami_text, final_report, count=1)
+        # MADDE 2 — Değerlendirilemeyen Alanlar, Puanlama Kapsamı ile AYNI (devralma-sonrası)
+        # listeden, AYNI anda yeniden yazılır — iki bölüm ASLA farklı listede kalamaz.
+        _new_degerlendirilemeyen_text = render_degerlendirilemeyen_alanlar(_dropped_pos2, _dropped_prof2)
+        if _DEGERLENDIRILEMEYEN_ALANLAR_HEAD in final_report:
+            final_report = _DEGERLENDIRILEMEYEN_ALANLAR_RE.sub(_DEGERLENDIRILEMEYEN_ALANLAR_HEAD + "\n" + _new_degerlendirilemeyen_text, final_report, count=1)
         _still_dropped = len(_dropped_pos2) + len(_dropped_prof2)
         _total_crit_n2 = len(position_criteria or []) + len(PROFILE_CRITERIA)
         if _total_crit_n2 and (_still_dropped / _total_crit_n2) > 0.25:
@@ -6500,11 +6563,27 @@ def check_timestamp_grounded(ts: str, transcript_view: list, role: Optional[str]
 # tırnak işareti VARSA doğrulanır (yoksa geriye uyum: yalnız proximite).
 _QUOTE_RE = re.compile(r'["“]([^"”]{5,300})["”]')
 
+# İş emri — KAPI EŞİĞİ VE SON TUTARLILIK / MADDE 1 — KÖK NEDEN: yukarıdaki kapı BİREBİR alt-string
+# (_verbatim_in) şart koşuyordu — model çoğu zaman PARAFRAZ ediyor/kısaltıyor, birebir alıntı
+# ZATEN K formatının ZORUNLU tuttuğu bir şey DEĞİL (yalnız "kısa alıntı/özet" isteniyor). Sonuç:
+# gerçek aday cevabına dayanan ama birebir alıntılanmamış kriterler YANLIŞLIKLA düşüyordu (5 örnek,
+# hepsi transkriptte aday cevabı olan konular). Kapının KORUMASI GEREKEN tek durum — alıntı
+# MÜLAKATÇI satırıyla örtüşüp ADAY satırıyla örtüşmemesi — değişmedi; yalnız "birebir alıntı
+# ZORUNLU" şartı "anlamlı kısmi örtüşme YETERLİ" ile gevşetildi.
+_QUOTE_OVERLAP_MIN_WORDS = 2  # en az 2 anlamlı ortak kelime (Türkçe ek-toleranslı, bkz. _stem_overlap) = kısmi örtüşme
+
+def _quote_overlap_words(quote: str, line_text: str) -> int:
+    return _stem_overlap(_q_keywords(quote), _q_keywords(line_text or ""))
+
 def _timestamp_field_grounded(field_text: str, transcript_view: list, role: str, tolerance_s: int = 8) -> bool:
     """G/K/E/S alanındaki [mm:ss] damgasının GERÇEK bir <role> satırına yakın olup olmadığını VE
-    (alanda tırnaklı bir alıntı varsa) o alıntının o role'e ait bir satırda GERÇEKTEN (boşluk-
-    normalize, birebir alt-string — bkz. _verbatim_in) geçip geçmediğini doğrular. check_timestamp_
-    grounded'ın YAPTIĞI proximite kontrolünü İÇERİR, üstüne alıntı-içerik doğrulaması EKLER."""
+    (alanda tırnaklı bir alıntı varsa) o alıntının o role'e GERÇEKTEN ait olduğunu doğrular.
+    MADDE 1 — üç kademeli karar: (1) birebir alt-string VEYA anlamlı kısmi kelime örtüşmesi
+    <role> satırıyla varsa -> GEÇERLİ (parafraz/kısaltma tolere edilir). (2) örtüşme YOKSA ama
+    KARŞIT role'ün (ör. K için mülakatçı) yakın satırıyla örtüşme VARSA -> GEÇERSİZ (kapının
+    koruduğu asıl durum — yanlış konuşmacının sözü kanıt sayılamaz). (3) hiçbir tarafla
+    örtüşmüyorsa (saf parafraz/özet, K formatının izin verdiği hâl) -> yalnız proximite (eski
+    davranış, geriye uyum)."""
     ts = _extract_timestamp(field_text)
     if not ts:
         return False
@@ -6521,7 +6600,19 @@ def _timestamp_field_grounded(field_text: str, transcript_view: list, role: str,
     if not qm:
         return True  # alıntı yok (yalnız özet) — proximite yeterli, geriye uyum
     quote = qm.group(1)
-    return any(_verbatim_in(quote, row.get("text") or "") for row in near_rows)
+    if any(_verbatim_in(quote, row.get("text") or "") for row in near_rows):
+        return True
+    role_overlap = max((_quote_overlap_words(quote, row.get("text") or "") for row in near_rows), default=0)
+    if role_overlap >= _QUOTE_OVERLAP_MIN_WORDS:
+        return True
+    opposite_role = "mulakatci" if role == "aday" else "aday"
+    opp_rows = [row for row in (transcript_view or [])
+               if row.get("role") == opposite_role and row.get("elapsed_ms") is not None
+               and abs(row["elapsed_ms"] // 1000 - target) <= tolerance_s]
+    opp_overlap = max((_quote_overlap_words(quote, row.get("text") or "") for row in opp_rows), default=0)
+    if opp_overlap >= _QUOTE_OVERLAP_MIN_WORDS and opp_overlap > role_overlap:
+        return False  # asıl korunan durum: alıntı KARŞIT taraftan, kanıt geçersiz
+    return True  # hiçbir tarafla anlamlı örtüşme yok — saf parafraz, proximite yeterli
 
 # ---- GÖREV 1 — yapısal hücre ayrıştırma + render ----
 def parse_structured_evidence_cell(cell_text: str) -> Optional[dict]:
@@ -6896,7 +6987,12 @@ def apply_criterion_takeover(table_text: str, criteria_list: list, rv_scores: di
             continue
         rv_awarded = max(0, min(_safe_int(rv[0]), cap))
         cells[1] = f"{rv_awarded}/{cap}"
-        cells[2] = f"{rv_g.strip()} (ikinci değerlendirici)"
+        # İş emri — KAPI EŞİĞİ VE SON TUTARLILIK / MADDE 4 — KÖK NEDEN: "(ikinci değerlendirici)"
+        # eki müşteri tablosuna basılıyordu — bu iç işaretleme dilidir, müşteri metninin parçası
+        # OLMAMALI. Devralma bilgisi zaten ayrıca record_system_decision("kriter_devralindi", ...)
+        # ile yönetici kaydına (log listesi, aşağıda) geçiyor — müşteri hücresi artık YALNIZ
+        # gerekçe metnini taşır.
+        cells[2] = rv_g.strip()
         lines[best_i] = "| " + " | ".join(cells) + " |"
         log.append({"kriter": cname, "kimlik": cid, "sonuc": "devralindi", "yeni_puan": f"{rv_awarded}/{cap}"})
         row_info.append((cap, rv_awarded))
@@ -8119,7 +8215,8 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
                 if not _mentioned:
                     # B3 — "devretme" ve "alan dışı" kavramsal olarak ayrı; hangisi geçerliyse O yazılır
                     # (bkz. _scope_declaration_label — Gelişim Alanları'ndaki RİSK enjeksiyonuyla AYNI ilke).
-                    _add = " ".join(f"\"{f['kriter']}\" kriterinde aday {_scope_declaration_label(f['kanit'])} beyanında bulundu ({f['kanit']})." for f in _scope_flagged)
+                    # MADDE 5 — aynı alıntı/beyan türünü paylaşan kriterler TEK cümlede birlikte sayılır.
+                    _add = _render_scope_flagged_sentences(_scope_flagged)
                     _cv_uyum = (_add if _cv_uyum in (_NO_NARRATIVE_EVIDENCE_FALLBACK,) else _cv_uyum + "\n\n" + _add)
                     record_system_decision(candidate_id, level, "cv_uyum_alan_disi_zorunlu_eklendi",
                                            "CV ↔ Mülakat ↔ Pozisyon Uyumu'nda alan dışı/devretme beyanı tespit edildi ama belirtilmemişti; sistem ekledi.",
@@ -9617,6 +9714,14 @@ _PUANLAMA_KAPSAMI_RE = re.compile(re.escape(_PUANLAMA_KAPSAMI_HEAD) + r".*?(?=\n
 # 2. değerlendirici Genel Puan'ı güncellediğinde Öneri Gerekçesi'ni bu regex'le YERİNDE yeniden yazar.
 _ONERI_GEREKCESI_HEAD = "**Öneri Gerekçesi:**"
 _ONERI_GEREKCESI_RE = re.compile(re.escape(_ONERI_GEREKCESI_HEAD) + r".*?(?=\n\n|\Z)", re.DOTALL)
+
+# İş emri — KAPI EŞİĞİ VE SON TUTARLILIK / MADDE 2 — Puanlama Kapsamı ile AYNI desen: devralma
+# sonrası Puanlama Kapsamı yeniden yazılırken Değerlendirilemeyen Alanlar da AYNI (yeniden
+# hesaplanmış) _dropped_pos2/_dropped_prof2 listesiyle yeniden yazılır — önceden yalnız Puanlama
+# Kapsamı güncelleniyordu, bu bölüm devralma ÖNCESİ listede donuyordu (A1'de kapatılan çelişki
+# farklı bir yoldan geri geldi).
+_DEGERLENDIRILEMEYEN_ALANLAR_HEAD = "**Değerlendirilemeyen Alanlar:**"
+_DEGERLENDIRILEMEYEN_ALANLAR_RE = re.compile(re.escape(_DEGERLENDIRILEMEYEN_ALANLAR_HEAD) + r".*?(?=\n\n|\Z)", re.DOTALL)
 
 def render_puanlama_kapsami(pos_criteria: list, prof_criteria: list, dropped_pos_names: list, dropped_prof_names: list) -> str:
     """GÖREV 1.4 — eski raporun 'Puanlama Kapsamı' bölümünün TAMAMEN deterministik karşılığı. Eski
