@@ -2093,6 +2093,13 @@ _RETRY_BACKOFF = [1, 3, 7]  # saniye — 3 deneme
 AI_ERROR_USER_MESSAGES = {
     "insufficient_quota":  "Mülakat şu anda başlatılamıyor. Lütfen yetkiliyle iletişime geçin.",
     "invalid_api_key":     "Mülakat şu anda başlatılamıyor. Lütfen yetkiliyle iletişime geçin.",
+    # ACİL — /api/realtime/session teşhisi (2026-09): classify_ai_error önceden 404/"model not
+    # found" tarzı sağlayıcı hatalarını HİÇ tanımıyordu — bunlar sessizce "unknown" kovasına
+    # düşüyordu (generic 500 + "Beklenmeyen bir hata oluştu" — ADMIN İÇİN TEŞHİS EDİLEMEZ bir
+    # mesaj, ayrıca kritik e-posta/uyarı TETİKLEMİYORDU çünkü _CRITICAL_CLASSES'ta değildi).
+    # Model adı deploy/config kaynaklı, admin-aksiyonlu bir sorundur (kota/API-anahtarıyla AYNI
+    # sınıf) — insufficient_quota/invalid_api_key ile AYNI muameleyi (503 + kritik e-posta) görür.
+    "model_unavailable":   "Mülakat şu anda başlatılamıyor. Lütfen yetkiliyle iletişime geçin.",
     "rate_limit_exceeded": "Sistem şu anda yoğun. Lütfen birkaç dakika sonra tekrar deneyin.",
     "server_error":        "Servise şu an ulaşılamıyor. Lütfen tekrar deneyin.",
     "network":             "Bağlantı kurulamadı. İnternet bağlantınızı kontrol edin.",
@@ -2100,7 +2107,7 @@ AI_ERROR_USER_MESSAGES = {
     "unknown":             "Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.",
 }
 _RETRYABLE_CLASSES = {"rate_limit_exceeded", "server_error", "network"}
-_CRITICAL_CLASSES = {"insufficient_quota", "invalid_api_key"}
+_CRITICAL_CLASSES = {"insufficient_quota", "invalid_api_key", "model_unavailable"}
 
 class AIError(Exception):
     """Sınıflandırılmış AI çağrı hatası. Route handler bunu yakalayıp uygun HTTP yanıtını üretir."""
@@ -2118,13 +2125,18 @@ class AIError(Exception):
 
 def _http_status_for_class(error_class: str) -> int:
     return {
-        "insufficient_quota": 503, "invalid_api_key": 503,
+        "insufficient_quota": 503, "invalid_api_key": 503, "model_unavailable": 503,
         "rate_limit_exceeded": 429, "server_error": 502, "network": 504,
     }.get(error_class, 500)
 
 def classify_ai_error(provider: str, status: Optional[int], body) -> str:
     """HTTP status + sağlayıcı hata kodunu BİRLİKTE okuyarak sınıflandırır.
-    429 tek başına 'rate_limit' varsayılmaz — kod 'insufficient_quota' ise kota tükenmesidir."""
+    429 tek başına 'rate_limit' varsayılmaz — kod 'insufficient_quota' ise kota tükenmesidir.
+    ACİL — /api/realtime/session teşhisi (2026-09) — KÖK NEDEN ADAYI: model adı deploy/config
+    kaynaklı olarak geçersiz/kaldırılmış olabilir (OpenAI 404 "model_not_found"/"invalid_request_
+    error" döner) — bu durum ÖNCEDEN hiç tanınmıyordu, "unknown" kovasına (generic 500, kritik
+    e-posta YOK, admin için teşhis edilemez mesaj) sessizce düşüyordu. Artık AYRI sınıflandırılır:
+    admin-aksiyonlu (kota/API-anahtarıyla AYNI aile), 503 + kritik e-posta tetikler."""
     code = ""
     try:
         b = body if isinstance(body, dict) else (json.loads(body) if isinstance(body, str) and body.strip().startswith("{") else {})
@@ -2137,6 +2149,9 @@ def classify_ai_error(provider: str, status: Optional[int], body) -> str:
         return "insufficient_quota"
     if status in (401, 403) or "invalid_api_key" in blob or "authentication" in blob or "permission" in blob:
         return "invalid_api_key"
+    if (status == 404 or "model_not_found" in blob or "does not exist" in blob or "unknown model" in blob
+       or ("model" in blob and ("invalid_request_error" in blob or "not found" in blob))):
+        return "model_unavailable"
     if status == 429 or "rate_limit" in blob or "overloaded" in blob:
         return "rate_limit_exceeded"
     if (status is not None and status >= 500) or "server_error" in blob or "api_error" in blob:
@@ -2160,6 +2175,7 @@ def _human_error_message(provider: str, step: str, error_class: str) -> str:
     cls_tr = {
         "insufficient_quota": f"{who} kotası/bakiyesi tükendiği için",
         "invalid_api_key": f"{who} API anahtarı geçersiz veya yetkisiz olduğu için",
+        "model_unavailable": f"{who} tarafında kullanılan model adı geçersiz/kaldırılmış olduğu için (deploy config kontrol edilmeli)",
         "rate_limit_exceeded": f"{who} hız sınırı aşıldığı (sistem yoğun) için",
         "server_error": f"{who} servisine geçici olarak ulaşılamadığı için",
         "network": f"{who} servisine ağ bağlantısı kurulamadığı için",
