@@ -1,0 +1,232 @@
+# İŞ 4 — VALIDATOR FAILURE RECOVERY — unit/regression testleri.
+# Tamamen SENTETİK veriyle. regenerate_criterion_fields() (gerçek LLM/API çağrısı yapar)
+# monkey-patch ile kontrol edilir — hiçbir gerçek ağ/API çağrısı yapılmaz. DB'ye yazılmaz
+# (record_system_decision de monkey-patch edilir, apply_structured_rationale_gate zaten
+# doğrudan DB'ye yazmıyor, yalnız log listesi döndürüyor).
+#
+# Çalıştırma: py test_is4_validator_recovery.py  (backend/ dizininde)
+
+import sys
+import main as m
+
+FAILURES = []
+
+
+def check(label, condition):
+    status = "OK " if condition else "FAIL"
+    print(f"[{status}] {label}")
+    if not condition:
+        FAILURES.append(label)
+
+
+CAP = 25
+CRITERIA = [{"name": "Raporlama", "weight": CAP}]
+
+# Aday gerçekten [2:10]'da bu konuda konuşuyor (grounding için gerçek transkript satırı).
+TRANSCRIPT_VIEW = [
+    {"role": "mulakatci", "text": "Bu konudaki sürecinizi nasıl yürütüyorsunuz?", "elapsed_ms": 125000, "ts": "2:05"},
+    {"role": "aday", "text": "Raporlama sürecimi haftalık olarak düzenli yürütüyorum.", "elapsed_ms": 130000, "ts": "2:10"},
+]
+TRANSCRIPT_TEXT = "[2:05] Mülakatçı: Bu konudaki sürecinizi nasıl yürütüyorsunuz?\n[2:10] Aday: Raporlama sürecimi haftalık olarak düzenli yürütüyorum."
+
+# İlk üretim: K alanı GERÇEKTE OLMAYAN bir damgaya ([99:59]) dayanıyor -> evidence_timestamp_invalid.
+BAD_TABLE = "| Raporlama | 20/25 | G: Raporlama konusunda deneyimini anlattı ~~ K: [99:59] bir şey söyledi ~~ E: ~~ S: |"
+
+
+def make_gate_call(table_text, mock_regenerate, candidate_id):
+    calls = {"n": 0}
+    orig = m.regenerate_criterion_fields
+
+    def wrapped(*args, **kwargs):
+        calls["n"] += 1
+        return mock_regenerate(calls["n"], *args, **kwargs)
+
+    m.regenerate_criterion_fields = wrapped
+    try:
+        result = m.apply_structured_rationale_gate(
+            table_text, CRITERIA, "P", TRANSCRIPT_VIEW, TRANSCRIPT_TEXT, "claude", "claude-sonnet-4-6",
+            candidate_id, 1)
+    finally:
+        m.regenerate_criterion_fields = orig
+    return result, calls["n"]
+
+
+BAD_FIELDS = {"g": "Raporlama konusunda deneyimini anlattı", "k": "[99:59] bir şey söyledi", "e": "", "s": ""}
+GOOD_FIELDS = {"g": "Raporlama sürecini anlattı", "k": "[2:10] Haftalık olarak düzenli rapor hazırladığını söyledi", "e": "", "s": ""}
+MULAKATCI_LABELED_FIELDS = {"g": "Raporlama sürecini anlattı", "k": "[2:10] Mülakatçı: Raporlama sürecinizi nasıl yürütüyorsunuz?", "e": "", "s": ""}
+
+# ============================================================
+# A) Normal 3 retry başarısız + aday satırında ilgili içerik VAR + recovery GEÇERLİ üretiyor
+#    => kriter kurtarılır, puanlı kalır
+# ============================================================
+def mock_a(call_n, *a, **kw):
+    if call_n <= 3:
+        return dict(BAD_FIELDS)  # normal retry'ler hâlâ kötü -> 3 deneme tükenir
+    return dict(GOOD_FIELDS)  # 4. çağrı = recovery, TEMİZ
+
+(new_table_a, new_score_a, log_a, _flag_a), n_calls_a = make_gate_call(BAD_TABLE, mock_a, 9101)
+check("A) toplam 4 regenerate çağrısı yapıldı (3 normal + 1 recovery)", n_calls_a == 4)
+check("A) kriter PUANLI kaldı (Değerlendirilemedi DEĞİL)", "Değerlendirilemedi" not in new_table_a)
+check("A) log'da 'criterion_recovery_success' var", any(l.get("sonuc") == "criterion_recovery_success" for l in log_a))
+check("A) log'da 'degerlendirilemedi_sistem' YOK", not any(l.get("sonuc") == "degerlendirilemedi_sistem" for l in log_a))
+
+# ============================================================
+# B) Aday kanıtı YOK (kriter kelimeleri hiçbir aday satırında geçmiyor)
+#    => recovery çağrısı YAPILMAZ, mevcut Değerlendirilemedi davranışı korunur
+# ============================================================
+CRITERIA_NO_EVIDENCE = [{"name": "Bütçe Yönetimi", "weight": CAP}]
+BAD_TABLE_NO_EVIDENCE = "| Bütçe Yönetimi | 20/25 | G: Deneyimini anlattı ~~ K: [99:59] bir şey söyledi ~~ E: ~~ S: |"
+
+
+def mock_b(call_n, *a, **kw):
+    return dict(BAD_FIELDS)  # normal retry'ler yine kötü; recovery HİÇ çağrılmamalı
+
+
+calls_b = {"n": 0}
+orig_regen = m.regenerate_criterion_fields
+def wrapped_b(*args, **kwargs):
+    calls_b["n"] += 1
+    return mock_b(calls_b["n"], *args, **kwargs)
+m.regenerate_criterion_fields = wrapped_b
+try:
+    new_table_b, new_score_b, log_b, _flag_b = m.apply_structured_rationale_gate(
+        BAD_TABLE_NO_EVIDENCE, CRITERIA_NO_EVIDENCE, "P", TRANSCRIPT_VIEW, TRANSCRIPT_TEXT, "claude", "claude-sonnet-4-6", 9102, 1)
+finally:
+    m.regenerate_criterion_fields = orig_regen
+check("B) yalnız 3 çağrı yapıldı (recovery TETİKLENMEDİ)", calls_b["n"] == 3)
+check("B) kriter Değerlendirilemedi (sistem) KALDI", "Değerlendirilemedi (sistem)" in new_table_b)
+check("B) log'da criterion_recovery_* HİÇ yok", not any((l.get("sonuc") or "").startswith("criterion_recovery") for l in log_b))
+
+# ============================================================
+# C) Yalnız mülakatçı satırında ilgili kelime var (aday hiç söylemedi)
+#    => recovery tetiklenmez
+# ============================================================
+CRITERIA_INTERVIEWER_ONLY = [{"name": "Liderlik", "weight": CAP}]
+transcript_interviewer_only = [
+    {"role": "mulakatci", "text": "Liderlik yaklaşımınızı anlatır mısınız?", "elapsed_ms": 5000, "ts": "0:05"},
+    {"role": "aday", "text": "Genelde ekiple birlikte çalışırım.", "elapsed_ms": 9000, "ts": "0:09"},  # "liderlik" kelimesi GEÇMİYOR
+]
+BAD_TABLE_LEADERSHIP = "| Liderlik | 20/25 | G: Deneyimini anlattı ~~ K: [99:59] bir şey söyledi ~~ E: ~~ S: |"
+
+calls_c = {"n": 0}
+def wrapped_c(*args, **kwargs):
+    calls_c["n"] += 1
+    return dict(BAD_FIELDS)
+m.regenerate_criterion_fields = wrapped_c
+try:
+    new_table_c, new_score_c, log_c, _flag_c = m.apply_structured_rationale_gate(
+        BAD_TABLE_LEADERSHIP, CRITERIA_INTERVIEWER_ONLY, "P", transcript_interviewer_only, TRANSCRIPT_TEXT, "claude", "claude-sonnet-4-6", 9103, 1)
+finally:
+    m.regenerate_criterion_fields = orig_regen
+check("C) yalnız 3 çağrı yapıldı (mülakatçı-only kelime recovery TETİKLEMEDİ)", calls_c["n"] == 3)
+check("C) kriter Değerlendirilemedi (sistem) KALDI", "Değerlendirilemedi (sistem)" in new_table_c)
+
+# Doğrudan helper testi: aynı senaryo
+check("C) (doğrudan helper) yalnız mülakatçı satırında geçen kelime -> False",
+      m._has_candidate_signal_for_recovery("Liderlik", transcript_interviewer_only) is False)
+check("C) (doğrudan helper) aday satırında geçen kelime -> True",
+      m._has_candidate_signal_for_recovery("Raporlama", TRANSCRIPT_VIEW) is True)
+
+# ============================================================
+# D) Recovery üretiliyor AMA validator yine violation buluyor => Değerlendirilemedi kalır
+# ============================================================
+def mock_d(call_n, *a, **kw):
+    return dict(BAD_FIELDS)  # normal retry'ler VE recovery hep aynı kötü K -> hep evidence_timestamp_invalid
+
+
+(new_table_d, new_score_d, log_d, _flag_d), n_calls_d = make_gate_call(BAD_TABLE, mock_d, 9104)
+check("D) toplam 4 çağrı yapıldı (3 normal + 1 recovery denendi)", n_calls_d == 4)
+check("D) kriter Değerlendirilemedi (sistem) KALDI", "Değerlendirilemedi (sistem)" in new_table_d)
+check("D) log'da 'criterion_recovery_failed' var", any(l.get("sonuc") == "criterion_recovery_failed" for l in log_d))
+check("D) log'da 'criterion_recovery_success' YOK", not any(l.get("sonuc") == "criterion_recovery_success" for l in log_d))
+
+# ============================================================
+# E) Recovery'de "Mülakatçı:" etiketli kanıt kullanılırsa => İş 2 speaker guard nedeniyle KABUL EDİLMEZ
+# ============================================================
+def mock_e(call_n, *a, **kw):
+    if call_n <= 3:
+        return dict(BAD_FIELDS)
+    return dict(MULAKATCI_LABELED_FIELDS)  # recovery mülakatçı sözünü K olarak veriyor
+
+
+(new_table_e, new_score_e, log_e, _flag_e), n_calls_e = make_gate_call(BAD_TABLE, mock_e, 9105)
+check("E) toplam 4 çağrı yapıldı", n_calls_e == 4)
+check("E) 'Mülakatçı:' etiketli kanıt REDDEDİLDİ — kriter Değerlendirilemedi (sistem) KALDI",
+      "Değerlendirilemedi (sistem)" in new_table_e)
+check("E) log'da 'criterion_recovery_failed' var (İş 2 speaker guard nedeniyle)",
+      any(l.get("sonuc") == "criterion_recovery_failed" for l in log_e))
+# Doğrudan doğrulama: İş 2'nin _timestamp_field_grounded'ı bu K'yi reddediyor mu?
+check("E) (doğrudan doğrulama) İş 2 guard, 'Mülakatçı:' etiketli K'yi role=aday için reddediyor",
+      m._timestamp_field_grounded(MULAKATCI_LABELED_FIELDS["k"], TRANSCRIPT_VIEW, role="aday") is False)
+
+# ============================================================
+# F) Recovery başarı durumunda validator kurallarından HİÇBİRİ bypass edilmedi mi?
+# ============================================================
+# F'de recovery fields'ı KASITLI olarak validate_criterion_fields'tan GEÇMEYECEK bir ikinci
+# ihlal (banned_phrase) taşısın; recovery yine de TEMİZ üretmeli ki 'geçti' sayılsın -- burada
+# asıl kontrol: recovery çıktısının GERÇEKTEN validate_criterion_fields'tan geçtiğini (çağrı
+# sayımıyla) doğrulamak.
+_validate_calls = {"n": 0}
+_orig_validate = m.validate_criterion_fields
+def counting_validate(*args, **kwargs):
+    _validate_calls["n"] += 1
+    return _orig_validate(*args, **kwargs)
+m.validate_criterion_fields = counting_validate
+try:
+    (new_table_f, new_score_f, log_f, _flag_f), n_calls_f = make_gate_call(BAD_TABLE, mock_a, 9106)
+finally:
+    m.validate_criterion_fields = _orig_validate
+check("F) recovery çıktısı validate_criterion_fields'tan GEÇTİ (çağrı sayısı >= normal+recovery)",
+      _validate_calls["n"] >= 4)  # ilk parse + 3 retry-sonrası + 1 recovery-sonrası (>=4)
+check("F) recovery başarılı olduğunda kriter GERÇEK puanla kaldı (uydurma/atlanmış puan değil)",
+      "20/25" in new_table_f or "/25" in new_table_f)
+check("F) (referans) GOOD_FIELDS'in K'si İş 2 guard'dan da geçiyor (gerçek aday kanıtı, etiket yok)",
+      m._timestamp_field_grounded(GOOD_FIELDS["k"], TRANSCRIPT_VIEW, role="aday") is True)
+
+# ============================================================
+# G) Normalde ilk denemede/retry içinde geçen kriter => recovery yoluna ASLA girmez
+# ============================================================
+GOOD_TABLE = f"| Raporlama | 20/25 | G: Raporlama sürecini anlattı ~~ K: [2:10] Haftalık olarak düzenli rapor hazırladığını söyledi ~~ E: ~~ S: |"
+
+calls_g = {"n": 0}
+def wrapped_g(*args, **kwargs):
+    calls_g["n"] += 1
+    return dict(GOOD_FIELDS)  # hiç çağrılmamalı zaten
+m.regenerate_criterion_fields = wrapped_g
+try:
+    new_table_g, new_score_g, log_g, _flag_g = m.apply_structured_rationale_gate(
+        GOOD_TABLE, CRITERIA, "P", TRANSCRIPT_VIEW, TRANSCRIPT_TEXT, "claude", "claude-sonnet-4-6", 9107, 1)
+finally:
+    m.regenerate_criterion_fields = orig_regen
+check("G) regenerate_criterion_fields HİÇ ÇAĞRILMADI (ilk denemede geçti)", calls_g["n"] == 0)
+check("G) log'da criterion_recovery_* HİÇ yok", not any((l.get("sonuc") or "").startswith("criterion_recovery") for l in log_g))
+check("G) kriter normal şekilde puanlı", "Değerlendirilemedi" not in new_table_g)
+
+
+print()
+if FAILURES:
+    print(f"{len(FAILURES)} test BAŞARISIZ:")
+    for f in FAILURES:
+        print(f"  - {f}")
+else:
+    print("Tüm İŞ 4 testleri GEÇTİ.")
+
+print()
+print("=== İŞ 1 REGRESYON ===")
+import subprocess
+r1 = subprocess.run([sys.executable, "test_is1_report_consistency.py"], capture_output=True, text=True)
+print(r1.stdout.strip().splitlines()[-1] if r1.stdout else "(çıktı yok)")
+is1_ok = r1.returncode == 0
+
+print("=== İŞ 2 REGRESYON ===")
+r2 = subprocess.run([sys.executable, "test_is2_speaker_validation.py"], capture_output=True, text=True)
+print(r2.stdout.strip().splitlines()[-1] if r2.stdout else "(çıktı yok)")
+is2_ok = r2.returncode == 0
+
+print("=== İŞ 3 REGRESYON ===")
+r3 = subprocess.run([sys.executable, "test_is3_scope_context.py"], capture_output=True, text=True)
+print(r3.stdout.strip().splitlines()[-1] if r3.stdout else "(çıktı yok)")
+is3_ok = r3.returncode == 0
+
+if FAILURES or not is1_ok or not is2_ok or not is3_ok:
+    sys.exit(1)

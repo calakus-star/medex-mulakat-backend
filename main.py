@@ -7115,6 +7115,29 @@ def apply_criterion_takeover(table_text: str, criteria_list: list, rv_scores: di
 
     return "\n".join(lines), new_score, log
 
+# İŞ 4 — VALIDATOR FAILURE RECOVERY (Problem D): "Değerlendirilemedi (sistem)" bugüne kadar iki
+# farklı durumu (A: adaydan gerçekten veri yok, B: aday cevabı var ama AI'ın G/K/E/S çıktısı
+# validator'dan geçemedi) AYNI sonuca bağlıyordu. Aşağıdaki LOKAL/İş-4'e-özel yardımcı, VAR OLAN
+# _find_relevant_transcript_lines()'ın global davranışına HİÇ dokunmadan, ayrı bir ucuz/deterministik
+# ÖN-FİLTRE sağlar: yalnız "bu kriter için bir recovery denemesi yapmaya değer mi" sorusuna cevap
+# verir — puan/kanıt/nihai karar ÜRETMEZ. Nihai karar HER ZAMAN (recovery'de de) validate_criterion_
+# fields()'tan geçer; bu fonksiyon yalnızca gereksiz LLM çağrısını (veri hiç yoksa) önler.
+def _has_candidate_signal_for_recovery(cname: str, transcript_view: list) -> bool:
+    """İŞ 4 — yalnız role='aday' satırlarına bakar (mülakatçı/sistem/başlık satırları KANIT
+    SAYILMAZ); kriter adının >=4 harfli kelimeleriyle EN AZ BİR örtüşme varsa True döner. Bu NİHAİ
+    bir 'kanıt var' kararı DEĞİLDİR — yalnız ucuz bir tetikleyici. Boş/eşleşmesiz -> recovery hiç
+    denenmez, mevcut davranış (doğrudan diskalifiye) %100 korunur."""
+    kws = [w for w in _norm_name(cname).split() if len(w) >= 4]
+    if not kws:
+        return False
+    for row in (transcript_view or []):
+        if row.get("role") != "aday":
+            continue
+        norm = _norm_name(row.get("text") or "")
+        if any(w in norm for w in kws):
+            return True
+    return False
+
 def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_prefix: str, transcript_view: list,
                                     transcript_text: str, provider: str, model: str, candidate_id: int, level: int):
     """GÖREV 2 — DOĞRULAYICI KAPI. `table_text` (recompute_and_fix_score/recompute_profile_section
@@ -7234,6 +7257,32 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
             _k_ts_scope = _extract_timestamp(fields.get("k") or "")
             if not _k_ts_scope or _timestamp_field_grounded(fields.get("k") or "", transcript_view, role="aday"):
                 flagged_scope.append({"kriter": cname, "kanit": (fields.get("k") or "")[:200]})
+
+        # İŞ 4 — VALIDATOR FAILURE RECOVERY: normal 3 retry TÜKENDİ, kriter TAM OLARAK diskalifiye
+        # edilmeden HEMEN ÖNCE (aşağıdaki 'if violations:' — mevcut disqualifikasyon kararı
+        # DEĞİŞMEDİ). Tetikleyici pozitifse VAR OLAN regenerate_criterion_fields ile TEK bir ek
+        # deneme yapılır; çıktı YİNE AYNI validate_criterion_fields'tan geçirilir — recovery
+        # validator'ı BYPASS ETMEZ, yalnız bir şans daha tanır. Temiz çıkarsa mevcut 'else' dalı
+        # (aşağıda, DEĞİŞMEDİ) onu normal 'geçti' gibi işler; temiz çıkmazsa mevcut disqualifikasyon
+        # aynen devam eder.
+        if violations and _has_candidate_signal_for_recovery(cname, transcript_view):
+            recovery_fields = regenerate_criterion_fields(candidate_id, level, provider, model, cname, cap,
+                                                           transcript_text, fields or {"g": "", "k": "", "e": "", "s": ""},
+                                                           violations, transcript_view=transcript_view, accepted_claims=accepted_claims)
+            if recovery_fields is not None:
+                recovery_violations = validate_criterion_fields(recovery_fields, cap, awarded, transcript_view, accepted_claims)
+                if not recovery_violations:
+                    log.append({"kriter": cname, "kimlik": cid, "sonuc": "criterion_recovery_success",
+                               "not": "3 normal deneme tükendikten sonra 1 ek recovery denemesi validator'ı TEMİZ geçti"})
+                    fields = recovery_fields
+                    violations = recovery_violations  # boş liste
+                else:
+                    log.append({"kriter": cname, "kimlik": cid, "sonuc": "criterion_recovery_failed",
+                               "ihlaller": recovery_violations,
+                               "not": "recovery denemesi de validator'ı geçemedi — mevcut Değerlendirilemedi (sistem) davranışı korunuyor"})
+            else:
+                log.append({"kriter": cname, "kimlik": cid, "sonuc": "criterion_recovery_failed",
+                           "not": "recovery çağrısı (regenerate_criterion_fields) None döndü — mevcut Değerlendirilemedi (sistem) davranışı korunuyor"})
 
         if violations:
             log.append({"kriter": cname, "kimlik": cid, "sonuc": "degerlendirilemedi_sistem", "ihlaller": violations})
