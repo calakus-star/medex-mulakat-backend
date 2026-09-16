@@ -6917,7 +6917,9 @@ def _build_violation_detail_lines(violations: list, cname: str, fields: Optional
 
 def regenerate_criterion_fields(candidate_id: int, level: int, provider: str, model: str, crit_name: str, cap: int,
                                 transcript_text: str, prior_fields: dict, violations: list,
-                                transcript_view: Optional[list] = None, accepted_claims: Optional[list] = None) -> Optional[dict]:
+                                transcript_view: Optional[list] = None, accepted_claims: Optional[list] = None,
+                                criterion_id: Optional[str] = None, attempt: Optional[int] = None,
+                                source: str = "normal_validator_retry") -> Optional[dict]:
     """GÖREV 2.3 — YALNIZCA bu kriterin G/K/E/S alanlarını, tespit edilen ihlal listesini modele
     AÇIKÇA vererek, HEDEFLİ olarak yeniden ürettirir (rapor genelini DEĞİL). Sağlayıcı, birincil
     rapor üretiminde kullanılanla AYNIDIR (provider run_deferred_finish_job'tan gelir — L1/L3
@@ -6925,7 +6927,17 @@ def regenerate_criterion_fields(candidate_id: int, level: int, provider: str, mo
     zaten 'openai' olarak gelir). Başarısız/istisna/API anahtarı yok → None (çağıran bunu
     'yeniden üretim de başarısız' sayar — GÖREV 1.1'in max-3-deneme sayacını ilerletir).
     GÖREV 1.2 — ihlal listesi artık SOMUT (hangi alan, ne bekleniyor, hangi transkript anına bak),
-    yalnız ihlal ADI değil (bkz. _build_violation_detail_lines)."""
+    yalnız ihlal ADI değil (bkz. _build_violation_detail_lines).
+    İŞ 6H — GÖZLEMLENEBİLİRLİK (davranış DEĞİŞMEDİ): `criterion_id`/`attempt`/`source` YALNIZCA
+    loglama için — bu fonksiyonun KENDİ mantığını (prompt, model, max_tokens, parse) hiç
+    etkilemez. `source='normal_validator_retry'` (varsayılan, apply_structured_rationale_gate'in
+    3-deneme döngüsü) veya `source='criterion_recovery'` (İş 4'ün post-diskalifiye recovery'si) —
+    ikisi AI_usage_logs'ta ayrı `action` adıyla (criterion_rationale_retry / criterion_rationale_
+    recovery), Railway stdout'ta ayrı [CRITERION_AI_RETRY] satırıyla görünür."""
+    print(f"[CRITERION_AI_RETRY] c={candidate_id} L{level} criterion={criterion_id or '?'} "
+          f"name={crit_name} attempt={attempt if attempt is not None else '?'} "
+          f"violations={','.join(violations) if violations else '-'} source={source}")
+    _usage_action = "criterion_rationale_retry" if source == "normal_validator_retry" else "criterion_rationale_recovery"
     reasons = "\n".join(_build_violation_detail_lines(violations, crit_name, prior_fields, transcript_view or [], accepted_claims or []))
     _hint_lines = _find_relevant_transcript_lines(crit_name, transcript_view or [], role=None, max_n=6)
     _hint_block = ("\n=== BU KRİTERLE İLGİLİ OLABİLECEK TRANSKRİPT ANLARI (referans için) ===\n" + "\n".join(_hint_lines)) if _hint_lines else ""
@@ -6959,7 +6971,7 @@ S: <E doluysa, mülakatçının bu eksikliği ortaya çıkaran sorusunun [mm:ss]
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
             resp = client.messages.create(model=model or "claude-sonnet-4-6", max_tokens=500, temperature=0,
                                           messages=[{"role": "user", "content": prompt}])
-            record_anthropic_usage(candidate_id, level, model or "claude-sonnet-4-6", "criterion_rationale_retry", resp)
+            record_anthropic_usage(candidate_id, level, model or "claude-sonnet-4-6", _usage_action, resp)
             raw = resp.content[0].text
         elif provider == "openai":
             if not OPENAI_API_KEY:
@@ -6971,7 +6983,7 @@ S: <E doluysa, mülakatçının bu eksikliği ortaya çıkaran sorusunun [mm:ss]
                                timeout=45.0, step="criterion_rationale_retry", severity="background", retry=False,
                                context={"candidate_id": candidate_id, "level": level})
             result = resp.json()
-            record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "criterion_rationale_retry", result)
+            record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, _usage_action, result)
             raw = result["choices"][0]["message"]["content"]
         else:
             return None
@@ -7226,7 +7238,8 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
             attempt += 1
             new_fields = regenerate_criterion_fields(candidate_id, level, provider, model, cname, cap,
                                                       transcript_text, fields or {"g": "", "k": "", "e": "", "s": ""},
-                                                      violations, transcript_view=transcript_view, accepted_claims=accepted_claims)
+                                                      violations, transcript_view=transcript_view, accepted_claims=accepted_claims,
+                                                      criterion_id=cid, attempt=attempt, source="normal_validator_retry")
             if new_fields is None:
                 break
             fields = new_fields
@@ -7268,7 +7281,8 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
         if violations and _has_candidate_signal_for_recovery(cname, transcript_view):
             recovery_fields = regenerate_criterion_fields(candidate_id, level, provider, model, cname, cap,
                                                            transcript_text, fields or {"g": "", "k": "", "e": "", "s": ""},
-                                                           violations, transcript_view=transcript_view, accepted_claims=accepted_claims)
+                                                           violations, transcript_view=transcript_view, accepted_claims=accepted_claims,
+                                                           criterion_id=cid, attempt=attempt + 1, source="criterion_recovery")
             if recovery_fields is not None:
                 recovery_violations = validate_criterion_fields(recovery_fields, cap, awarded, transcript_view, accepted_claims)
                 if not recovery_violations:
