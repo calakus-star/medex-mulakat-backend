@@ -6218,6 +6218,68 @@ def recompute_overall_decision(candidate_id: int, level: int, reviewer_score_pos
     finally:
         db.close()
 
+# İŞ 1 — TAKEOVER SONRASI RAPOR TUTARLILIĞI (Problem A / "Kader" vakası): devralma sonrası "Puanlama
+# Kapsamı" ve "Değerlendirilemeyen Alanlar" TEK ortak kaynaktan (final, devralma-sonrası kriter
+# tablosu) üretilsin; ikisini yazan patch işlemlerinden biri sessizce no-op olursa artık fark
+# edilmeden geçmesin. Skor/karar/validator/takeover/scope-clamp mantığına DOKUNULMADI — yalnız bu
+# iki metin bölümünün üretim/yazım mekanizması.
+def _extract_disqualified_criteria_names(table_text: str) -> list:
+    """TEK GERÇEK KAYNAK: final kriter tablosunun (devralma dahil tüm mutasyonlardan SONRAKİ hali)
+    satırlarını tarar, _DISQUALIFIED_CELL_RE ile eşleşen (GERÇEKTEN 'Değerlendirilemedi (sistem)'
+    kalan) satırların kriter adını döner. Puanlama Kapsamı ve Değerlendirilemeyen Alanlar BU
+    fonksiyonun döndürdüğü AYNI listeden üretilirse, ikisi ayrı ayrı hesaplanamaz — yapısal olarak
+    birbirinden farklı sayı/liste veremezler."""
+    names = []
+    for _ln in (table_text or "").splitlines():
+        if _DISQUALIFIED_CELL_RE.search(_ln):
+            _c0 = _ln.strip().strip("|").split("|")[0].strip()
+            if _c0:
+                names.append(_c0)
+    return names
+
+def _patch_report_section(report_text: str, head: str, pattern, new_body: str, section_label: str,
+                          candidate_id: int, level: int) -> str:
+    """Puanlama Kapsamı/Değerlendirilemeyen Alanlar yeniden-yazım yardımcı. Önceden bu iki bölüm
+    birbirinden BAĞIMSIZ, sessizce no-op olabilen iki ayrı 'if HEAD in report_text' bloğuydu — biri
+    başarısız olursa diğeri fark etmeden devam ediyordu (Kader vakası: Puanlama Kapsamı güncellendi,
+    Değerlendirilemeyen Alanlar eski/7 kriterlik listede kaldı). Artık başarısızlık SESSİZ DEĞİL:
+    head bulunamazsa record_system_decision'a görünür bir uyarı yazılır — puanlama/skor/karar
+    mantığına dokunmaz, yalnız görünürlük sağlar."""
+    if head in report_text:
+        return pattern.sub(head + "\n" + new_body, report_text, count=1)
+    try:
+        record_system_decision(candidate_id, level, "rapor_bolum_patch_basarisiz",
+                               f"İŞ 1 — devralma sonrası '{section_label}' bölümü rapor metninde bulunamadı, "
+                               "güncel liste rapora YAZILAMADI (bölüm eski/stale kalmış olabilir).",
+                               {"bolum": section_label, "beklenen_baslik": head})
+    except Exception as e:
+        print(f"UYARI (_patch_report_section log c={candidate_id} L{level} bolum={section_label}): {type(e).__name__}: {e}")
+    return report_text
+
+def _verify_scope_consistency(pos_table_text: str, prof_table_text: str, dropped_pos: list, dropped_prof: list) -> list:
+    """Yapısal doğrulama (defense-in-depth, test edilebilir): dropped listesindeki HİÇBİR kriter
+    adı, final tabloda GERÇEKTEN puanlı (Değerlendirilemedi (sistem) değil) bir satırda görünmesin;
+    tersine, tabloda hâlâ 'Değerlendirilemedi (sistem)' olan bir kriter dropped listesinden eksik
+    olmasın. Sorun bulunursa açıklayıcı string listesi döner (boş liste = tutarlı). Rapor
+    içeriğini/kararı DEĞİŞTİRMEZ, yalnızca tespit eder."""
+    problems = []
+    for table_text, dropped in ((pos_table_text, dropped_pos), (prof_table_text, dropped_prof)):
+        for _ln in (table_text or "").splitlines():
+            if _ln.count("|") < 2:
+                continue
+            cells = [x.strip() for x in _ln.strip().strip("|").split("|")]
+            if len(cells) < 2:
+                continue
+            cname = cells[0].strip()
+            if not cname:
+                continue
+            is_disqualified = bool(_DISQUALIFIED_CELL_RE.search(_ln))
+            if cname in dropped and not is_disqualified:
+                problems.append(f"'{cname}' dropped listesinde ama tabloda PUANLI görünüyor")
+            if is_disqualified and cname not in dropped:
+                problems.append(f"'{cname}' tabloda Değerlendirilemedi (sistem) ama dropped listesinde YOK")
+    return problems
+
 def append_reviewer_section(candidate_id: int, level: int, transcript_text: str, modality_block: str,
                             position_criteria: Optional[list] = None) -> None:
     """İkinci (bağımsız) değerlendiriciyi NİHAİ rapor üzerinde çalıştırır. Yalnız birincilden
@@ -6331,26 +6393,26 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     # "Puanlama Kapsamı" bölümü (HER ZAMAN vardır — bkz. render_puanlama_kapsami) YENİDEN
     # HESAPLANIR ve GÜNCELLENİR: devralınan kriterler artık düşmüş sayılmaz.
     try:
-        _dropped_pos2 = []
-        for _ln in pos_table_text.splitlines():
-            if _DISQUALIFIED_CELL_RE.search(_ln):
-                _c0 = _ln.strip().strip("|").split("|")[0].strip()
-                if _c0:
-                    _dropped_pos2.append(_c0)
-        _dropped_prof2 = []
-        for _ln in prof_table_text.splitlines():
-            if _DISQUALIFIED_CELL_RE.search(_ln):
-                _c0 = _ln.strip().strip("|").split("|")[0].strip()
-                if _c0:
-                    _dropped_prof2.append(_c0)
+        # İŞ 1 — TEK GERÇEK KAYNAK: dropped listeleri, final (devralma-sonrası) tablolardan TEK bir
+        # yerden çıkarılır; Puanlama Kapsamı ve Değerlendirilemeyen Alanlar AYNI listeyi kullanır.
+        _dropped_pos2 = _extract_disqualified_criteria_names(pos_table_text)
+        _dropped_prof2 = _extract_disqualified_criteria_names(prof_table_text)
         _new_kapsami_text = render_puanlama_kapsami(position_criteria or [], PROFILE_CRITERIA, _dropped_pos2, _dropped_prof2)
-        if _PUANLAMA_KAPSAMI_HEAD in final_report:
-            final_report = _PUANLAMA_KAPSAMI_RE.sub(_PUANLAMA_KAPSAMI_HEAD + "\n" + _new_kapsami_text, final_report, count=1)
+        final_report = _patch_report_section(final_report, _PUANLAMA_KAPSAMI_HEAD, _PUANLAMA_KAPSAMI_RE,
+                                             _new_kapsami_text, "Puanlama Kapsamı", candidate_id, level)
         # MADDE 2 — Değerlendirilemeyen Alanlar, Puanlama Kapsamı ile AYNI (devralma-sonrası)
-        # listeden, AYNI anda yeniden yazılır — iki bölüm ASLA farklı listede kalamaz.
+        # listeden, AYNI anda yeniden yazılır — iki bölüm ASLA farklı listede kalamaz. Patch
+        # başarısız olursa (head bulunamazsa) artık sessiz değil — _patch_report_section loglar.
         _new_degerlendirilemeyen_text = render_degerlendirilemeyen_alanlar(_dropped_pos2, _dropped_prof2)
-        if _DEGERLENDIRILEMEYEN_ALANLAR_HEAD in final_report:
-            final_report = _DEGERLENDIRILEMEYEN_ALANLAR_RE.sub(_DEGERLENDIRILEMEYEN_ALANLAR_HEAD + "\n" + _new_degerlendirilemeyen_text, final_report, count=1)
+        final_report = _patch_report_section(final_report, _DEGERLENDIRILEMEYEN_ALANLAR_HEAD, _DEGERLENDIRILEMEYEN_ALANLAR_RE,
+                                             _new_degerlendirilemeyen_text, "Değerlendirilemeyen Alanlar", candidate_id, level)
+        # İŞ 1 — defense-in-depth doğrulama: puanlı bir kriter dropped listesinde (veya tersi)
+        # görünüyorsa görünür şekilde logla (rapor içeriğine/karara dokunmaz, yalnız tespit eder).
+        _consistency_problems = _verify_scope_consistency(pos_table_text, prof_table_text, _dropped_pos2, _dropped_prof2)
+        if _consistency_problems:
+            record_system_decision(candidate_id, level, "rapor_tutarlilik_ihlali",
+                                   "İŞ 1 — devralma sonrası final tablo ile dropped listesi arasında tutarsızlık tespit edildi.",
+                                   {"sorunlar": _consistency_problems})
         _still_dropped = len(_dropped_pos2) + len(_dropped_prof2)
         _total_crit_n2 = len(position_criteria or []) + len(PROFILE_CRITERIA)
         if _total_crit_n2 and (_still_dropped / _total_crit_n2) > 0.25:
@@ -6591,6 +6653,28 @@ _QUOTE_OVERLAP_MIN_WORDS = 2  # en az 2 anlamlı ortak kelime (Türkçe ek-toler
 def _quote_overlap_words(quote: str, line_text: str) -> int:
     return _stem_overlap(_q_keywords(quote), _q_keywords(line_text or ""))
 
+# İŞ 2 — MÜLAKATÇI CÜMLESİNİN ADAY KANITI OLARAK GEÇMESİNİ ENGELLE (Problem B / "Gültuğ AYDIN"
+# vakası): field_text tırnaksız (saf parafraz) olduğunda eski davranış YALNIZ proximite'ye
+# bakıyordu — field'ın kendi metni AÇIKÇA "Mülakatçı:"/"Interviewer:" gibi bir konuşmacı etiketiyle
+# BAŞKA rolün sözünü anlattığını söylese bile bu hiç okunmuyordu. Aşağıdaki iki regex yalnızca
+# AÇIK, kolonla biten GERÇEK bir konuşmacı etiketini yakalar — "Mülakatçının sorusuna..." gibi
+# normal anlatı cümlelerindeki çekimli kullanımı (kolon YOK) YAKALAMAZ; timestamp toleransına,
+# tırnaklı-alıntı örtüşme kurallarına DOKUNMAZ (yalnız tırnaksız/saf-özet dalına ek bir kapı).
+_INTERVIEWER_LABEL_RE = re.compile(r'\b(?:M[üu]lakatç[ıi]|Interviewer|G[öo]r[üu]şmeci)\s*:', re.IGNORECASE)
+_CANDIDATE_LABEL_RE = re.compile(r'\b(?:Aday|Candidate|Kat[ıi]l[ıi]mc[ıi])\s*:', re.IGNORECASE)
+
+def _field_claims_opposite_speaker(field_text: str, role: str) -> bool:
+    """İŞ 2 — field_text kendi metninde AÇIKÇA karşıt role'ün konuşmacı etiketini taşıyor mu (ör.
+    role='aday' istenirken metin 'Mülakatçı: ...' diye başlıyor/içeriyor). Yalnız kolonla biten
+    GERÇEK bir etiketi yakalar; kelimenin çekimli/anlatı içinde geçmesini (kolon yok) YAKALAMAZ."""
+    if not field_text:
+        return False
+    if role == "aday":
+        return bool(_INTERVIEWER_LABEL_RE.search(field_text))
+    if role == "mulakatci":
+        return bool(_CANDIDATE_LABEL_RE.search(field_text))
+    return False
+
 def _timestamp_field_grounded(field_text: str, transcript_view: list, role: str, tolerance_s: int = 8) -> bool:
     """G/K/E/S alanındaki [mm:ss] damgasının GERÇEK bir <role> satırına yakın olup olmadığını VE
     (alanda tırnaklı bir alıntı varsa) o alıntının o role'e GERÇEKTEN ait olduğunu doğrular.
@@ -6599,7 +6683,8 @@ def _timestamp_field_grounded(field_text: str, transcript_view: list, role: str,
     KARŞIT role'ün (ör. K için mülakatçı) yakın satırıyla örtüşme VARSA -> GEÇERSİZ (kapının
     koruduğu asıl durum — yanlış konuşmacının sözü kanıt sayılamaz). (3) hiçbir tarafla
     örtüşmüyorsa (saf parafraz/özet, K formatının izin verdiği hâl) -> yalnız proximite (eski
-    davranış, geriye uyum)."""
+    davranış, geriye uyum) — İŞ 2: BU dalda field_text AÇIK bir karşıt-role etiketi taşıyorsa
+    proximite artık TEK BAŞINA yeterli SAYILMAZ (bkz. _field_claims_opposite_speaker)."""
     ts = _extract_timestamp(field_text)
     if not ts:
         return False
@@ -6614,6 +6699,8 @@ def _timestamp_field_grounded(field_text: str, transcript_view: list, role: str,
         return False
     qm = _QUOTE_RE.search(field_text or "")
     if not qm:
+        if _field_claims_opposite_speaker(field_text, role):
+            return False  # İŞ 2 — açık karşıt-role etiketi (ör. "Mülakatçı: ...") — parafraz DEĞİL
         return True  # alıntı yok (yalnız özet) — proximite yeterli, geriye uyum
     quote = qm.group(1)
     if any(_verbatim_in(quote, row.get("text") or "") for row in near_rows):
@@ -7219,14 +7306,17 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
 # çalışan ikinci bir geçiş (yapısal gate'in K/G'ye bakan kontrolünü DEĞİŞTİRMEZ, TAMAMLAR).
 def find_scope_declarations(transcript_view: list) -> list:
     """GÖREV 2.1 — alan dışı/devretme beyanlarını TRANSKRİPTTEKİ TÜM aday satırlarında arar
-    (yalnız bir kriterin KANIT alanında değil). Dönüş: [{"ts","elapsed_ms","text"}]."""
+    (yalnız bir kriterin KANIT alanında değil). Dönüş: [{"ts","elapsed_ms","text","index"}].
+    İŞ 3 — 'index' (transcript_view'daki konum) eklendi: elapsed_ms'e bağımlı olmadan geriye
+    doğru bağlam penceresi kurulabilsin diye (bkz. _nearby_topic_context). 'text' artık [:200]
+    KIRPILMIYOR — declaration'ın tam metni korunur (log/rapor amaçlı kesilme riski kaldırıldı)."""
     out = []
-    for row in (transcript_view or []):
+    for idx, row in enumerate(transcript_view or []):
         if row.get("role") != "aday":
             continue
         text = (row.get("text") or "").strip()
         if text and (_OUT_OF_SCOPE_RE.search(text) or _DELEGATION_RE.search(text)):
-            out.append({"ts": row.get("ts") or "", "elapsed_ms": row.get("elapsed_ms"), "text": text[:200]})
+            out.append({"ts": row.get("ts") or "", "elapsed_ms": row.get("elapsed_ms"), "text": text, "index": idx})
     return out
 
 def _preceding_question(declaration_elapsed_ms, transcript_view: list) -> Optional[dict]:
@@ -7243,6 +7333,39 @@ def _preceding_question(declaration_elapsed_ms, transcript_view: list) -> Option
         if best is None or em > best.get("elapsed_ms", -1):
             best = row
     return best
+
+# İŞ 3 — SCOPE CLAMP BAĞLAM EŞLEŞTİRMESİ (Problem C / "Murat" vakası, GENEL sistem davranışı — hiçbir
+# adaya/pozisyona özel değil): _preceding_question TEK BAŞINA yalnızca beyandan hemen önceki bir
+# mülakatçı satırını görüyordu — bu bir takip sorusu ("Peki bu konuda?") ise asıl konu bilgisi
+# kayboluyor, topic_text içeriksiz kalıyor, eşleşme başarısız olup TÜM çekirdek kriterlere yayılma
+# riskini artırıyordu. Aşağıdaki fonksiyon, declaration'ın index'inden GERİYE, yalnız aday/mulakatci
+# rollerini dikkate alarak (baslik/sistem satırları atlanır) SINIRLI bir pencere kurar ve o pencere
+# içindeki mülakatçı satırlarını birleştirir — _match_criterion_for_topic'in kendisi (name-only,
+# eşik) DEĞİŞMEDİ, yalnız ona giden topic_text artık tek satır değil, sınırlı bir bağlam.
+def _nearby_topic_context(declaration_index: Optional[int], transcript_view: list,
+                          max_mulakatci_turns: int = 2, max_rows_back: int = 8) -> str:
+    """İŞ 3 — declaration_index'ten GERİYE, yalnız role in ('aday','mulakatci') satırlarını sayarak
+    (baslik/sistem satırları bütçeden düşülmeden atlanır) en fazla max_mulakatci_turns mülakatçı
+    satırı TOPLANANA KADAR veya en fazla max_rows_back (aday+mülakatçı) satır geriye bakılana kadar
+    (hangisi önce dolarsa) ilerler; toplanan mülakatçı satırlarını KRONOLOJİK sırayla birleştirip
+    döner. Pencere KASITLI OLARAK sınırlı — eski/alakasız konuya sınırsız taşma engellenir.
+    transcript_view zaten bellekte (yeni DB/LLM çağrısı YOK), tamamen deterministik."""
+    if declaration_index is None or not transcript_view:
+        return ""
+    mulakatci_texts = []
+    rows_scanned = 0
+    i = declaration_index - 1
+    while i >= 0 and rows_scanned < max_rows_back and len(mulakatci_texts) < max_mulakatci_turns:
+        row = transcript_view[i]
+        role = row.get("role")
+        if role in ("aday", "mulakatci"):
+            rows_scanned += 1
+            if role == "mulakatci":
+                t = (row.get("text") or "").strip()
+                if t:
+                    mulakatci_texts.append(t)
+        i -= 1
+    return " ".join(reversed(mulakatci_texts))
 
 def _match_criterion_for_topic(topic_text: str, criteria_list: list) -> Optional[dict]:
     """GÖREV 2.2 — beyanın öncesindeki mülakatçı sorusunun HANGİ kriterle ilişkili olduğunu,
@@ -7281,20 +7404,24 @@ def apply_scope_clamp_transcript_wide(table_text: str, criteria_list: list, tran
     if not declarations:
         return table_text, None, []
     targets = {}
+    log = []
+    # İŞ 3 — GÜVENİLİR eşleşme yoksa artık _core_criteria'ya BROADCAST edilmiyor (eski davranış
+    # KALDIRILDI). Declaration KAYBOLMAZ: 'log'a (ve dolayısıyla çağıranın record_system_decision
+    # çağrısına) görünür bir 'unresolved' kaydı düşülür, puan/tablo DEĞİŞTİRİLMEZ. Belirsiz kanıtın
+    # birden fazla kriterin puanını düşürmesindense değiştirilmeden görünür loglanması tercih edilir.
     for d in declarations:
-        q = _preceding_question(d.get("elapsed_ms"), transcript_view)
-        topic_text = (q.get("text") if q else "") or ""
+        topic_text = _nearby_topic_context(d.get("index"), transcript_view)
         matched = _match_criterion_for_topic(topic_text, criteria_list)
         if matched:
             targets.setdefault(matched["name"], []).append({**d, "eslesme": "konu"})
         else:
-            for c in _core_criteria(criteria_list):
-                targets.setdefault(c["name"], []).append({**d, "eslesme": "cekirdek"})
+            log.append({"kriter": None, "kimlik": None, "sonuc": "scope_declaration_unresolved",
+                       "damga": d.get("ts"), "beyan": d.get("text"),
+                       "not": "scope declaration bulundu fakat yakın konuşma bağlamından güvenilir bir kritere eşleştirilemedi — kelepçe UYGULANMADI"})
     if not targets:
-        return table_text, None, []
+        return table_text, None, log
 
     lines = table_text.splitlines()
-    log = []
     used_lines = set()
     row_info = []
     changed = False
