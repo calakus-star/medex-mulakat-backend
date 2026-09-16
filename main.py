@@ -7594,6 +7594,29 @@ SADECE yeni Yönetici Özeti metnini yaz (başlık/etiket/tırnak EKLEME, açık
     cleaned = cleaned.strip('"“”\'')
     return cleaned or None
 
+# İŞ 6D — YÖNETİCİ ÖZETİ ANORMAL/GEÇERSİZ CEVAP KORUMASI: regenerate_yonetici_ozeti()'in çıktısı
+# eskiden yalnız truthiness (`if _new_yo:`) ile kabul ediliyordu — HTTP 200 ile gelen 2-30
+# kelimelik anormal/bozuk (ama boş-olmayan) bir cevap, mevcut DÜZGÜN Yönetici Özeti'nin üzerine
+# doğrudan yazılabiliyordu. Bu eşik prompt'un hedefi olan 150-250 kelimeyi HARD GATE yapmıyor —
+# 130-140 kelimelik gerçek/kullanılabilir bir özeti gereksiz reddetmemek için kasıtlı olarak
+# gevşek: 80 kelime, akıl yürütmeyle (empirik production ölçümü YOK — bu oturumdan production
+# log/DB erişimi yok) seçilmiş bir tampon — gerçek bir model denemesi (kusurlu olsa bile) 150-250
+# hedefini bu kadar büyük oranda ıskalaması beklenmez, gerçek bir anomali ise genelde çok daha
+# küçük kalır (2-30 kelime). 150-250 dışı ama >=80 kalan özetler için var olan
+# 'yonetici_ozeti_uzunluk_disi' log-only kalibrasyon kontrolü (main.py, finalize_interview)
+# DEĞİŞMEDEN çalışmaya devam ediyor — bu kapı onun YERİNE geçmiyor, yalnız ÖNÜNE bir güvenlik
+# ağı ekliyor. Kasıtlı olarak yalnız kelime SAYISI — ek semantic/NLP doğrulayıcı YOK.
+YONETICI_OZETI_USABLE_MIN_WORDS = 80
+
+def _yonetici_ozeti_usable(text: Optional[str]) -> bool:
+    """İŞ 6D — regenerate_yonetici_ozeti() çıktısı mevcut özetin üzerine yazılmaya değer mi?
+    Boş/whitespace veya None -> DOĞAL OLARAK geçersiz. Kelime sayısı YONETICI_OZETI_USABLE_MIN_WORDS
+    altındaysa geçersiz. Başka hiçbir kontrol YOK (kasıtlı — bkz. yukarıdaki gerekçe)."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return len(t.split()) >= YONETICI_OZETI_USABLE_MIN_WORDS
+
 # ---- GÖREV 3 — Takip Mülakatı Soruları: '[dayanak: mm:ss]' ile transkript-temelli doğrulama ----
 _DAYANAK_RE = re.compile(r"^\s*[-*•]?\s*\[dayanak\s*:\s*(\d{1,3}:[0-5]\d)\]", re.IGNORECASE)
 
@@ -7821,6 +7844,43 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             if _out_tok_primary <= 50 or len((reply or "").strip()) < 100:
                 print(f"[REPORT_SHORT_RESPONSE] c={candidate_id} L{level} action=primary finish={_fr} "
                       f"out={_out_tok_primary} text={repr(reply)[:500]}")
+            # İŞ 6B — ANORMAL KISA CEVAPTA FULL-CONTEXT CONTINUATION YAPMA: finish_reason=="stop" +
+            # ---RAPORSON--- yok + completion_tokens<=50 GERÇEK bir kesilme (length) DEĞİL — modelin
+            # anormal şekilde erken durması. Bu durumda ~16K bağlamı continuation olarak tekrar
+            # göndermek TPM/429'a çarpıyordu (bkz. teşhis turu). Bunun yerine AYNI parametrelerle
+            # yalnız TEK bir retry yapılır; retry de anormal kısa kalırsa continuation'a HİÇ
+            # girilmeden kontrollü failure — mevcut raw_report EZİLMEZ (bu noktadan sonra fonksiyon
+            # return ile çıkar, raw_report write'ına hiç ulaşılmaz).
+            _is_anomalous_short = (_fr == "stop" and "---RAPORSON---" not in reply and _out_tok_primary <= 50)
+            if _is_anomalous_short:
+                print(f"[REPORT_SHORT_RETRY] c={candidate_id} L{level} attempt=1")
+                resp_retry = openai_call(
+                    "POST", "https://api.openai.com/v1/chat/completions",
+                    json_body={"model": model or OPENAI_REPORT_MODEL, "messages": _msgs, "max_tokens": REPORT_MAX_TOKENS, "temperature": 0},  # GÖREV 4.4 — determinizm, primary ile AYNI parametreler
+                    timeout=150.0, step="report_generation", severity="user", retry=True,
+                    context={"candidate_id": candidate_id, "level": level},
+                )
+                result_retry = resp_retry.json()
+                record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "l2_report_generation_short_retry", result_retry)
+                reply_retry = result_retry["choices"][0]["message"]["content"]
+                _fr_retry = (result_retry.get("choices") or [{}])[0].get("finish_reason")
+                _uo_retry = (result_retry.get("usage") or {})
+                _out_tok_retry = _safe_int(_uo_retry.get('completion_tokens', 0))
+                print(f"[REPORT_USAGE] c={candidate_id} L{level} provider=openai model={model or OPENAI_REPORT_MODEL} "
+                      f"completion_tokens={_out_tok_retry} finish_reason={_fr_retry} "
+                      f"max_tokens={REPORT_MAX_TOKENS} bitti={'---RAPORSON---' in reply_retry} (short-retry)")
+                _retry_still_anomalous = (_fr_retry == "stop" and "---RAPORSON---" not in reply_retry and _out_tok_retry <= 50)
+                if _retry_still_anomalous:
+                    print(f"[REPORT_SHORT_FAILED] c={candidate_id} L{level} out1={_out_tok_primary} out2={_out_tok_retry} "
+                          f"text2={repr(reply_retry)[:500]}")
+                    _mark_finish_failed(candidate_id, level,
+                                        "Rapor üretimi iki denemede de anormal derecede kısa cevap döndürdü "
+                                        "(olası model/API anomalisi) — continuation'a girilmedi, eski rapor korunuyor.")
+                    return
+                # Retry ya TAM raporu üretti (---RAPORSON--- var) ya da GERÇEKTEN uzun/kesilmiş bir
+                # cevaba döndü (ör. finish=length) — her iki durumda da madde 5 gereği NORMAL pipeline
+                # (aşağıdaki, DEĞİŞMEYEN continuation döngüsü dahil) retry sonucuyla devam eder.
+                reply, _fr, _uo = reply_retry, _fr_retry, _uo_retry
             # GÖREV 8 — KESİLME → FALLBACK'E DÜŞMEDEN ÖNCE DEVAM ÇAĞRISI (continuation).
             _cont_tries = 0
             while (_fr == "length" or "---RAPORSON---" not in reply) and _cont_tries < 2:
@@ -8261,6 +8321,26 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
                     _new_yo = regenerate_yonetici_ozeti(candidate_id, level, _gate_provider, _gate_model, yo_text, _wc, _ftx, extra_context=_yo_extra_ctx)
                 except Exception as e:
                     print(f"UYARI (finalize_interview yönetici özeti yeniden üretim c={candidate_id}): {type(e).__name__}: {e}")
+                    _new_yo = None
+                # İŞ 6D — USABLE RESPONSE KAPISI: kabul etmeden önce minimum kullanılabilirlik testi
+                # (bkz. _yonetici_ozeti_usable). Geçemezse AYNI parametrelerle TEK bir semantic retry;
+                # o da geçemezse MEVCUT özet KORUNUR (_new_yo=None -> aşağıdaki 'if _new_yo:' bloğu
+                # çalışmaz, yo_text değişmeden kalır) — rapor bu yüzden ASLA failed olmaz.
+                if not _yonetici_ozeti_usable(_new_yo):
+                    print(f"[YONETICI_OZETI_RETRY] c={candidate_id} L{level}")
+                    try:
+                        _new_yo = regenerate_yonetici_ozeti(candidate_id, level, _gate_provider, _gate_model, yo_text, _wc, _ftx, extra_context=_yo_extra_ctx)
+                    except Exception as e:
+                        print(f"UYARI (finalize_interview yönetici özeti retry c={candidate_id}): {type(e).__name__}: {e}")
+                        _new_yo = None
+                    if not _yonetici_ozeti_usable(_new_yo):
+                        print(f"[YONETICI_OZETI_RETRY_FAILED] c={candidate_id} L{level}")
+                        record_system_decision(candidate_id, level, "yonetici_ozeti_retry_basarisiz",
+                                               f"İŞ 6D — regenerate_yonetici_ozeti() iki denemede de kullanılabilir "
+                                               f"(>={YONETICI_OZETI_USABLE_MIN_WORDS} kelime) bir özet üretemedi; "
+                                               "MEVCUT özet KORUNDU, üzerine yazılmadı.",
+                                               {"onceki_kelime": _wc})
+                        _new_yo = None
                 if _new_yo:
                     _wc2 = len(_new_yo.split())
                     record_system_decision(candidate_id, level, "yonetici_ozeti_yeniden_uretildi",
@@ -10181,7 +10261,24 @@ def run_one_cikan_proje_recovery(candidate_id: int, level: int, position_criteri
         print(f"UYARI (run_one_cikan_proje_recovery çağrı c={candidate_id} L{level}): {type(e).__name__}: {e}")
         recovery_text = None
 
-    if recovery_text and _accept_one_cikan_proje_recovery(recovery_text, transcript_view):
+    accepted = bool(recovery_text) and _accept_one_cikan_proje_recovery(recovery_text, transcript_view)
+    # İŞ 6C — İlk cevap kapıdan geçmezse ("YOK", boş, ya da grounding başarısız — HEPSİ AYNI şekilde
+    # ele alınır) AYNI parametrelerle (aynı model/prompt/transkript) TEK bir semantic retry yapılır.
+    # _accept_one_cikan_proje_recovery DEĞİŞMEDEN ikinci kez uygulanır — kapı GEVŞETİLMİYOR, yalnız
+    # modele bir şans daha veriliyor. İkinci deneme de reddedilirse ÜÇÜNCÜ deneme YOK, mevcut
+    # fallback davranışı AYNEN korunur (aşağıdaki 'else' dalı, değişmedi).
+    if not accepted:
+        print(f"[ONE_CIKAN_PROJE_RETRY] c={candidate_id} L{level}")
+        try:
+            recovery_text = regenerate_one_cikan_proje(candidate_id, level, provider, model, transcript_text, validated_evidence_block)
+        except Exception as e:
+            print(f"UYARI (run_one_cikan_proje_recovery retry çağrısı c={candidate_id} L{level}): {type(e).__name__}: {e}")
+            recovery_text = None
+        accepted = bool(recovery_text) and _accept_one_cikan_proje_recovery(recovery_text, transcript_view)
+        if not accepted:
+            print(f"[ONE_CIKAN_PROJE_RETRY_FAILED] c={candidate_id} L{level}")
+
+    if accepted:
         new_report = _ONE_CIKAN_PROJE_RE.sub(lambda mm: _ONE_CIKAN_PROJE_HEAD + "\n" + recovery_text, final_report, count=1)
         db2 = get_db()
         try:

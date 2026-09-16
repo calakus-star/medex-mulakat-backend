@@ -1,0 +1,266 @@
+# İŞ 6B — ANORMAL KISA CEVAPTA FULL-CONTEXT CONTINUATION YAPMA — unit/regression testleri.
+# run_deferred_finish_job() GERÇEKTEN çağrılır (uçtan uca) — yalnız openai_call() monkey-patch
+# ile kontrol edilir, hiçbir gerçek ağ/API çağrısı yapılmaz. Yerel SQLite'a (medex_mulakat.db)
+# GEÇİCİ test satırları yazılır, test sonunda temizlenir.
+#
+# Çalıştırma: py test_is6b_short_response_retry.py  (backend/ dizininde)
+
+import sys
+import json
+import main as m
+
+FAILURES = []
+
+
+def check(label, condition):
+    status = "OK " if condition else "FAIL"
+    print(f"[{status}] {label}")
+    if not condition:
+        FAILURES.append(label)
+
+
+TEST_CANDIDATE_IDS = list(range(9601, 9607))
+LEVEL = 1
+
+FULL_REPORT = """[MÜLAKATBİTTİ]
+---RAPOR---
+===YÖNETİCİ ÖZETİ===
+Test özeti, aday hakkında kısa bir değerlendirme metni burada yer alır.
+
+===POZİSYON YETKİNLİKLERİ===
+YOK
+
+===KİŞİSEL VE BİLİŞSEL PROFİL===
+YOK
+
+===GÜÇLÜ YÖNLER===
+YOK
+
+===GELİŞİM ALANLARI===
+YOK
+
+===CV ÖZETİ===
+YOK
+
+===TAKİP MÜLAKATI SORULARI===
+YOK
+===BÖLÜM SONU===
+---RAPORSON---"""
+
+SHORT_REPLY = "Tamam."  # gerçek 10-token'a benzer, kısa, RAPORSON yok
+LONG_NO_RAPORSON = "Bu " * 400 + "uzun bir metin ama kapanış işareti yok."  # >50 token, RAPORSON yok
+
+
+class FakeResp:
+    def __init__(self, body):
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+def chat_body(content, finish_reason, completion_tokens):
+    return {
+        "choices": [{"message": {"content": content}, "finish_reason": finish_reason}],
+        "usage": {"completion_tokens": completion_tokens, "prompt_tokens": 100},
+    }
+
+
+def seed_candidate(cid):
+    db = m.get_db()
+    try:
+        db.execute("DELETE FROM candidates WHERE id=?", (cid,))
+        db.execute(
+            "INSERT INTO candidates (id, name, username, password_hash, email, position, level, cv_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (cid, f"Test Aday {cid}", f"test_is6b_{cid}", "x", f"test_is6b_{cid}@example.com",
+             "Business Analyst", LEVEL, "CV metni."))
+        db.commit()
+    finally:
+        db.close()
+
+
+def seed_interview(cid, provider="openai", payload="GÖREV: Mülakatı bitir ve raporu üret.\n\nTRANSKRİPT: [0:01] Aday: Test cevabı.",
+                   old_raw_report="ESKİ-BAŞARILI-RAPOR-İÇERİĞİ ---RAPORSON---"):
+    db = m.get_db()
+    try:
+        db.execute("DELETE FROM interviews WHERE candidate_id=? AND level=?", (cid, LEVEL))
+        db.execute(
+            "INSERT INTO interviews (candidate_id, level, messages, pending_finish_provider, pending_finish_model, "
+            "pending_finish_payload, pending_finish_system, raw_report, processing_status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (cid, LEVEL, "[]", provider, "gpt-4o", payload, "Sistem talimatı.", old_raw_report, "processing"))
+        db.commit()
+    finally:
+        db.close()
+
+
+def read_interview(cid):
+    db = m.get_db()
+    try:
+        row = db.execute("SELECT raw_report, processing_status, report, completed_at FROM interviews WHERE candidate_id=? AND level=?", (cid, LEVEL)).fetchone()
+    finally:
+        db.close()
+    return dict(row) if row else {}
+
+
+def make_mock(report_gen_queue, report_cont_queue):
+    """report_gen_queue: step='report_generation' çağrıları için sıralı yanıt listesi (primary + varsa short-retry).
+    report_cont_queue: step='report_continuation' (TAM CONTEXT continuation) çağrıları için sıralı yanıt listesi.
+    Diğer TÜM step'ler (reviewer, one_cikan_proje_recovery, criterion_rationale_retry, vb.) için jenerik güvenli
+    'YOK' yanıtı döner — bu testin odağı DEĞİL, yalnız pipeline'ın çökmemesi için."""
+    calls = {"report_generation": 0, "report_continuation": 0, "other": 0}
+
+    def mock_openai_call(method, url, *, json_body=None, **kwargs):
+        step = kwargs.get("step")
+        if step == "report_generation":
+            calls["report_generation"] += 1
+            idx = calls["report_generation"] - 1
+            body = report_gen_queue[idx] if idx < len(report_gen_queue) else chat_body("YOK", "stop", 1)
+            return FakeResp(body)
+        if step == "report_continuation":
+            calls["report_continuation"] += 1
+            idx = calls["report_continuation"] - 1
+            body = report_cont_queue[idx] if idx < len(report_cont_queue) else chat_body("YOK", "stop", 1)
+            return FakeResp(body)
+        calls["other"] += 1
+        return FakeResp(chat_body("YOK", "stop", 1))
+
+    return mock_openai_call, calls
+
+
+def run_case(cid, report_gen_queue, report_cont_queue, old_raw_report="ESKİ-BAŞARILI-RAPOR-İÇERİĞİ ---RAPORSON---"):
+    seed_candidate(cid)
+    seed_interview(cid, old_raw_report=old_raw_report)
+    mock_fn, calls = make_mock(report_gen_queue, report_cont_queue)
+    orig = m.openai_call
+    m.openai_call = mock_fn
+    try:
+        m.run_deferred_finish_job(cid, LEVEL)
+    finally:
+        m.openai_call = orig
+    return calls, read_interview(cid)
+
+
+try:
+    # ============================================================
+    # A) primary: uzun rapor + RAPORSON => retry yok, continuation yok, normal tamamlanır
+    # ============================================================
+    cid = 9601
+    calls_a, iv_a = run_case(cid, [chat_body(FULL_REPORT, "stop", 2238)], [])
+    check("A) report_generation TEK kez çağrıldı (retry yok)", calls_a["report_generation"] == 1)
+    check("A) report_continuation HİÇ çağrılmadı", calls_a["report_continuation"] == 0)
+    check("A) processing tamamlandı (completed_at dolu)", bool(iv_a.get("completed_at")))
+
+    # ============================================================
+    # B) primary: 10 token + stop + RAPORSON yok => continuation YOK, 1 primary retry
+    # ============================================================
+    cid = 9602
+    calls_b, iv_b = run_case(cid, [
+        chat_body(SHORT_REPLY, "stop", 10),   # primary — anormal kısa
+        chat_body(SHORT_REPLY, "stop", 10),   # short-retry — YİNE kısa (D senaryosuyla karışmasın diye burada da kısa ama B yalnız 'continuation yok + 1 retry oldu' testi)
+    ], [])
+    check("B) report_generation TAM 2 kez çağrıldı (primary + 1 short-retry)", calls_b["report_generation"] == 2)
+    check("B) report_continuation (full-context) HİÇ çağrılmadı", calls_b["report_continuation"] == 0)
+
+    # ============================================================
+    # C) primary kısa, retry TAM rapor => pipeline normal tamamlanır
+    # ============================================================
+    cid = 9603
+    calls_c, iv_c = run_case(cid, [
+        chat_body(SHORT_REPLY, "stop", 10),        # primary — anormal kısa
+        chat_body(FULL_REPORT, "stop", 2100),      # short-retry — TAM rapor
+    ], [])
+    check("C) report_generation TAM 2 kez çağrıldı (primary + retry)", calls_c["report_generation"] == 2)
+    check("C) report_continuation (full-context) HİÇ çağrılmadı", calls_c["report_continuation"] == 0)
+    check("C) processing tamamlandı (retry sonucu kabul edildi)", bool(iv_c.get("completed_at")))
+
+    # ============================================================
+    # D) primary kısa, retry YİNE kısa => kontrollü failure, continuation YOK, eski raw_report korunur
+    # ============================================================
+    cid = 9604
+    OLD_RAW = "ESKİ-BAŞARILI-RAPOR-D ---RAPORSON---"
+    calls_d, iv_d = run_case(cid, [
+        chat_body(SHORT_REPLY, "stop", 10),
+        chat_body("Ok.", "stop", 2),
+    ], [], old_raw_report=OLD_RAW)
+    check("D) report_generation TAM 2 kez çağrıldı (primary + 1 retry, ÜÇÜNCÜ deneme YOK)", calls_d["report_generation"] == 2)
+    check("D) report_continuation (full-context) HİÇ çağrılmadı", calls_d["report_continuation"] == 0)
+    check("D) processing_status='failed' (kontrollü)", iv_d.get("processing_status") == "failed")
+    check("D) eski raw_report EZİLMEDİ, aynen korundu", iv_d.get("raw_report") == OLD_RAW)
+    check("D) completed_at BOŞ (rapor tamamlanmadı)", not iv_d.get("completed_at"))
+
+    # ============================================================
+    # E) primary uzun + finish_reason=length => mevcut continuation ÇALIŞIR
+    # ============================================================
+    cid = 9605
+    calls_e, iv_e = run_case(cid, [
+        chat_body(LONG_NO_RAPORSON, "length", 4000),
+    ], [
+        chat_body(" ---RAPORSON---", "stop", 5),
+    ])
+    check("E) report_generation TEK kez (retry-branch tetiklenmedi, uzun+length)", calls_e["report_generation"] == 1)
+    check("E) report_continuation (full-context) ÇALIŞTI (>=1)", calls_e["report_continuation"] >= 1)
+    check("E) processing tamamlandı", bool(iv_e.get("completed_at")))
+
+    # ============================================================
+    # F) primary uzun + stop ama RAPORSON eksik => mevcut continuation davranışı KORUNUR
+    # ============================================================
+    cid = 9606
+    calls_f, iv_f = run_case(cid, [
+        chat_body(LONG_NO_RAPORSON, "stop", 4000),
+    ], [
+        chat_body(" ---RAPORSON---", "stop", 5),
+    ])
+    check("F) report_generation TEK kez (retry-branch tetiklenmedi, uzun+stop+RAPORSON yok)", calls_f["report_generation"] == 1)
+    check("F) report_continuation (full-context) ÇALIŞTI (>=1)", calls_f["report_continuation"] >= 1)
+    check("F) processing tamamlandı", bool(iv_f.get("completed_at")))
+
+finally:
+    db = m.get_db()
+    try:
+        for cid in TEST_CANDIDATE_IDS:
+            db.execute("DELETE FROM interviews WHERE candidate_id=? AND level=?", (cid, LEVEL))
+            db.execute("DELETE FROM candidates WHERE id=?", (cid,))
+        db.commit()
+    finally:
+        db.close()
+
+
+print()
+if FAILURES:
+    print(f"{len(FAILURES)} test BAŞARISIZ:")
+    for f in FAILURES:
+        print(f"  - {f}")
+else:
+    print("Tüm İŞ 6B testleri GEÇTİ.")
+
+print()
+print("=== İŞ 1 REGRESYON ===")
+import subprocess
+r1 = subprocess.run([sys.executable, "test_is1_report_consistency.py"], capture_output=True, text=True)
+print(r1.stdout.strip().splitlines()[-1] if r1.stdout else "(çıktı yok)")
+is1_ok = r1.returncode == 0
+
+print("=== İŞ 2 REGRESYON ===")
+r2 = subprocess.run([sys.executable, "test_is2_speaker_validation.py"], capture_output=True, text=True)
+print(r2.stdout.strip().splitlines()[-1] if r2.stdout else "(çıktı yok)")
+is2_ok = r2.returncode == 0
+
+print("=== İŞ 3 REGRESYON ===")
+r3 = subprocess.run([sys.executable, "test_is3_scope_context.py"], capture_output=True, text=True)
+print(r3.stdout.strip().splitlines()[-1] if r3.stdout else "(çıktı yok)")
+is3_ok = r3.returncode == 0
+
+print("=== İŞ 4 REGRESYON ===")
+r4 = subprocess.run([sys.executable, "test_is4_validator_recovery.py"], capture_output=True, text=True)
+print(r4.stdout.strip().splitlines()[-1] if r4.stdout else "(çıktı yok)")
+is4_ok = r4.returncode == 0
+
+print("=== İŞ 5 REGRESYON ===")
+r5 = subprocess.run([sys.executable, "test_is5_one_cikan_proje_recovery.py"], capture_output=True, text=True)
+print(r5.stdout.strip().splitlines()[-1] if r5.stdout else "(çıktı yok)")
+is5_ok = r5.returncode == 0
+
+if FAILURES or not (is1_ok and is2_ok and is3_ok and is4_ok and is5_ok):
+    sys.exit(1)
