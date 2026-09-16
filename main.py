@@ -7814,6 +7814,13 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             print(f"[REPORT_USAGE] c={candidate_id} L{level} provider=openai model={model or OPENAI_REPORT_MODEL} "
                   f"completion_tokens={_uo.get('completion_tokens', '?')} finish_reason={_fr} "
                   f"max_tokens={REPORT_MAX_TOKENS} bitti={'---RAPORSON---' in reply}")
+            # İŞ 6A — TEŞHİS LOGU (yalnız log, davranış DEĞİŞMEDİ): çıktı anormal derecede kısaysa
+            # (<=50 token VEYA metin <100 karakter) modelin GERÇEK kısa cevabını Railway stdout'a
+            # bas — yalnız MODEL cevabı, CV/transcript/prompt ASLA loglanmaz. DB'ye yazılmaz.
+            _out_tok_primary = _safe_int(_uo.get('completion_tokens', 0))
+            if _out_tok_primary <= 50 or len((reply or "").strip()) < 100:
+                print(f"[REPORT_SHORT_RESPONSE] c={candidate_id} L{level} action=primary finish={_fr} "
+                      f"out={_out_tok_primary} text={repr(reply)[:500]}")
             # GÖREV 8 — KESİLME → FALLBACK'E DÜŞMEDEN ÖNCE DEVAM ÇAĞRISI (continuation).
             _cont_tries = 0
             while (_fr == "length" or "---RAPORSON---" not in reply) and _cont_tries < 2:
@@ -7826,8 +7833,15 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
                                   timeout=150.0, step="report_continuation", severity="user", retry=True,
                                   context={"candidate_id": candidate_id, "level": level}).json()
                 record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "l2_report_continuation", _cr)
-                reply = reply + (_cr["choices"][0]["message"]["content"] or "")
+                _cont_text = _cr["choices"][0]["message"]["content"] or ""
                 _fr = (_cr.get("choices") or [{}])[0].get("finish_reason")
+                # İŞ 6A — TEŞHİS LOGU: continuation cevabının KENDİSİ (kümülatif değil) anormal
+                # kısaysa aynı şekilde logla.
+                _out_tok_cont = _safe_int((_cr.get('usage') or {}).get('completion_tokens', 0))
+                if _out_tok_cont <= 50 or len(_cont_text.strip()) < 100:
+                    print(f"[REPORT_SHORT_RESPONSE] c={candidate_id} L{level} action=continuation finish={_fr} "
+                          f"out={_out_tok_cont} text={repr(_cont_text)[:500]}")
+                reply = reply + _cont_text
             if _fr == "length" or "---RAPORSON---" not in reply:
                 print(f"[REPORT_TRUNCATED] c={candidate_id} L{level} finish_reason={_fr} (devam çağrıları yetmedi)")
                 record_system_decision(candidate_id, level, "rapor_kesildi",
