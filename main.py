@@ -7150,6 +7150,47 @@ def _has_candidate_signal_for_recovery(cname: str, transcript_view: list) -> boo
             return True
     return False
 
+# İŞ 6J — SAF METİN VIOLATION'LARINI LLM'SİZ DÜZELT: unsourced_eksik / banned_phrase_found /
+# forbidden_transition_found HİÇBİRİ semantik değerlendirme GEREKTİRMİYOR (bkz. İş 6I teşhisi) —
+# üçü de ya sabit bir kuralın mekanik uygulanması (E/S sil) ya da saf regex-kalıp temizliği
+# (bağlaç/klişe cümle sil). Bu fonksiyon YALNIZ bu 3 kodu ele alır; duplicate_claim,
+# evidence_timestamp_invalid, structure_invalid, score_direction_conflict, out_of_scope_high_score
+# ve diğer TÜM violation'lar OLDUĞU GİBİ (dokunulmadan) döner — onlar için mevcut AI retry akışı
+# DEĞİŞMEDEN devam eder. G ve K alanlarına, awarded/cap'e HİÇ dokunmaz. AI çağrısı YAPMAZ.
+def _deterministic_repair_criterion_fields(fields: Optional[dict], violations: list) -> tuple:
+    """Dönüş: (yeni_fields, repaired_kodlari[]). fields boşsa (legacy serbest-metin hücre) no-op —
+    bu repair yalnız yapısal G/K/E/S alanları üzerinde çalışır."""
+    if not fields:
+        return fields, []
+    new_fields = dict(fields)
+    repaired = []
+    if "unsourced_eksik" in violations:
+        # KURAL (main.py _VIOLATION_TR'de zaten yazılı): S grounded değilse EKSİK'i BOŞ bırak.
+        new_fields["e"] = ""
+        new_fields["s"] = ""
+        repaired.append("unsourced_eksik")
+    if "forbidden_transition_found" in violations:
+        for key in ("g", "e"):
+            val = new_fields.get(key) or ""
+            if val and _TRANSITION_WORD_RE.search(val):
+                cleaned = _TRANSITION_WORD_RE.sub("", val)
+                cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;")
+                new_fields[key] = cleaned
+        repaired.append("forbidden_transition_found")
+    if "banned_phrase_found" in violations:
+        for key in ("g", "e"):
+            text = new_fields.get(key) or ""
+            for hit in banned_phrase_hits(text):
+                text = text.replace(hit, "")
+            text = re.sub(r"\s{2,}", " ", text).strip(" ,;.")
+            new_fields[key] = text
+        # Kaldırılan bölüm E'nin TAMAMIYSA, ona bağlı S de artık anlamsız — birlikte boşalt.
+        if not (new_fields.get("e") or "").strip():
+            new_fields["e"] = ""
+            new_fields["s"] = ""
+        repaired.append("banned_phrase_found")
+    return new_fields, repaired
+
 def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_prefix: str, transcript_view: list,
                                     transcript_text: str, provider: str, model: str, candidate_id: int, level: int):
     """GÖREV 2 — DOĞRULAYICI KAPI. `table_text` (recompute_and_fix_score/recompute_profile_section
@@ -7230,6 +7271,18 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
                 continue
         else:
             violations = validate_criterion_fields(fields, cap, awarded, transcript_view, accepted_claims)
+
+        # İŞ 6J — AI çağrısından ÖNCE, yalnız saf-metin violation'ları (unsourced_eksik/
+        # banned_phrase_found/forbidden_transition_found) için deterministik temizlik dene.
+        # Diğer violation'lar (varsa) DOKUNULMADAN kalır; TEMİZLİK SONRASI validator AYNI şekilde
+        # tekrar çalıştırılır — kalan violation'lar için aşağıdaki mevcut AI retry akışı DEĞİŞMEDEN
+        # devam eder. fields None ise (legacy serbest-metin hücre) no-op.
+        _repaired_fields, _repaired_codes = _deterministic_repair_criterion_fields(fields, violations)
+        if _repaired_codes:
+            fields = _repaired_fields
+            violations = validate_criterion_fields(fields, cap, awarded, transcript_view, accepted_claims)
+            print(f"[CRITERION_DETERMINISTIC_REPAIR] c={candidate_id} L{level} criterion={cid} "
+                  f"repaired={','.join(_repaired_codes)}")
         # İş emri GÖREV 1.1 (VALIDATOR KALİBRASYONU) — 2 → 3 deneme: kanıtlı kriterlerin (Murat
         # AYZİT raporunda İnisiyatif/Analitik gibi) 2 denemede düzelemeyip düşmesi kanıtlandı;
         # 3. deneme + GÖREV 1.2'nin somut talimatı birlikte bu riski azaltır.
