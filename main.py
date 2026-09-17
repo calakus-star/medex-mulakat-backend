@@ -6899,7 +6899,12 @@ def _build_violation_detail_lines(violations: list, cname: str, fields: Optional
             quoted = "; ".join(f"'{h}'" for h in hits[:3]) if hits else "(klişe ifade)"
             lines.append(f"- banned_phrase_found: G veya E alanında ŞU klişeyi yazdın: {quoted}. SİL — yerine adayın TAM OLARAK ne yaptığını/söylediğini somut anlat (klişe kelime YOK).")
         elif v == "evidence_timestamp_invalid":
-            hint = _find_relevant_transcript_lines(cname, transcript_view, role=None, max_n=4)
+            # İŞ 6K — hint role'ü, validator'ın K için kabul ettiği role ("aday") ile UYUMLU hale
+            # getirildi. Önceden role=None (aday+mülakatçı karışık) veriliyordu — model bazen bir
+            # mülakatçı satırını "ilgili an" sanıp K'ya dayandırıyordu, _timestamp_field_grounded
+            # (role="aday") bunu YİNE reddediyordu (İş 6I teşhisi, candidate 22). Genel/system-wide
+            # bir tutarlılık düzeltmesi — hiçbir aday/pozisyon/kritere özel değil.
+            hint = _find_relevant_transcript_lines(cname, transcript_view, role="aday", max_n=4)
             hint_txt = " | ".join(hint) if hint else "(bu konuda transkriptte açık bir satır bulunamadı)"
             lines.append(f"- evidence_timestamp_invalid: K alanındaki [mm:ss] damgası transkriptte YOK. Bu KRİTERE yakın GERÇEK anlar: {hint_txt} — K'yı BUNLARDAN birine dayandır.")
         elif v == "unsourced_eksik":
