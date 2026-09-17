@@ -6789,6 +6789,34 @@ def _score_direction_conflict(g: str, e: str, cap, awarded) -> bool:
     return bool(_STRONG_POSITIVE_CLOSING_RE.search(g.strip()))
 
 # ---- GÖREV 2 — DOĞRULAYICI (validator): LOG değil KAPI ----
+# İŞ 6M — DUPLICATE_CLAIM'İ GÜVENLİ DETERMİNİSTİK SINIRA ÇEK (system-wide, hiçbir aday/pozisyon/
+# kriter/timestamp/transcript içeriğine özel değil). Eski politika (_is_near_duplicate, SequenceMatcher
+# >= 0.6) ampirik olarak hem yanlış-pozitif (farklı olay + ortak rapor şablonu → duplicate sayılıyordu)
+# hem yanlış-negatif (aynı iddia + farklı paraphrase → kaçıyordu) üretiyordu (bkz. İş 6L teşhisi).
+# YENİ politika: "aynı KANITIN farklı kriterlerde kullanılması YASAK DEĞİL; yasak olan aynı G
+# metninin BAŞKA kriterde copy/paste seviyesinde TEKRARI." Bu yüzden artık yalnız NORMALIZE EDİLMİŞ
+# TAM eşitliğe bakılıyor — stemming/synonym/fuzzy/semantic/LLM KULLANILMIYOR (kasıtlı, bu katman
+# semantik karar vermiyor). _is_near_duplicate() (SequenceMatcher tabanlı) GLOBAL olarak SİLİNMEDİ —
+# ses/mimik gözlem tekrarı tespitinde (main.py, build_modality_evidence_block civarı) hâlâ kullanılıyor,
+# YALNIZ duplicate_claim kararı bu iki yeni fonksiyona taşındı.
+def _normalize_claim_text(text: str) -> str:
+    """İŞ 6M — yalnız BİÇİMSEL normalizasyon: casefold + baş/son boşluk + çoklu boşluk tekilleştirme
+    + sondaki noktalama. ANLAMI DEĞİŞTİRMEZ (stemming/synonym YOK)."""
+    t = (text or "").strip().casefold()
+    t = re.sub(r"\s+", " ", t)
+    t = t.strip(" .,;:!?")
+    return t
+
+def _is_exact_duplicate_claim(text: str, existing: list) -> bool:
+    """İŞ 6M — duplicate_claim İÇİN TEK doğruluk kaynağı: normalize edilmiş TAM eşitlik. Case/
+    fazla-boşluk/son-noktalama farkını tolere eder; bunun DIŞINDA hiçbir benzerlik/fuzzy/semantic
+    karar YOKTUR — aynı olay farklı yetkinlik yorumuyla kullanılmışsa veya farklı olaylar ortak bir
+    rapor şablonu paylaşıyorsa, metin BİREBİR aynı olmadığı sürece duplicate SAYILMAZ."""
+    t = _normalize_claim_text(text)
+    if not t:
+        return False
+    return any(t == _normalize_claim_text(e) for e in existing)
+
 def validate_criterion_fields(fields: Optional[dict], cap: int, awarded: Optional[int], transcript_view: list,
                               prior_claims: list) -> list:
     """Bir kriterin YAPISAL alanlarını (G/K/E/S) denetler. Dönüş: ihlal kodları listesi (boş liste
@@ -6832,7 +6860,7 @@ def validate_criterion_fields(fields: Optional[dict], cap: int, awarded: Optiona
             if _extra and _extract_timestamp(_extra) and not _timestamp_field_grounded(_extra, transcript_view, role="aday"):
                 violations.append("evidence_timestamp_invalid")
                 break
-    if _is_near_duplicate(g, prior_claims):
+    if _is_exact_duplicate_claim(g, prior_claims):
         violations.append("duplicate_claim")
     # İş emri — KANIT BÜTÜNLÜĞÜ VE İKİNCİ DEĞERLENDİRİCİ ÇIKTISI / KALEM 1 — G AÇIK, KOŞULSUZ bir
     # olumlu hüküm cümlesiyle bitiyor (ör. "...yatkın olduğunu belirtmiştir") VE E (eksik) BOŞ VE
@@ -6912,7 +6940,7 @@ def _build_violation_detail_lines(violations: list, cname: str, fields: Optional
             hint_txt = " | ".join(hint) if hint else "(bu konuda mülakatçının sorduğu net bir soru bulunamadı — bu durumda EKSİK'i BOŞ bırak)"
             lines.append(f"- unsourced_eksik: EKSİK dolu ama SORU_DAMGASI gerçek bir mülakatçı sorusuna denk gelmiyor. Gerçek mülakatçı soru anları: {hint_txt}")
         elif v == "duplicate_claim":
-            near_dup = next((c for c in accepted_claims if _is_near_duplicate(g, [c])), "")
+            near_dup = next((c for c in accepted_claims if _is_exact_duplicate_claim(g, [c])), "")
             lines.append(f"- duplicate_claim: G alanın başka bir kriterde ZATEN kullanılan şu kanıtla neredeyse AYNI: '{near_dup}'. TAMAMEN FARKLI, bu kritere ÖZGÜ bir gözlem yaz.")
         elif v == "forbidden_transition_found":
             lines.append("- forbidden_transition_found: G veya E İÇİNDE 'ancak/fakat/ne var ki/bununla birlikte' var. SİL — G ve E'yi birbirinden BAĞIMSIZ, düz iki cümle yap.")

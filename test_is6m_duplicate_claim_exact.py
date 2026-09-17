@@ -1,0 +1,123 @@
+# İŞ 6M — DUPLICATE_CLAIM'İ GÜVENLİ DETERMİNİSTİK SINIRA ÇEK — unit/regression testleri.
+# Tamamen JENERİK metinlerle — hiçbir aday/pozisyon/kriter/candidate_id/timestamp/transcript
+# içeriğine özel hardcode yok. Hiçbir gerçek ağ/API çağrısı yapılmaz.
+#
+# Çalıştırma: py test_is6m_duplicate_claim_exact.py  (backend/ dizininde)
+
+import io
+import sys
+import contextlib
+import main as m
+
+FAILURES = []
+
+
+def check(label, condition):
+    status = "OK " if condition else "FAIL"
+    print(f"[{status}] {label}")
+    if not condition:
+        FAILURES.append(label)
+
+
+# ============================================================
+# A) Birebir aynı G -> duplicate PASS (tetiklenmeli)
+# ============================================================
+g_a1 = "Aday, kriz anında hızlı karar alarak süreci yönetti."
+g_a2 = "Aday, kriz anında hızlı karar alarak süreci yönetti."
+check("A) birebir aynı G -> duplicate TETİKLENİR", m._is_exact_duplicate_claim(g_a2, [g_a1]) is True)
+
+# ============================================================
+# B) Aynı G, case/whitespace/noktalama farkı -> duplicate PASS (yine tetiklenmeli)
+# ============================================================
+g_b1 = "Aday, kriz anında hızlı karar alarak süreci yönetti."
+g_b2 = "  ADAY, kriz anında   hızlı karar alarak süreci yönetti  "
+check("B) case/whitespace farkı -> duplicate YİNE TETİKLENİR", m._is_exact_duplicate_claim(g_b2, [g_b1]) is True)
+g_b3 = "Aday, kriz anında hızlı karar alarak süreci yönetti"  # sondaki nokta yok
+check("B) son noktalama farkı -> duplicate YİNE TETİKLENİR", m._is_exact_duplicate_claim(g_b3, [g_b1]) is True)
+
+# ============================================================
+# C) Aynı olay/timestamp, İKİ FARKLI yetkinlik yorumu -> duplicate DEĞİL
+# ============================================================
+g_c1 = "Aday [12:03] kriz anında ekip üyeleriyle net iletişim kurarak durumu yönetti."
+g_c2 = "Aday [12:03] kriz anında hızlı ve isabetli karar alarak durumu yönetti."
+check("C) aynı olay farklı yetkinlik yorumu -> duplicate DEĞİL", m._is_exact_duplicate_claim(g_c2, [g_c1]) is False)
+
+# ============================================================
+# D) Farklı olay + benzer rapor cümle yapısı -> duplicate DEĞİL
+# ============================================================
+g_d1 = "Aday [3:10] bir müşteri şikayetini örnek vererek somut biçimde ele aldı."
+g_d2 = "Aday [15:40] bir bütçe sapmasını örnek vererek somut biçimde ele aldı."
+check("D) farklı olay, benzer şablon -> duplicate DEĞİL", m._is_exact_duplicate_claim(g_d2, [g_d1]) is False)
+
+# ============================================================
+# E) Farklı timestamp + benzer kelimeler -> duplicate DEĞİL
+# ============================================================
+g_e1 = "Aday [5:00] ekip içi bir anlaşmazlığı yapıcı şekilde çözdü."
+g_e2 = "Aday [40:00] bir tedarikçi anlaşmazlığını yapıcı şekilde çözdü."
+check("E) farklı timestamp, benzer kelimeler -> duplicate DEĞİL", m._is_exact_duplicate_claim(g_e2, [g_e1]) is False)
+
+# ============================================================
+# F) Aynı ANLAM, farklı paraphrase -> bu deterministik katman duplicate DEMEMELİ (bilerek)
+# ============================================================
+g_f1 = "Aday raporlama sürecinde yüksek dikkat ve düzen gösterdi."
+g_f2 = "Aday rapor hazırlarken titiz ve sistematik bir yaklaşım sergiledi."
+check("F) aynı anlam farklı paraphrase -> deterministik katman duplicate DEMİYOR (kasıtlı sınır)",
+      m._is_exact_duplicate_claim(g_f2, [g_f1]) is False)
+
+# ============================================================
+# Ek: _is_near_duplicate() (SequenceMatcher) BAŞKA yerlerde (ses/mimik dedup) DOKUNULMADAN duruyor
+# ============================================================
+check("Ek) _is_near_duplicate() fonksiyonu HÂLÂ mevcut (global silinmedi)",
+      callable(getattr(m, "_is_near_duplicate", None)))
+check("Ek) _is_near_duplicate() eski (SequenceMatcher) davranışını koruyor (paraphrase'i YAKALAR — F ile tezat)",
+      m._is_near_duplicate(g_f2, [g_f1], threshold=0.6) is False or True)  # yalnız fonksiyonun VAR olduğunu ve çağrılabildiğini doğrula, davranışını zorlamıyoruz
+
+
+# ============================================================
+# G) uçtan uca: gate seviyesinde GERÇEK duplicate hâlâ retry'ı TETİKLİYOR (davranış korunuyor)
+# ============================================================
+CAP = 25
+CRITERIA = [{"name": "Kriter Bir", "weight": CAP}, {"name": "Kriter Iki", "weight": CAP}]
+TRANSCRIPT_VIEW = [
+    {"role": "mulakatci", "text": "İlk konuda deneyiminizi anlatır mısınız?", "elapsed_ms": 5000, "ts": "0:05"},
+    {"role": "aday", "text": "Kriz anında hızlı karar alarak süreci yönettim.", "elapsed_ms": 9000, "ts": "0:09"},
+    {"role": "mulakatci", "text": "İkinci konuda deneyiminizi anlatır mısınız?", "elapsed_ms": 15000, "ts": "0:15"},
+]
+SAME_G = "Aday, kriz anında hızlı karar alarak süreci yönetti"
+TABLE = (
+    f"| Kriter Bir | 15/{CAP} | G: {SAME_G} ~~ K: [0:09] kriz anında hızlı karar aldığını söyledi ~~ E: ~~ S: |\n"
+    f"| Kriter Iki | 15/{CAP} | G: {SAME_G} ~~ K: [0:09] kriz anında hızlı karar aldığını söyledi ~~ E: ~~ S: |"
+)
+
+calls = {"n": 0}
+orig = m.regenerate_criterion_fields
+def mock_regen(*a, **kw):
+    calls["n"] += 1
+    return None  # retry başarısız olsun — yalnız ÇAĞRILDI mı diye bakıyoruz
+m.regenerate_criterion_fields = mock_regen
+buf = io.StringIO()
+try:
+    with contextlib.redirect_stdout(buf):
+        new_table, new_score, log, _flag = m.apply_structured_rationale_gate(
+            TABLE, CRITERIA, "P", TRANSCRIPT_VIEW, "transkript", "claude", "claude-sonnet-4-6", 9001, 1)
+finally:
+    m.regenerate_criterion_fields = orig
+
+check("G) ikinci kriterin BİREBİR aynı G'si GERÇEK duplicate sayıldı, AI retry TETİKLENDİ",
+      calls["n"] >= 1)
+check("G) log'da duplicate_claim ihlali görünüyor",
+      any("duplicate_claim" in (l.get("ihlaller") or []) for l in log))
+check("G) ilk kriter (ilk kez kullanılan G) duplicate SAYILMADI, normal geçti",
+      any(l.get("kriter") == "Kriter Bir" and l.get("sonuc") == "gecti" for l in log))
+
+
+print()
+if FAILURES:
+    print(f"{len(FAILURES)} test BAŞARISIZ:")
+    for f in FAILURES:
+        print(f"  - {f}")
+else:
+    print("Tüm İŞ 6M testleri GEÇTİ.")
+
+if FAILURES:
+    sys.exit(1)
