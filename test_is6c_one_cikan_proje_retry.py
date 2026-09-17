@@ -1,6 +1,10 @@
-# İŞ 6C — ONE_CIKAN_PROJE_RECOVERY TEK SEMANTIC RETRY — unit/regression testleri.
-# regenerate_one_cikan_proje() monkey-patch ile kontrol edilir — hiçbir gerçek ağ/API çağrısı
-# yapılmaz. Yerel SQLite'a (medex_mulakat.db) geçici satır yazılıp temizlenir.
+# İŞ 6C — ONE_CIKAN_PROJE_RECOVERY SEMANTIC RETRY — GÜNCELLEME NOTU (İŞ 6N-1):
+# İş 6C'nin eklediği "ilk cevap reddedilirse aynı girdiyle 1 kez daha dene" mekanizması, İş 6N-1
+# teşhisinde (aynı prompt/model/context/temperature ile ikinci çağrının gerçek bilgi kazancı
+# YOK olduğu kanıtlandığı için) KALDIRILDI — run_one_cikan_proje_recovery artık TEK çağrı yapıyor.
+# Bu dosya artık İş 6C'nin ESKİ davranışını DEĞİL, "retry'nin KALDIRILDIĞINI" doğruluyor (regresyon
+# adı/numarası korunuyor ki önceki turlarda "İş 1-6M/6N regression" listesine referans bozulmasın).
+# regenerate_one_cikan_proje() monkey-patch edilir — hiçbir gerçek ağ/API çağrısı yapılmaz.
 #
 # Çalıştırma: py test_is6c_one_cikan_proje_retry.py  (backend/ dizininde)
 
@@ -69,8 +73,8 @@ def read_report(candidate_id):
 
 
 def with_sequence(*replies):
-    """Sırayla verilen cevapları döndüren mock; fazladan çağrı yapılırsa (3.+) AssertionError fırlatır
-    — 'üçüncü çağrı YAPILMADI' garantisini test seviyesinde de zorlar."""
+    """Sırayla verilen cevapları döndüren mock; fazladan çağrı yapılırsa AssertionError fırlatır —
+    İş 6N-1'in 'ikinci çağrı ASLA yapılmaz' garantisini test seviyesinde de zorlar."""
     calls = {"n": 0}
     queue = list(replies)
     orig = m.regenerate_one_cikan_proje
@@ -87,7 +91,7 @@ def with_sequence(*replies):
 
 try:
     # ============================================================
-    # A) İlk cevap grounded/geçerli -> 1 çağrı, retry YOK, kabul
+    # A) İlk cevap grounded/geçerli -> 1 çağrı, kabul
     # ============================================================
     cid = 9701
     seed_interview(cid)
@@ -97,75 +101,72 @@ try:
     finally:
         m.regenerate_one_cikan_proje = orig
     rpt = read_report(cid)
-    check("A) tam 1 çağrı (retry TETİKLENMEDİ)", calls["n"] == 1)
+    check("A) tam 1 çağrı", calls["n"] == 1)
     check("A) grounded metin rapora yazıldı", GROUNDED_TEXT in rpt)
     check("A) fallback ARTIK YOK", FALLBACK not in rpt)
 
     # ============================================================
-    # B) İlk cevap 'YOK', ikinci grounded/geçerli -> 2 çağrı, ikinci kabul
+    # B) İlk cevap 'YOK' -> İŞ 6N-1: İKİNCİ ÇAĞRI YAPILMAZ, fallback KORUNUR
     # ============================================================
     cid = 9702
     seed_interview(cid)
-    calls, orig = with_sequence("YOK", GROUNDED_TEXT)
+    calls, orig = with_sequence("YOK")  # ikinci bir eleman YOK — çağrılırsa AssertionError fırlar
     try:
         m.run_one_cikan_proje_recovery(cid, LEVEL, [])
     finally:
         m.regenerate_one_cikan_proje = orig
     rpt = read_report(cid)
-    check("B) tam 2 çağrı (1 retry)", calls["n"] == 2)
-    check("B) ikinci (grounded) metin rapora yazıldı", GROUNDED_TEXT in rpt)
-    check("B) fallback ARTIK YOK", FALLBACK not in rpt)
+    check("B) tam 1 çağrı (İKİNCİ ÇAĞRI YOK — İş 6N-1)", calls["n"] == 1)
+    check("B) fallback KORUNDU (eski 'retry ile kurtar' davranışı KALDIRILDI)", FALLBACK in rpt)
 
     # ============================================================
-    # C) İlk cevap grounding başarısız, ikinci geçerli -> 2 çağrı, ikinci kabul
+    # C) İlk cevap grounding başarısız -> İKİNCİ ÇAĞRI YAPILMAZ, fallback KORUNUR
     # ============================================================
     cid = 9703
     seed_interview(cid)
-    calls, orig = with_sequence(UNGROUNDED_TEXT, GROUNDED_TEXT)
+    calls, orig = with_sequence(UNGROUNDED_TEXT)
     try:
         m.run_one_cikan_proje_recovery(cid, LEVEL, [])
     finally:
         m.regenerate_one_cikan_proje = orig
     rpt = read_report(cid)
-    check("C) tam 2 çağrı (1 retry)", calls["n"] == 2)
-    check("C) ikinci (grounded) metin rapora yazıldı", GROUNDED_TEXT in rpt)
-    check("C) ungrounded ilk metin rapora YAZILMADI", UNGROUNDED_TEXT not in rpt)
+    check("C) tam 1 çağrı (İKİNCİ ÇAĞRI YOK)", calls["n"] == 1)
+    check("C) fallback KORUNDU", FALLBACK in rpt)
+    check("C) ungrounded metin rapora YAZILMADI", UNGROUNDED_TEXT not in rpt)
 
     # ============================================================
-    # D) İlk 'YOK', ikinci 'YOK' -> 2 çağrı, fallback korunur
+    # D) İlk 'YOK' -> yalnız 1 çağrı, fallback korunur (eski D testiyle AYNI sonuç, artık 1 çağrıyla)
     # ============================================================
     cid = 9704
     seed_interview(cid)
-    calls, orig = with_sequence("YOK", "YOK")
+    calls, orig = with_sequence("YOK")
     try:
         m.run_one_cikan_proje_recovery(cid, LEVEL, [])
     finally:
         m.regenerate_one_cikan_proje = orig
     rpt = read_report(cid)
-    check("D) tam 2 çağrı (1 retry, ÜÇÜNCÜ YOK)", calls["n"] == 2)
+    check("D) tam 1 çağrı (İKİNCİ/ÜÇÜNCÜ YOK)", calls["n"] == 1)
     check("D) fallback KORUNDU", FALLBACK in rpt)
 
     # ============================================================
-    # E) İlk ve ikinci ungrounded -> fallback korunur
+    # E) İlk ungrounded -> yalnız 1 çağrı, fallback korunur
     # ============================================================
     cid = 9705
     seed_interview(cid)
-    calls, orig = with_sequence(UNGROUNDED_TEXT, UNGROUNDED_TEXT)
+    calls, orig = with_sequence(UNGROUNDED_TEXT)
     try:
         m.run_one_cikan_proje_recovery(cid, LEVEL, [])
     finally:
         m.regenerate_one_cikan_proje = orig
     rpt = read_report(cid)
-    check("E) tam 2 çağrı (1 retry, ÜÇÜNCÜ YOK)", calls["n"] == 2)
+    check("E) tam 1 çağrı", calls["n"] == 1)
     check("E) fallback KORUNDU", FALLBACK in rpt)
     check("E) ungrounded metin rapora YAZILMADI", UNGROUNDED_TEXT not in rpt)
 
     # ============================================================
-    # F) Üçüncü çağrı hiçbir senaryoda yapılmadı (with_sequence zaten AssertionError ile
-    #    zorluyor — D/E'nin sorunsuz tamamlanmış olması bunun kanıtı; ek doğrulama:)
+    # F) Hiçbir senaryoda İKİNCİ çağrı yapılmadı (with_sequence zaten AssertionError ile zorluyor)
     # ============================================================
-    check("F) D senaryosunda 3. çağrı yapılmadı (queue sınırı aşılmadı)", True)  # D zaten üstte doğrulandı
-    check("F) E senaryosunda 3. çağrı yapılmadı (queue sınırı aşılmadı)", True)  # E zaten üstte doğrulandı
+    check("F) B/C/D/E senaryolarının hiçbirinde 2. çağrı yapılmadı (queue sınırı aşılmadı)", True)
 
 finally:
     db = m.get_db()

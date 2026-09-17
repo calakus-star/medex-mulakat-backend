@@ -10239,30 +10239,50 @@ def finalize_narrative_section(raw_text: str, require_timestamp: bool = False) -
 _ONE_CIKAN_PROJE_HEAD = "**Öne Çıkan Proje ve Deneyimler:**"
 _ONE_CIKAN_PROJE_RE = re.compile(re.escape(_ONE_CIKAN_PROJE_HEAD) + r"(.*?)(?=\n\n|\Z)", re.DOTALL)
 
+def _build_candidate_evidence_context(transcript_view: list) -> str:
+    """İŞ 6N-1 — one_cikan_proje recovery için KÜÇÜLTÜLMÜŞ context: yalnız role='aday' satırları,
+    [mm:ss] damgasıyla. Mülakatçı turları (sorular) bu context'e HİÇ girmiyor — gate zaten yalnız
+    role='aday' grounding arıyor (_timestamp_field_grounded, İş 2), mülakatçı metni modele gösterip
+    sonra reddetmenin anlamı yok. HİÇBİR sektör/domain kelimesi ARANMIYOR (CRA/GCP/klinik vb. YOK,
+    system-wide) — yalnız KONUŞMACI rolüne göre filtrelenir, TÜM aday turları dahil edilir."""
+    lines = []
+    for row in (transcript_view or []):
+        if row.get("role") != "aday":
+            continue
+        text = (row.get("text") or "").strip()
+        if not text:
+            continue
+        ts = row.get("ts") or ""
+        lines.append(f"[{ts}] Aday: {text}" if ts else f"Aday: {text}")
+    return "\n".join(lines)
+
 def regenerate_one_cikan_proje(candidate_id: int, level: int, provider: str, model: str,
-                               transcript_text: str, validated_evidence_block: str) -> Optional[str]:
-    """İŞ 5 — YALNIZ 'Öne Çıkan Proje ve Deneyimler' metnini hedefli olarak yeniden ürettirir
+                               candidate_evidence_text: str, validated_evidence_block: str) -> Optional[str]:
+    """İŞ 5/6N-1 — YALNIZ 'Öne Çıkan Proje ve Deneyimler' metnini hedefli olarak yeniden ürettirir
     (tam rapor DEĞİL — regenerate_criterion_fields/regenerate_yonetici_ozeti ile AYNI desen).
-    Başarısız/istisna/API anahtarı yok → None (çağıran bunu 'recovery de başarısız' sayar,
-    mevcut fallback korunur)."""
-    prompt = f"""Aşağıda bir işe alım mülakatının TAM transkripti ve (varsa) o mülakattan zaten DOĞRULANMIŞ, validator'dan geçmiş kriter kanıtları var. Görevin: yalnızca "Öne Çıkan Proje ve Deneyimler" bölümünü yazmak.
+    İŞ 6N-1 — girdi artık TAM transkript değil, yalnız ADAYIN SÖZLERİ (bkz.
+    _build_candidate_evidence_context) — mülakatçı turları context'e hiç girmiyor, token boyutu
+    küçülüyor. Prompt, tekrar eden ağır negatif çerçevelemeyi ve "proje" kelimesi zorunluluğunu
+    KALDIRDI — genel/soyut ifadeler yine YETERSİZ sayılır ama somut deneyim türü GENİŞLETİLDİ
+    (yürütülen görev/operasyonel sorumluluk/kriz-problem çözümü/süreç iyileştirme/denetim/
+    mentörlük/uygulanan değişiklik — hiçbiri hard-code bir anahtar kelime değil, örnek listesi).
+    Başarısız/istisna/API anahtarı yok → None (çağıran bunu 'recovery başarısız' sayar, mevcut
+    fallback korunur)."""
+    prompt = f"""Aşağıda bir işe alım mülakatında ADAYIN KENDİ SÖZLERİ (yalnız aday, zaman damgalarıyla) ve varsa o mülakattan zaten DOĞRULANMIŞ kriter kanıtları var. Görevin: "Öne Çıkan Proje ve Deneyimler" bölümünü yazmak.
 
-KESİN KURAL — bu bölüm yalnız GERÇEKTEN SOMUT bir proje/olay/deneyim anlatımı içindir (adayın KENDİ KATKISI + varsa sonucu), genel yetkinlik/profil ifadesi DEĞİL:
-- KABUL: "20 yıl deneyimli", "iletişimi güçlü", "analitik yaklaşımı var" gibi GENEL ifadeler TEK BAŞINA YETERLİ DEĞİL.
-- KABUL: adayın SOMUT olarak anlattığı, kendi katkısının/yaptığının belli olduğu bir olay/proje/vaka (ör. belirli bir audit, belirli bir kriz anı, belirli bir mentörlük süreci) — [mm:ss] damgasıyla.
-- Sonuç/metrik varsa ekle, ama YOKSA da SOMUT olay yine de yazılabilir (sonuç ZORUNLU DEĞİL).
-- YALNIZCA ADAYIN KENDİ SÖZLERİNE dayan — mülakatçının anlattığı bir örneği/projeyi ASLA aday deneyimiymiş gibi yazma.
-- Transkriptte GERÇEKTEN OLMAYAN hiçbir bilgi/proje/sonuç UYDURMA — CV'de geçse bile adayın SÖZLÜ olarak doğrulamadığı bir bilgiyi mülakat kanıtı gibi sunma.
-- Her cümlede en az bir GERÇEK [mm:ss] damgası kullan (transkriptte gerçekten var olan bir ana karşılık gelmeli).
-- Böyle somut bir proje/deneyim GERÇEKTEN yoksa (yalnız genel yetkinlik ifadeleri varsa) SADECE "YOK" yaz — zorla üretme.
+Bu bölüm, adayın MÜLAKATTA BİZZAT ANLATTIĞI, doğrulanabilir ve anlamlı bir profesyonel deneyimi özetler — genel/soyut yetkinlik ifadesi ("20 yıl deneyimli", "iletişimi güçlü" gibi TEK BAŞINA) DEĞİL. "Proje" kelimesinin geçmesi ZORUNLU DEĞİL — şunlardan HERHANGİ biri geçerli sayılır: yürütülen bir çalışma/görev, üstlenilen operasyonel bir sorumluluk, bir kriz/problem çözümü, bir süreç iyileştirmesi, bir denetim/audit deneyimi, bir eğitim/mentörlük süreci, uygulanan bir değişiklik, ya da başka somut bir profesyonel deneyim.
 
-=== DOĞRULANMIŞ KRİTER KANITLARI (referans — bu bilgiler zaten transkriptten doğrulanmış, ama BURAYA aynen KOPYALAMA, yalnız hangi olayların somut olduğuna dair İPUCU olarak kullan) ===
+Yaz: adayın NE YAPTIĞI, hangi BAĞLAMDA (rolü/sorumluluğu neydi), varsa SONUÇ/ETKİ (bu TERCİH edilir, ZORUNLU DEĞİL). Her cümlede en az bir GERÇEK [mm:ss] damgası kullan (aşağıdaki ADAY sözlerinde GERÇEKTEN var olan bir ana karşılık gelmeli). Transkriptte GERÇEKTEN OLMAYAN hiçbir bilgi/sonuç UYDURMA; CV'de geçse bile adayın SÖZLÜ doğrulamadığı bir bilgiyi mülakat kanıtı gibi sunma.
+
+Yalnız gerçekten HİÇBİR anlamlı, adaya ait, doğrulanabilir deneyim yoksa (yalnız soyut/genel ifadeler varsa) "YOK" yaz.
+
+=== DOĞRULANMIŞ KRİTER KANITLARI (referans — BURAYA aynen KOPYALAMA, yalnız ipucu) ===
 {(validated_evidence_block or '(yok)')[:4000]}
 
-=== TRANSKRİPT (TAM) ===
-{(transcript_text or '')[:TRANSCRIPT_PROMPT_MAX_CHARS]}
+=== ADAYIN SÖZLERİ (yalnız aday, zaman damgalı) ===
+{(candidate_evidence_text or '')[:TRANSCRIPT_PROMPT_MAX_CHARS]}
 
-SADECE "Öne Çıkan Proje ve Deneyimler" bölümünün metnini yaz (başlık/etiket/tırnak EKLEME, açıklama yapma). Somut bir şey yoksa tek kelime: YOK"""
+SADECE bölüm metnini yaz (başlık/etiket/tırnak EKLEME, açıklama yapma)."""
     raw = None
     try:
         if provider == "claude":
@@ -10318,12 +10338,19 @@ def _accept_one_cikan_proje_recovery(text: str, transcript_view: list) -> bool:
     return _one_cikan_proje_recovery_grounded(t, transcript_view)
 
 def run_one_cikan_proje_recovery(candidate_id: int, level: int, position_criteria: Optional[list] = None) -> None:
-    """İŞ 5 — orkestrasyon: validator+reviewer+takeover TAMAMLANDIKTAN SONRA (run_deferred_finish_job
+    """İŞ 5/6N-1 — orkestrasyon: validator+reviewer+takeover TAMAMLANDIKTAN SONRA (run_deferred_finish_job
     içinde append_reviewer_section'dan HEMEN SONRA çağrılır), FİNAL kaydedilmiş raporda 'Öne Çıkan
     Proje ve Deneyimler' HÂLÂ fallback ise TEK bir hedefli recovery denemesi yapar. Bölüm zaten
     doluysa (fallback DEĞİLSE) HİÇBİR ÇAĞRI YAPMAZ. Recovery kabul edilirse YALNIZ bu bölüm
     değiştirilir — başka hiçbir bölüme (Güçlü Yönler, Gelişim Alanları, Genel Kanı, vb.) dokunulmaz.
-    Hata/atlama → rapor DEĞİŞMEDEN kalır, sessizce değil (record_system_decision loglar)."""
+    Hata/atlama → rapor DEĞİŞMEDEN kalır, sessizce değil (record_system_decision loglar).
+    İŞ 6N-1 — ARTIK YALNIZ TEK ÇAĞRI: aynı girdiyle (aynı prompt/model/context/temperature) ikinci
+    bir AI çağrısı YAPILMIYOR (eski İş 6C semantic-retry'si kaldırıldı — girdi tamamen aynı olduğu
+    için gerçek bilgi kazancı yoktu, bkz. İş 6N teşhisi). İlk çağrı kabul edilmezse mevcut güvenli
+    fallback davranışı AYNEN devam eder. Ayrıca modele artık TAM transkript değil, yalnız ADAY
+    turlarından oluşan küçültülmüş bir context veriliyor (bkz. _build_candidate_evidence_context) —
+    grounding kapısı (_accept_one_cikan_proje_recovery) DEĞİŞMEDEN, hâlâ TAM transcript_view ile
+    çalışıyor (yalnız MODELE giden PROMPT küçüldü, doğrulama küçülmedi)."""
     db = get_db()
     try:
         row = db.execute(
@@ -10343,7 +10370,7 @@ def run_one_cikan_proje_recovery(candidate_id: int, level: int, position_criteri
         transcript_view = build_transcript_view(
             row["messages"] if row and "messages" in row.keys() else "[]", level,
             row["started_at"] if row and "started_at" in row.keys() else None, for_report=True)
-        transcript_text = transcript_to_text(transcript_view)
+        candidate_evidence_text = _build_candidate_evidence_context(transcript_view)
     except Exception as e:
         print(f"UYARI (run_one_cikan_proje_recovery transkript c={candidate_id} L{level}): {type(e).__name__}: {e}")
         return
@@ -10356,27 +10383,16 @@ def run_one_cikan_proje_recovery(candidate_id: int, level: int, position_criteri
     model = row["pending_finish_model"] if row and "pending_finish_model" in row.keys() else None
 
     try:
-        recovery_text = regenerate_one_cikan_proje(candidate_id, level, provider, model, transcript_text, validated_evidence_block)
+        recovery_text = regenerate_one_cikan_proje(candidate_id, level, provider, model, candidate_evidence_text, validated_evidence_block)
     except Exception as e:
         print(f"UYARI (run_one_cikan_proje_recovery çağrı c={candidate_id} L{level}): {type(e).__name__}: {e}")
         recovery_text = None
 
+    # İŞ 6N-1 — TEK çağrı: kabul edilmezse (boş/'YOK'/grounding başarısız fark etmeksizin) İKİNCİ
+    # bir AI çağrısı YAPILMAZ (eski İş 6C retry'si kaldırıldı — aynı girdiyle ikinci çağrının gerçek
+    # bilgi kazancı yoktu, bkz. İş 6N teşhisi). Grounding kapısı (_accept_one_cikan_proje_recovery)
+    # DEĞİŞMEDEN, TAM transcript_view ile çalışmaya devam ediyor.
     accepted = bool(recovery_text) and _accept_one_cikan_proje_recovery(recovery_text, transcript_view)
-    # İŞ 6C — İlk cevap kapıdan geçmezse ("YOK", boş, ya da grounding başarısız — HEPSİ AYNI şekilde
-    # ele alınır) AYNI parametrelerle (aynı model/prompt/transkript) TEK bir semantic retry yapılır.
-    # _accept_one_cikan_proje_recovery DEĞİŞMEDEN ikinci kez uygulanır — kapı GEVŞETİLMİYOR, yalnız
-    # modele bir şans daha veriliyor. İkinci deneme de reddedilirse ÜÇÜNCÜ deneme YOK, mevcut
-    # fallback davranışı AYNEN korunur (aşağıdaki 'else' dalı, değişmedi).
-    if not accepted:
-        print(f"[ONE_CIKAN_PROJE_RETRY] c={candidate_id} L{level}")
-        try:
-            recovery_text = regenerate_one_cikan_proje(candidate_id, level, provider, model, transcript_text, validated_evidence_block)
-        except Exception as e:
-            print(f"UYARI (run_one_cikan_proje_recovery retry çağrısı c={candidate_id} L{level}): {type(e).__name__}: {e}")
-            recovery_text = None
-        accepted = bool(recovery_text) and _accept_one_cikan_proje_recovery(recovery_text, transcript_view)
-        if not accepted:
-            print(f"[ONE_CIKAN_PROJE_RETRY_FAILED] c={candidate_id} L{level}")
 
     if accepted:
         new_report = _ONE_CIKAN_PROJE_RE.sub(lambda mm: _ONE_CIKAN_PROJE_HEAD + "\n" + recovery_text, final_report, count=1)
@@ -10387,15 +10403,15 @@ def run_one_cikan_proje_recovery(candidate_id: int, level: int, position_criteri
         finally:
             db2.close()
         record_system_decision(candidate_id, level, "one_cikan_proje_recovery_success",
-                               "İŞ 5 — 'Öne Çıkan Proje ve Deneyimler' ilk üretimde fallback'teydi; "
-                               "final kriter kanıtları + transkript ile hedefli TEK bir recovery denemesi "
+                               "İş 5/6N-1 — 'Öne Çıkan Proje ve Deneyimler' ilk üretimde fallback'teydi; "
+                               "TEK hedefli recovery denemesi (yalnız aday turları context'iyle) "
                                "grounded/somut bir bulgu üretti ve bölüm güncellendi.",
                                {"onceki_metin": current_text, "yeni_metin": recovery_text})
     else:
         record_system_decision(candidate_id, level, "one_cikan_proje_recovery_failed",
-                               "İŞ 5 — 'Öne Çıkan Proje ve Deneyimler' ilk üretimde fallback'teydi; "
-                               "recovery denemesi de somut/grounded bir bulgu üretemedi (ya da hiç "
-                               "çağrılamadı) — mevcut fallback metni AYNEN korundu.",
+                               "İş 5/6N-1 — 'Öne Çıkan Proje ve Deneyimler' ilk üretimde fallback'teydi; "
+                               "TEK recovery denemesi somut/grounded bir bulgu üretemedi (ya da hiç "
+                               "çağrılamadı) — mevcut fallback metni AYNEN korundu (ikinci deneme YAPILMADI).",
                                {"recovery_ham_cikti": (recovery_text or "")[:500]})
 
 # GÖREV 1.7 — Profil Veto Kontrolü: eski mimaride modelin kendi yazdığı "[VETO: ...]" etiketine
