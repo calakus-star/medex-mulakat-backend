@@ -3223,6 +3223,25 @@ def compute_genel_puan(score_pos_1, score_profile_1=None, score_pos_2=None, scor
         return None
     return round(sum(vals) / len(vals))
 
+# İŞ 6V-FIX — FINAL POSITION/PROFILE SCORE CONSISTENCY. Kök neden (İş 6V teşhisi): Öneri Gerekçesi
+# reviewer sonrası yeniden render edilirken (bkz. append_reviewer_section) General Score doğru
+# şekilde primary+reviewer harmanlanmış değeri kullanıyordu ('compute_genel_puan') ama Position/
+# Profile ALT puanları hâlâ SAF PRIMARY değerleriydi ('recompute_overall_decision'ın döndürdüğü
+# değerler aslında hiç değişmemiş DB satırıydı) — matematiksel tutarsızlık (ör. Genel: 63 ama
+# Öneri Gerekçesi'nde Pozisyon 64/Profil 66 yazıyordu). Bu helper, compute_genel_puan'daki AYNI
+# ('mevcutları filtrele + round(ortalama)') standardı TEK bileşen (yalnız pozisyon YA DA yalnız
+# profil) için tekrar kullanır — YENİ/bağımsız bir yuvarlama kuralı YOK, General Score formülü
+# DEĞİŞMEDİ. Yalnız GÖSTERİM (Öneri Gerekçesi render'ı) için kullanılır — interviews.score_position/
+# score_profile / reviewer_score_position/reviewer_score_profile DB alanlarına YAZILMAZ, hiçbirini
+# overwrite etmez.
+def _final_component_score(primary_value, reviewer_value):
+    """Reviewer değeri VARSA primary+reviewer ortalaması (compute_genel_puan ile AYNI round()
+    standardı); reviewer değeri YOKSA/None ise yalnız primary. İkisi de None ise None."""
+    vals = [v for v in (primary_value, reviewer_value) if v is not None]
+    if not vals:
+        return None
+    return round(sum(vals) / len(vals))
+
 def decide_recommendation(genel_puan) -> Optional[str]:
     """TEK karar kaynağı: <40 Reddet · 40-79 Değerlendir · ≥80 İşe Al. genel_puan None ise
     karar da None (veri yetersiz — 'Değerlendirilemedi' durumu, ayrı ele alınır)."""
@@ -6580,11 +6599,20 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     # değişmez). Fix: Puanlama Kapsamı'nın kendi re-patch deseniyle (_PUANLAMA_KAPSAMI_RE) AYNI
     # yöntemle Öneri Gerekçesi de recompute_overall_decision'ın DÖNDÜRDÜĞÜ (yani DB'ye yazılanla
     # AYNI) değerlerle yeniden üretilip rapora patchlenir.
+    # İŞ 6V-FIX — KÖK NEDEN (İş 6V teşhisi): recompute_overall_decision'ın döndürdüğü 3./4. eleman
+    # ('_new_score_pos'/'_new_score_prof' adları YANILTICI) aslında DB satırındaki SAF PRIMARY
+    # score_position/score_profile'dır — reviewer'dan HİÇ etkilenmez. Genel Puan (_new_genel_puan)
+    # doğru şekilde primary+reviewer harmanlanmışken, Öneri Gerekçesi'ndeki Pozisyon/Profil alt
+    # puanları YİNE PRIMARY kalıyordu (matematiksel tutarsızlık — ör. Genel:63 ama Pozisyon:64/
+    # Profil:66). Fix: _final_component_score() ile AYNI (primary+reviewer varsa ortalama, yoksa
+    # primary) mantık uygulanır — DB'ye YAZILMAZ, yalnız BU render için kullanılır.
     try:
         _rc = recompute_overall_decision(candidate_id, level, reviewer_score_position, reviewer_score_profile)
         if _rc:
-            _new_genel_puan, _new_recommendation, _new_score_pos, _new_score_prof = _rc
-            _new_oneri_text = render_oneri_gerekcesi(_new_recommendation, _new_genel_puan, _new_score_pos, _new_score_prof)
+            _new_genel_puan, _new_recommendation, _primary_score_pos, _primary_score_prof = _rc
+            _final_score_pos = _final_component_score(_primary_score_pos, reviewer_score_position)
+            _final_score_prof = _final_component_score(_primary_score_prof, reviewer_score_profile)
+            _new_oneri_text = render_oneri_gerekcesi(_new_recommendation, _new_genel_puan, _final_score_pos, _final_score_prof)
             if _new_oneri_text and _ONERI_GEREKCESI_HEAD in final_report:
                 final_report = _ONERI_GEREKCESI_RE.sub(_ONERI_GEREKCESI_HEAD + "\n" + _new_oneri_text, final_report, count=1)
                 _save(final_report)
