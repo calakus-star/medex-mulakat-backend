@@ -6759,10 +6759,19 @@ def _timestamp_field_grounded(field_text: str, transcript_view: list, role: str,
     MADDE 1 — üç kademeli karar: (1) birebir alt-string VEYA anlamlı kısmi kelime örtüşmesi
     <role> satırıyla varsa -> GEÇERLİ (parafraz/kısaltma tolere edilir). (2) örtüşme YOKSA ama
     KARŞIT role'ün (ör. K için mülakatçı) yakın satırıyla örtüşme VARSA -> GEÇERSİZ (kapının
-    koruduğu asıl durum — yanlış konuşmacının sözü kanıt sayılamaz). (3) hiçbir tarafla
-    örtüşmüyorsa (saf parafraz/özet, K formatının izin verdiği hâl) -> yalnız proximite (eski
-    davranış, geriye uyum) — İŞ 2: BU dalda field_text AÇIK bir karşıt-role etiketi taşıyorsa
-    proximite artık TEK BAŞINA yeterli SAYILMAZ (bkz. _field_claims_opposite_speaker)."""
+    koruduğu asıl durum — yanlış konuşmacının sözü kanıt sayılamaz). (3) QUOTE YOKSA (saf
+    parafraz/özet, K formatının izin verdiği hâl) ve hiçbir tarafla örtüşmüyorsa -> yalnız
+    proximite (eski davranış, geriye uyum) — İŞ 2: BU dalda field_text AÇIK bir karşıt-role
+    etiketi taşıyorsa proximite artık TEK BAŞINA yeterli SAYILMAZ (bkz. _field_claims_opposite_speaker).
+    İŞ 6U-FIX — KÖK NEDEN (İş 6U teşhisi): QUOTE VARKEN de (yalnız YOKKEN değil) hiçbir tarafla
+    örtüşme bulunamadığında kod yanlışlıkla YUKARIDAKİ (3) numaralı 'quote yok, proximite yeterli'
+    dalıyla AYNI `return True` sonucuna düşüyordu — gerçek production örneği: K, gerçek bir aday
+    timestamp'ına ([2:40]) yakındı ama tırnaklı alıntı o timestamp'ta SÖYLENMEMİŞTİ (asıl cümle
+    32 saniye sonra, [3:12]'deydi) ve validator bunu PASS ediyordu. Düzeltme: QUOTE VARSA ve hiçbir
+    tarafla (role/opposite) anlamlı örtüşme yoksa artık FAIL (False) — bu tolerans SADECE quote'suz
+    (saf özet) dala özgüdür, quote'lu dala hiç UYGULANMAMALIYDI. ±8sn tolerans, role='aday', opposite-
+    role guard, overlap eşiği (_QUOTE_OVERLAP_MIN_WORDS), violation adı, retry mekanizması/sayısı,
+    model/temperature/max_tokens DEĞİŞMEDİ — yalnız bu TEK dalın sonucu düzeltildi."""
     ts = _extract_timestamp(field_text)
     if not ts:
         return False
@@ -6793,7 +6802,10 @@ def _timestamp_field_grounded(field_text: str, transcript_view: list, role: str,
     opp_overlap = max((_quote_overlap_words(quote, row.get("text") or "") for row in opp_rows), default=0)
     if opp_overlap >= _QUOTE_OVERLAP_MIN_WORDS and opp_overlap > role_overlap:
         return False  # asıl korunan durum: alıntı KARŞIT taraftan, kanıt geçersiz
-    return True  # hiçbir tarafla anlamlı örtüşme yok — saf parafraz, proximite yeterli
+    # İŞ 6U-FIX — quote VARDI (yukarıda qm eşleşti) ama ne <role> ne de karşıt role'ün ±tolerance_s
+    # penceresindeki HİÇBİR satırıyla anlamlı örtüşme bulunamadı: alıntı bu timestamp'ta SÖYLENMEMİŞ
+    # demektir — quote'suz (saf özet) dalın 'proximite yeterli' toleransı BURAYA UYGULANMAZ.
+    return False
 
 # ---- GÖREV 1 — yapısal hücre ayrıştırma + render ----
 def parse_structured_evidence_cell(cell_text: str) -> Optional[dict]:
