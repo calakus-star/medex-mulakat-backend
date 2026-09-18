@@ -2755,6 +2755,7 @@ K: <[mm:ss] transkriptte GERÇEKTEN var olan bir an + kısa somut alıntı/özet
 E: <GERÇEKTEN bir eksik/zayıflık varsa TEK cümle; YOKSA bu alanı TAMAMEN BOŞ bırak ('E: ~~' yazıp geç) — eksik UYDURMA, sorulmamış bir konu için EKSİK YAZMA.>
 S: <E doluysa, mülakatçının BU eksikliği ortaya çıkaran GERÇEK sorusunun [mm:ss] damgası (uydurma YASAK, sistem doğrular); E boşsa bu alanı BOŞ bırak.>
 KANIT SEÇMEDEN ÖNCE SEMANTİK ÖZ-DENETİM (KESİN — her kriter için ayrı ayrı uygula): K'yı yazmadan önce kendine sor: "Bu aday ifadesi GERÇEKTEN BU kriterin tanımını mı destekliyor, yoksa başka bir yetkinliği mi gösteriyor?" Yukarıda kriter için verilen TANIMA (parantez içindeki açıklama) bak — yalnızca kriterin ADINA değil. Aday ifadesi başka bir yetkinliğe (örn. genel ses tonu/üslup, başka bir konudaki deneyim, ilgisiz bir anekdot) aitse, o ifadeyi BU kriter için KULLANMA — sırf zamanca yakın olması veya kriterin adıyla kelime benzerliği taşıması YETERLİ DEĞİLDİR. Bu kritere GERÇEKTEN uygun bir kanıt bulamıyorsan, K'yı uydurmak yerine bu kriteri CRITERION_SCORING_RULE'daki eksik-veri kuralına göre değerlendir.
+YÖN KONTROLÜ (KESİN — G/E'yi yazmadan önce ayrıca uygula): Kanıtı G'ye veya E'ye dökmeden önce kendine sor: "Adayın bu ifadesi GERÇEKTEN olumlu bir yetkinlik kanıtı mı, yoksa bir eksiklik/sınırlılık/belirsizlik/olası olumsuz sinyal mi?" Adayın söylediği olumsuz veya zayıf bir ifadeyi SIRF G alanını doldurmak için olumlu bir yetkinlik cümlesine DÖNÜŞTÜRME; kanıtın doğal/açık anlamından DAHA GÜÇLÜ bir sonuç ÇIKARMA. G ve E, kanıtın GERÇEK yönünü (olumlu/olumsuz/belirsiz) korumalı — adayın kendi ifadesi bir sınırlılığa/kaçınmaya işaret ediyorsa bunu E'ye (veya puanı düşük tutarak G'nin ölçülü bir cümlesine) yansıt, iddiayı OLDUĞUNDAN OLUMLU gösterme. Bu yalnız transkriptteki ifade ile rapor iddiası arasındaki YÖN tutarlılığıdır — adayın söyleminin mesleki/regülasyonel açıdan DOĞRU olup olmadığına dair dış bilgiyle hüküm VERME, bu senin işin değil.
 ÖRNEK (eksik VAR): G: KDV beyannamesi hazırlama sürecini uçtan uca anlattı ~~ K: [08:12] "önce mizanı kontrol ederim, sonra beyannameyi keserim" ~~ E: Gecikme faizi hesaplamasını sorduğumuzda somut bir yöntem tarifleyemedi ~~ S: [09:40]
 ÖRNEK (eksik YOK): G: Enflasyon muhasebesi düzeltmelerini iki farklı senaryo üzerinden karşılaştırdı ~~ K: [14:03] "sabit kıymetlerde endeksleme farkını ayrı hesaplarım" ~~ E: ~~ S:
 Bu format DIŞINDA hiçbir cümle/açıklama YAZMA — sistem bu 4 alanı ayrıştırıp NİHAİ cümleyi kendisi kurar; format bozuksa veya damga uydurmaysa bu kriter YENİDEN ÜRETTİRİLİR."""
@@ -5879,14 +5880,21 @@ def _reviewer_criteria_block(position_criteria: list) -> str:
     İş emri GÖREV 6.1 — kriter eşleştirmesi artık GÖRÜNEN ADA göre YAPILMAZ (benzer isimli
     pozisyon/profil kriterleri — ör. 'Analitik Yaklaşım' ↔ 'Analitik yapı ve muhakeme' —
     birbirine karışıyordu). Müfettiş KRITER_PUAN/KRITER_GEREKCE satırlarında kriter ADINI değil
-    bu P#/K# kimliğini yazar; kimlik→ad→tavan eşleşmesi sistemde SABİT ve tekildir."""
+    bu P#/K# kimliğini yazar; kimlik→ad→tavan eşleşmesi sistemde SABİT ve tekildir.
+    İŞ 6T — kriter TANIMI (varsa) da eklendi: müfettiş artık yalnız ADI değil, primary/retry'ın
+    zaten gördüğü TANIMI da görüyor (semantik ilgi kontrolü için önkoşul, bkz. İş 6Q teşhisi).
+    Tanım yoksa/boşsa satır ESKİ haliyle (yalnız ad+tavan) kalır — CRASH/format bozulması YOK."""
     lines = ["POZİSYON kriterleri ve tavanları — KRITER_PUAN/KRITER_GEREKCE satırlarında kriter ADI DEĞİL, buradaki KİMLİĞİ (P1, P2, ...) yaz:"]
     for i, c in enumerate((position_criteria or []), start=1):
         if c.get("name"):
-            lines.append(f"- P{i}: {c['name']} — __/{_safe_int(c.get('weight'))}")
+            _desc = (c.get("desc") or "").strip()
+            _desc_suffix = f" — tanım: {_desc}" if _desc else ""
+            lines.append(f"- P{i}: {c['name']} — __/{_safe_int(c.get('weight'))}{_desc_suffix}")
     lines.append("KİŞİSEL VE BİLİŞSEL PROFİL kriterleri ve tavanları — aynı şekilde KİMLİĞİ (K1, K2, ...) yaz:")
     for i, pc in enumerate(PROFILE_CRITERIA, start=1):
-        lines.append(f"- K{i}: {pc['name']} — __/{pc['weight']}")
+        _pdesc = (pc.get("desc") or "").strip()
+        _pdesc_suffix = f" — tanım: {_pdesc}" if _pdesc else ""
+        lines.append(f"- K{i}: {pc['name']} — __/{pc['weight']}{_pdesc_suffix}")
     return "\n".join(lines)
 
 def run_report_reviewer(candidate_id: int, level: int, transcript_text: str, final_report: str, modality_block: str,
@@ -5926,6 +5934,16 @@ KRITER_PUAN: <KİMLİK, ör. P1 veya K3 — AŞAĞIDAKİ LİSTEDEN, kriter ADINI
 KRITER_GEREKCE: <AYNI KİMLİK> = <2-3 cümle gerekçe, en az bir [dk] damgalı somut kanıt>
 (YALNIZCA birincil değerlendirmeden GERÇEKTEN FARKLI puan verdiğin kriterler için — aynı puanı veriyorsan o kriter için HİÇBİR satır yazma, atla; rapordaki puanları KOPYALAMA, transkripte göre KENDİ değerlendirmeni yap. KRITER_PUAN yazıp KRITER_GEREKCE YAZMAMAK KABUL EDİLMEZ — her KRITER_PUAN satırının hemen altında AYNI kimlikle bir KRITER_GEREKCE satırı OLMALI.)
 GUVEN_DUZEYI: <yüksek|orta|düşük> — <kendi değerlendirmene duyduğun güven düşükse KISA neden; yüksekse yalnızca 'yüksek' yaz> (bu satır ADAYIN değil SENİN kendi değerlendirmene duyduğun güvendir — rapora BASILMAZ, yalnız yönetici kaydı için)
+
+=== SEMANTİK TUTARLILIK ===
+HER kriter için (aşağıdaki listeden) İÇSEL olarak (yazmadan) şu üçünü kontrol et:
+1) Kanıt GERÇEKTEN bu kriterin TANIMIYLA ilgili mi (aşağıdaki listede kriterin yanındaki tanıma bak), yoksa başka bir yetkinliği mi gösteriyor?
+2) Rapordaki iddia (G) GERÇEKTEN verilen kanıttan (K) çıkıyor mu, yoksa kanıtın doğal anlamından DAHA GÜÇLÜ/FARKLI bir sonuç mu çıkarılmış?
+3) Kanıtın olumlu/olumsuz yönü raporda KORUNMUŞ mu — adayın söylediği bir sınırlılık/eksiklik/belirsizlik ifadesi, rapor tarafından olduğundan OLUMLU/NÖTR gösterilmiş mi?
+Bu senin işin DEĞİL: adayın söyleminin mesleki/regülasyonel açıdan doğru olup olmadığına dış bilgiyle hükmetmek. Yalnız raporun adayın GERÇEKTEN söylediğinden desteklenmeyen bir sonuç üretip üretmediğine bak.
+ÇIKTI EKONOMİSİ (KESİN): PASS olan (belirgin bir sorun görmediğin) kriterleri TEK TEK YAZMA — hiçbir satır üretme. YALNIZ belirgin bir semantik sorun gördüğün kriterler için, aşağıdaki TEK SATIR formatında yaz:
+SEMANTIC_ISSUE: <KİMLİK, ör. P1 veya K3> = <çok kısa (1 cümle) neden>
+Hiçbir kriterde sorun görmüyorsan bu bölüme HİÇBİR SATIR yazma (boş bırak) — "GÖRÜŞ YOK" gibi bir cümle de YAZMA, sadece atla.
 
 {_reviewer_criteria_block(position_criteria)}
 
@@ -6015,6 +6033,49 @@ def parse_reviewer_criterion_gerekce(notes: str) -> dict:
         if text:
             out[cid] = text
     return out
+
+# İŞ 6T — SEMANTİK TUTARLILIK. Müfettişin 'SEMANTIC_ISSUE: <KİMLİK> = <kısa neden>' satırlarını
+# ayrıştırır (bkz. run_report_reviewer prompt'undaki '=== SEMANTİK TUTARLILIK ===' bloğu).
+# GÖRÜNTÜLEME AMAÇLIDIR — bu fonksiyonun/dönüşünün G/K/E/S'i, evaluability'yi, primary/Genel puanı
+# veya recommendation'ı DEĞİŞTİRMESİ YASAK (bkz. build_semantic_issue_block + append_reviewer_section
+# — yalnız Ek Görüş'e eklenir, hiçbir tabloya/skora dokunmaz).
+_SEMANTIC_ISSUE_RE = re.compile(
+    r"(?ms)^\s*SEMANTIC_ISSUE\s*:\s*\**\s*([PK]\d+)\s*\**\s*=\s*(.+?)"
+    r"(?=\n\s*SEMANTIC_ISSUE\s*:|\n\s*KR[İI]TER_(?:PUAN|GEREKCE)\s*:|\n\s*GUVEN_DUZEYI\s*:|\Z)",
+    re.IGNORECASE)
+_SEMANTIC_ISSUE_MAX_LEN = 220
+
+def parse_reviewer_semantic_issues(notes: str) -> dict:
+    """İŞ 6T — Dönüş: {kimlik: kısa_neden}. Kimlik listede yoksa (bkz. build_semantic_issue_block)
+    render aşamasında sessizce atlanır — sistemi bozacak bir kimlik uydurma riski YOK."""
+    out = {}
+    for m in _SEMANTIC_ISSUE_RE.finditer(notes or ""):
+        cid = m.group(1).upper()
+        reason = _INLINE_GUVEN_DUZEYI_TAG_RE.sub("", m.group(2).strip()).strip()
+        reason = _truncate_at_sentence_boundary(reason, _SEMANTIC_ISSUE_MAX_LEN)
+        if reason:
+            out[cid] = reason
+    return out
+
+def build_semantic_issue_block(semantic_issues: dict, position_criteria: list, profile_criteria: list) -> str:
+    """İŞ 6T — 'SEMANTIC_ISSUE' kimliklerini kriter ADINA çevirip kısa bir madde listesi üretir.
+    SADECE GÖRÜNTÜLEME — pos/prof tablolarına, awarded'a, evaluability'ye, Genel Puan'a veya
+    recommendation'a DOKUNMAZ; çağıran (append_reviewer_section) bu bloğu yalnız Ek Görüş metnine
+    ekler. Kimlik listede karşılığı yoksa (model uydurduysa) o satır sessizce atlanır."""
+    if not semantic_issues:
+        return ""
+    lines = []
+    for criteria_list, prefix in ((position_criteria or [], "P"), (profile_criteria or [], "K")):
+        for i, c in enumerate(criteria_list, start=1):
+            cid = f"{prefix}{i}"
+            reason = semantic_issues.get(cid)
+            if not reason:
+                continue
+            name = c.get("name") if isinstance(c, dict) else c
+            if not name:
+                continue
+            lines.append(f"- **{name}**: {reason}")
+    return "\n".join(lines)
 
 # TUR 3 / GÖREV 3 — müfettiş "susmuş" (yalnızca klişe / boş) mu? Bu kalıplar ve <40 kr → sus.
 _REVIEWER_EMPTY_RE = re.compile(
@@ -6350,6 +6411,10 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
                                {"cikarilan_cumleler": _dropped_meta_sents})
     rv_scores = parse_reviewer_criterion_scores(scores_raw or notes_wo_confidence)
     rv_gerekce = parse_reviewer_criterion_gerekce(scores_raw or notes_wo_confidence)
+    # İŞ 6T — semantik tutarlılık notları: yalnız AYIKLAMA + GÖRÜNTÜLEME (render_semantic_block
+    # aşağıda, yalnız Ek Görüş'e eklenir). G/K/E/S, evaluability, awarded, Genel Puan, recommendation
+    # BURADA hiç DOKUNULMAZ — pos_table_text/prof_table_text/rv_scores'a hiç KARIŞMAZ.
+    rv_semantic = parse_reviewer_semantic_issues(scores_raw or notes_wo_confidence)
     has_view = reviewer_has_substance(free_raw)
 
     _pos_m = re.search(r'\*\*Pozisyon Yetkinlikleri:\*\*\s*\n([\s\S]*?)(?=\n\*\*[^\n]{2,60}:\*\*|\Z)', final_report)
@@ -6468,9 +6533,14 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
                                "İkinci değerlendiricinin KENDİ değerlendirmesine duyduğu güven düzeyi (ana rapora girmez, yalnız yönetici kaydı).",
                                {"guven_duzeyi": _reviewer_confidence})
 
-    if not has_view and not diff_block and not confidence_text:
+    # İŞ 6T — semantik notlar SADECE GÖRÜNTÜLEME: pos_table_text/prof_table_text/awarded/
+    # evaluability/Genel Puan/recommendation'a KESİNLİKLE dokunulmadan, yalnız aşağıdaki
+    # semantic_block değişkeni üzerinden Ek Görüş'e (varsa) eklenir.
+    semantic_block = build_semantic_issue_block(rv_semantic, position_criteria or [], PROFILE_CRITERIA)
+
+    if not has_view and not diff_block and not confidence_text and not semantic_block:
         record_system_decision(candidate_id, level, "ikinci_degerlendirici_atlandi",
-                               "İkinci değerlendirici somut bir görüş/özgüven izlenimi bildirmedi ve kriter puanları birincille örtüşüyor — bölüm rapora eklenmedi.",
+                               "İkinci değerlendirici somut bir görüş/özgüven izlenimi/semantik not bildirmedi ve kriter puanları birincille örtüşüyor — bölüm rapora eklenmedi.",
                                {"reviewer_status": status, "free_len": len(free_raw or "")})
         final_report = final_report.replace(_REVIEWER_SLOT_MARK, "").strip()
         _save(final_report)
@@ -6486,10 +6556,17 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
             ek_gorus_parts.append(_format_reviewer_notes(free_raw))
         if confidence_text:
             ek_gorus_parts.append(confidence_text.strip())
+        if semantic_block:
+            # İŞ 6T — yalnız GÖRÜNTÜLEME alt bölümü; G/K/E/S/puan/karar hiçbirine dokunmaz.
+            ek_gorus_parts.append("*Semantik tutarlılık notları (ikinci değerlendiricinin kanıt-kriter/kanıt-iddia/kanıt-yön gözlemi):*\n" + semantic_block)
         if ek_gorus_parts:
             block += "**Ek Görüş:**\n" + "\n\n".join(ek_gorus_parts) + "\n"
         block = scrub_forbidden_phrases(block.strip())
         final_report = final_report.replace(_REVIEWER_SLOT_MARK, block)
+        if semantic_block:
+            record_system_decision(candidate_id, level, "reviewer_semantik_not_eklendi",
+                                   "İŞ 6T — ikinci değerlendirici bir veya daha fazla kriterde semantik tutarlılık sorunu bildirdi; yalnız Ek Görüş'e görüntüleme amaçlı eklendi (G/K/E/S, evaluability, puan, karar DEĞİŞMEDİ).",
+                                   {"semantic_issues": rv_semantic})
         _save(final_report)
         record_system_decision(candidate_id, level, "ikinci_degerlendirici_eklendi",
                                "İkinci değerlendirici görüşü nihai rapora eklendi; genel puana (varsa) katıldı.",
@@ -7049,13 +7126,22 @@ def regenerate_criterion_fields(candidate_id: int, level: int, provider: str, mo
     # İŞ 6R — crit_desc None/boş olabilir (kriter listesinde 'desc' hiç yoksa) — bu durumda
     # KRİTER satırı ESKİ haliyle (yalnız ad+tavan) kalır, CRASH/format bozulması YOK.
     _desc_line = f"\nKRİTER TANIMI: {crit_desc.strip()}" if crit_desc and crit_desc.strip() else ""
+    # İŞ 6T — semantik ilgi öz-denetimine (İş 6R) EK olarak YÖN KONTÖLÜ eklendi: kanıtın olumlu/
+    # olumsuz anlamının G/E'ye taşınırken tersine çevrilmemesi/yapay yumuşatılmaması. YENİ validator
+    # kuralı/retry/AI çağrısı YOK — yalnız mevcut retry prompt'una talimat eklendi.
     _semantic_selfcheck = (
         "\nKANIT SEÇMEDEN ÖNCE SEMANTİK ÖZ-DENETİM (KESİN): K'yı yazmadan/değiştirmeden önce kendine "
         "sor: 'Bu aday ifadesi GERÇEKTEN bu kriterin tanımını mı destekliyor, yoksa başka bir yetkinliği "
         "mi gösteriyor?' Yukarıdaki KRİTER TANIMINA bak — yalnızca kriter ADINA değil. Zamanca yakın "
         "olması veya kriterin adıyla kelime benzerliği taşıması TEK BAŞINA YETERLİ DEĞİLDİR. Başka bir "
         "yetkinliği (örn. genel ses tonu/üslup, ilgisiz bir konu/anekdot) gösteren bir ifadeyi BU kriter "
-        "için KULLANMA.")
+        "için KULLANMA.\n"
+        "YÖN KONTROLÜ (KESİN): G'yi veya E'yi yazmadan/değiştirmeden önce ayrıca kendine sor: "
+        "'Adayın bu ifadesi GERÇEKTEN olumlu bir yetkinlik kanıtı mı, yoksa bir eksiklik/sınırlılık/"
+        "belirsizlik/olası olumsuz sinyal mi?' Adayın söylediği olumsuz/zayıf bir ifadeyi SIRF G'yi "
+        "doldurmak için olumlu bir yetkinlik cümlesine DÖNÜŞTÜRME; kanıtın doğal anlamından DAHA GÜÇLÜ "
+        "bir sonuç ÇIKARMA. G ve E, kanıtın GERÇEK yönünü korumalı. Bu yalnız transkript ile rapor "
+        "iddiası arasındaki YÖN tutarlılığıdır — mesleki/regülasyonel doğrulukla İLGİLENME.")
     prompt = f"""Aşağıdaki TEK kriter için, önceki üretimin DOĞRULAYICIDAN GEÇEMEDİĞİ tespit edildi. SADECE bu kriter için YENİDEN üret — rapor genelini yazma, açıklama ekleme.
 
 KRİTER: {crit_name} (tavan: {cap} puan){_desc_line}
