@@ -66,6 +66,10 @@ def get_realtime_model(level: int) -> str:
 
 OPENAI_REALTIME_VOICE = os.getenv("OPENAI_REALTIME_VOICE", "marin")  # Doğal ses: Railway env ile değiştirilebilir (örn. marin/verse)
 OPENAI_REPORT_MODEL = os.getenv("OPENAI_REPORT_MODEL", "gpt-4o")  # L2 kaliteli OpenAI raporu; env ile değiştirilebilir
+# İŞ EMRİ — L1 OPENAI-ONLY MİMARİSİ: L1 metin mülakatının CANLI sohbet turları (start_interview +
+# interview_chat) için ayrı model. OPENAI_REPORT_MODEL ile aynı varsayılanı paylaşır (gpt-4o) ama
+# ayrı env ile bağımsız ayarlanabilsin diye kendi anahtarı var — rapor modeliyle karıştırılmaz.
+OPENAI_L1_INTERVIEW_MODEL = os.getenv("OPENAI_L1_INTERVIEW_MODEL", "gpt-4o")
 # FAZ D: mimik (yüz/duruş) kare analizi modeli — TEK SABİT, tek satırla değiştirilebilir.
 # L2 adayların kareleri için bu model kullanılır (L2'de Anthropic YASAK). L1/L3 de bugün aynı
 # modeli kullanır; karşılaştırma sonucu farklı bir model seçilirse SADECE burası değişir.
@@ -1119,27 +1123,6 @@ def get_interview_messages(db, candidate_id: int, level: int = None) -> list:
     except Exception as e:
         print(f"UYARI (get_interview_messages: messages JSON bozuk, candidate_id={candidate_id}): {type(e).__name__}: {e}")
         return []
-
-def add_token_usage(candidate_id: int, level: int, response):
-    """Her Anthropic API çağrısından sonra input/output token sayısını ilgili
-    mülakat kaydına ekler (kümülatif). Admin panelinde 'kaç token harcandı' bilgisini
-    göstermek için kullanılır. Hata olursa mülakatı bozmasın diye sessizce geçilir."""
-    try:
-        usage = getattr(response, "usage", None)
-        if not usage:
-            return
-        in_tok = getattr(usage, "input_tokens", 0) or 0
-        out_tok = getattr(usage, "output_tokens", 0) or 0
-        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-        db = get_db()
-        db.execute(
-            "UPDATE interviews SET total_input_tokens = total_input_tokens + ?, total_output_tokens = total_output_tokens + ? WHERE candidate_id=? AND level=?",
-            (in_tok + cache_read, out_tok, candidate_id, level)
-        )
-        db.commit(); db.close()
-    except Exception as e:
-        print(f"UYARI (token sayımı kaydedilemedi): {type(e).__name__}: {e}")
-
 
 
 def _safe_int(value, default: int = 0) -> int:
@@ -4373,30 +4356,31 @@ def start_interview(payload=Depends(verify_token)):
             return {"message": old_messages[-1].get("content", "Mülakata devam edebilirsiniz."), "question_duration": 60, "total_duration_seconds": total_seconds, "intro_text": get_intro_text(payload["position"], level, candidate["interview_language"] or "tr")}
     db.close()
 
-    if not ANTHROPIC_API_KEY:
-        print("HATA: ANTHROPIC_API_KEY ortam değişkeni boş veya tanımsız.")
+    # İŞ EMRİ — L1 OPENAI-ONLY MİMARİSİ: L1 metin mülakatının CANLI sohbeti de OpenAI'ye taşındı
+    # (önceki fazda yalnız rapor üretimi taşınmıştı). L1 normal akışta artık Anthropic çağrısı YOK.
+    if not OPENAI_API_KEY:
+        print("HATA: OPENAI_API_KEY ortam değişkeni boş veya tanımsız.")
         raise HTTPException(status_code=500, detail="Sistem yapılandırma hatası (API anahtarı eksik). Lütfen yöneticinize bildirin.")
 
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
         system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level, (candidate["interview_language"] if candidate and "interview_language" in candidate.keys() else "tr") or "tr", (candidate["report_language"] if candidate and "report_language" in candidate.keys() else "tr") or "tr", (candidate["depth_tier"] if candidate and "depth_tier" in candidate.keys() else "standart") or "standart", email=(candidate["email"] if candidate and "email" in candidate.keys() else None))
-        response = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=220, system=cached_system(system),
-            messages=[{"role": "user", "content": "Başla. Kısa selam ve ilk soru."}]
-        )
-        raw = response.content[0].text
-        add_token_usage(candidate_id, level, response)
+        resp = openai_call("POST", "https://api.openai.com/v1/chat/completions",
+                           json_body={"model": OPENAI_L1_INTERVIEW_MODEL,
+                                      "messages": [{"role": "system", "content": system},
+                                                   {"role": "user", "content": "Başla. Kısa selam ve ilk soru."}],
+                                      "max_tokens": 220},
+                           timeout=60.0, step="interview_start", severity="user", retry=True,
+                           context={"candidate_id": candidate_id, "candidate_name": payload.get("name"), "level": level})
+        result = resp.json()
+        record_openai_chat_usage(candidate_id, level, OPENAI_L1_INTERVIEW_MODEL, "interview_start", result)
+        raw = result["choices"][0]["message"]["content"]
         clean, duration = parse_duration(raw)
         db = get_db()
         save_interview_state(db, candidate_id, [{"role": "assistant", "content": clean, "ts": _now_ts()}], level)
         db.commit(); db.close()
         return {"message": clean, "question_duration": duration, "total_duration_seconds": total_seconds, "intro_text": get_intro_text(payload["position"], level, candidate["interview_language"] or "tr")}
-    except anthropic.APIError as e:
-        print(f"HATA (Anthropic API - start_interview): {type(e).__name__}: {e}")
-        err = ai_error_from_anthropic(e, "interview_start", {
-            "candidate_id": candidate_id, "candidate_name": payload.get("name"), "level": level,
-        }, severity="user")
-        raise ai_http_exception(err)
+    except AIError as e:
+        raise ai_http_exception(e)
     except Exception as e:
         print(f"HATA (start_interview, beklenmeyen): {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Mülakat başlatılırken beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.")
@@ -4435,8 +4419,9 @@ def interview_chat(data: ChatMessage, background_tasks: BackgroundTasks, payload
             "recommendation": interview["recommendation"],
         }
 
-    if not ANTHROPIC_API_KEY:
-        print("HATA: ANTHROPIC_API_KEY ortam değişkeni boş veya tanımsız.")
+    # İŞ EMRİ — L1 OPENAI-ONLY MİMARİSİ: L1 metin mülakatının CANLI sohbeti de OpenAI'ye taşındı.
+    if not OPENAI_API_KEY:
+        print("HATA: OPENAI_API_KEY ortam değişkeni boş veya tanımsız.")
         raise HTTPException(status_code=500, detail="Sistem yapılandırma hatası (API anahtarı eksik). Lütfen yöneticinize bildirin.")
 
     messages.append({"role": "user", "content": data.message, "ts": _now_ts()})
@@ -4502,8 +4487,8 @@ GÖREV:
             db = get_db()
             save_interview_state(db, effective_candidate_id, messages, level)
             db.commit(); db.close()
-            # İŞ EMRİ — FINAL EVALUATION ARCHITECTURE: L1 birincil DEĞERLENDİRME/RAPOR artık OpenAI
-            # (canlı yazışma sohbeti DEĞİŞMEDİ, hâlâ Claude — yalnız RAPOR/PUANLAMA üretimi taşındı).
+            # İŞ EMRİ — L1 OPENAI-ONLY MİMARİSİ: L1 birincil DEĞERLENDİRME/RAPOR ve canlı sohbetin
+            # tamamı artık OpenAI (RAPOR üretimi önceki fazda taşınmıştı, CANLI sohbet bu fazda taşındı).
             _mark_finish_pending(effective_candidate_id, level, provider="openai", model=OPENAI_REPORT_MODEL,
                                   system=system, payload=user_payload, terminated_reason=None, reason="normal")
             background_tasks.add_task(run_deferred_finish_job, effective_candidate_id, level)
@@ -4512,13 +4497,16 @@ GÖREV:
                 "completed": True, "processing": True, "score": None, "recommendation": None,
             }
 
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
-        response = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=260, system=cached_system(system),
-            messages=[{"role": "user", "content": user_payload}]
-        )
-        reply = response.content[0].text
-        add_token_usage(effective_candidate_id, level, response)
+        resp = openai_call("POST", "https://api.openai.com/v1/chat/completions",
+                           json_body={"model": OPENAI_L1_INTERVIEW_MODEL,
+                                      "messages": [{"role": "system", "content": system},
+                                                   {"role": "user", "content": user_payload}],
+                                      "max_tokens": 260},
+                           timeout=60.0, step="interview_chat", severity="user", retry=True,
+                           context={"candidate_id": effective_candidate_id, "candidate_name": payload.get("name"), "level": level})
+        result = resp.json()
+        record_openai_chat_usage(effective_candidate_id, level, OPENAI_L1_INTERVIEW_MODEL, "interview_chat", result)
+        reply = result["choices"][0]["message"]["content"]
 
         exit_requested_this_turn = "[ADAY_CIKIS_TALEBI]" in reply
         if exit_requested_this_turn:
@@ -4601,7 +4589,7 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             _set_result_meta(effective_candidate_id, level, partial=1,
                              completion_pct=min(100, round(len(real_answers) / max(1, lvl_cfg["min_q"]) * 100)),
                              result_reason="Aday mülakatı kendi isteğiyle erken sonlandırdı.")
-            # İŞ EMRİ — FINAL EVALUATION ARCHITECTURE: L1 birincil DEĞERLENDİRME/RAPOR artık OpenAI.
+            # İŞ EMRİ — L1 OPENAI-ONLY MİMARİSİ: L1 birincil DEĞERLENDİRME/RAPOR OpenAI.
             _mark_finish_pending(effective_candidate_id, level, provider="openai", model=OPENAI_REPORT_MODEL,
                                   system=system, payload=finish_payload,
                                   terminated_reason="Aday talebiyle erken sonlandırıldı", reason="aday_talebi")
@@ -4613,13 +4601,8 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
 
         clean, duration = parse_duration(reply)
         return {"message": clean, "completed": False, "question_duration": duration}
-    except anthropic.APIError as e:
-        print(f"HATA (Anthropic API - interview_chat): {type(e).__name__}: {e}")
-        err = ai_error_from_anthropic(e, "interview_chat", {
-            "candidate_id": locals().get("effective_candidate_id"), "candidate_name": payload.get("name"),
-            "level": locals().get("level"),
-        }, severity="user")
-        raise ai_http_exception(err)
+    except AIError as e:
+        raise ai_http_exception(e)
     except Exception as e:
         print(f"HATA (interview_chat, beklenmeyen): {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Cevap işlenirken beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.")
@@ -8658,9 +8641,12 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     # regenerate_criterion_fields / GÖREV 4 regenerate_yonetici_ozeti) için — DB'deki kayıtlı
     # pending_finish_* alanlarından (run_deferred_finish_job'ın ZATEN kullandığı sağlayıcı, aynı
     # DOKUNULMAYACAKLAR — Level 2 hattına Anthropic EKLENMEZ). Kayıt yoksa (ör. eski satır/test)
-    # seviyeye göre GENEL varsayım: L2 → openai, L1/L3 → claude (CLAUDE.md — Level 2 sadece OpenAI).
+    # varsayılan: openai — İŞ EMRİ L1 OPENAI-ONLY MİMARİSİ itibarıyla L1/L2/L3'ün ÜÇÜ de birincil
+    # rapor/değerlendirmede OpenAI kullanıyor (Claude yalnız L3'ün AYRI ikinci-değerlendirici
+    # akışında var, bu değişken onu etkilemez) — "claude" varsayımı artık HİÇBİR seviye için doğru
+    # değil, L1'e yanlışlıkla Anthropic çağrısı sızdırmasın diye kaldırıldı.
     _gate_provider = (_ivr["pending_finish_provider"] if _ivr and "pending_finish_provider" in _ivr.keys() else None) \
-        or ("openai" if level == 2 else "claude")
+        or "openai"
     _gate_model = _ivr["pending_finish_model"] if _ivr and "pending_finish_model" in _ivr.keys() else None
 
     # --- Pozisyon Yetkinlikleri: doğrulanır + normalize edilir (motor DEĞİŞMEDİ, yalnız girdi
@@ -10889,8 +10875,10 @@ def run_one_cikan_proje_recovery(candidate_id: int, level: int, position_criteri
     _pos_m = re.search(r'\*\*Pozisyon Yetkinlikleri:\*\*\s*\n([\s\S]*?)(?=\n\*\*[^\n]{2,60}:\*\*|\Z)', final_report)
     validated_evidence_block = strip_markdown(_pos_m.group(1)) if _pos_m else ""
 
+    # İŞ EMRİ L1 OPENAI-ONLY MİMARİSİ: L1/L2/L3 birincil rapor artık her zaman OpenAI —
+    # "claude" varsayımı hiçbir seviye için doğru değil, kayıt eksikse openai varsayılır.
     provider = (row["pending_finish_provider"] if row and "pending_finish_provider" in row.keys() else None) \
-        or ("openai" if level == 2 else "claude")
+        or "openai"
     model = row["pending_finish_model"] if row and "pending_finish_model" in row.keys() else None
 
     try:

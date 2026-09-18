@@ -47,9 +47,9 @@ Core tables: `positions`, `candidates`, `interviews` (one row per candidate **pe
 
 ### The three interview "levels"
 A candidate's `level` (1, 2, or 3) determines both interview modality and depth, configured in `LEVEL_CONFIG`:
-- **Level 1** — text chat, ~10 min, CV optional, uses Claude (`/api/interview/start`, `/api/interview/chat`), rendered by `frontend/src/pages/Interview.js`.
+- **Level 1** — text chat, ~10 min, CV optional, **OpenAI-only** (`/api/interview/start`, `/api/interview/chat`), rendered by `frontend/src/pages/Interview.js`. Both the live turn-by-turn conversation (`OPENAI_L1_INTERVIEW_MODEL`, default `gpt-4o`) and the primary REPORT/EVALUATOR call (`OPENAI_REPORT_MODEL`) are OpenAI — Anthropic/Claude is never called in L1's normal flow. No second evaluator, no Final Report Quality Gate.
 - **Level 2** — fully voice, ~20 min, CV required, uses **OpenAI Realtime API exclusively** (`/api/realtime/session`, `/api/realtime/sync`, `/api/realtime/report`), rendered by `frontend/src/pages/RealtimeInterview.js`. Claude/Anthropic must never be called for Level 2 — this is an explicit task requirement enforced throughout the backend (see `log_ai_provider()` calls tagged `"blocked"` at every point where a Level 2 code path would otherwise reach Claude, e.g. in `report_violation`). Don't add an Anthropic call into any Level 2 path.
-- **Level 3** — adaptive, ~30+ min uncapped, CV required, still uses the Claude text-chat flow (same endpoints as Level 1) but with a senior/direct tone and no fixed time ceiling.
+- **Level 3** — adaptive, ~30+ min uncapped, CV required. Uses the same voice/Realtime path as Level 2 (current frontend routing always sends L3 to `/mulakat/sesli`; the backend enforces the same split defensively — `/api/interview/start`/`/api/interview/chat` reject `level in (2, 3)`). Primary evaluator/report = OpenAI. L3 additionally gets a second evaluator (Claude/Anthropic reviewer) and a Final Report Quality Gate, both gated to `level == 3`.
 
 `DEPTH_TIER_CONFIG` (`kisa`/`standart`/`derin`) is an independent multiplier on top of a level's base minutes/question-count (`get_effective_level_config`), not a separate modality.
 
