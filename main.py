@@ -6076,6 +6076,29 @@ def parse_reviewer_semantic_issues(notes: str) -> dict:
             out[cid] = reason
     return out
 
+# İŞ 6W-FIX1 — KÖK NEDEN (İş 6W teşhisinde synthetic doğrulandı): çağıran taraf
+# `parse_reviewer_semantic_issues(scores_raw or notes_wo_confidence)` gibi bir Python `or` ile
+# yalnız TEK bir kaynağı tarıyordu — `scores_raw` (GUVEN_DUZEYI satırı ZORUNLU olduğu için) neredeyse
+# HER ZAMAN truthy olduğundan, model bir SEMANTIC_ISSUE satırını serbest-metin (KRİTER PUANLARI
+# başlığından ÖNCEKİ) kısma yazarsa bu satır SESSİZCE kayboluyordu. Reviewer prompt'u modele
+# SEMANTIC_ISSUE'yu NEREYE yazacağını KESİN olarak dikte etmiyor (bkz. İş 6W) — bu yüzden parser
+# ÇIKTININ HANGİ GEÇERLİ BÖLÜMÜNDE olursa olsun aynı satırı yakalamalı. Fix: TEK kaynak seçmek
+# yerine BİRDEN FAZLA kaynak ayrı ayrı taranır, sonuçlar deterministik biçimde BİRLEŞTİRİLİR (aynı
+# kimlik+aynı metin -> tek kayıt; aynı kimlik+FARKLI metin -> veri KAYBETMEDEN ikisi de saklanır).
+def _merge_semantic_issues(*sources: dict) -> dict:
+    """İŞ 6W-FIX1 — birden fazla `parse_reviewer_semantic_issues(...)` sonucunu kayıpsız birleştirir.
+    Aynı kimlik (P#/K#) birden fazla kaynakta AYNI metinle geçiyorsa tek kayıt (duplicate render
+    olmaz); FARKLI metinle geçiyorsa ikisi de ' | ' ile birleştirilerek korunur (veri KAYBI yok).
+    Kaynak sırası ÖNEMLİ DEĞİL — sonuç deterministik (kimlik+metin kümesi girdi sırasından bağımsız)."""
+    merged: dict = {}
+    for src in sources:
+        for cid, reason in (src or {}).items():
+            if cid not in merged:
+                merged[cid] = [reason]
+            elif reason not in merged[cid]:
+                merged[cid].append(reason)
+    return {cid: " | ".join(reasons) for cid, reasons in merged.items()}
+
 def build_semantic_issue_block(semantic_issues: dict, position_criteria: list, profile_criteria: list) -> str:
     """İŞ 6T — 'SEMANTIC_ISSUE' kimliklerini kriter ADINA çevirip kısa bir madde listesi üretir.
     SADECE GÖRÜNTÜLEME — pos/prof tablolarına, awarded'a, evaluability'ye, Genel Puan'a veya
@@ -6433,7 +6456,12 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     # İŞ 6T — semantik tutarlılık notları: yalnız AYIKLAMA + GÖRÜNTÜLEME (render_semantic_block
     # aşağıda, yalnız Ek Görüş'e eklenir). G/K/E/S, evaluability, awarded, Genel Puan, recommendation
     # BURADA hiç DOKUNULMAZ — pos_table_text/prof_table_text/rv_scores'a hiç KARIŞMAZ.
-    rv_semantic = parse_reviewer_semantic_issues(scores_raw or notes_wo_confidence)
+    # İŞ 6W-FIX1 — `or` ile TEK kaynak seçmek yerine hem serbest-metin (free_raw) hem KRİTER PUANLARI
+    # bloğu (scores_raw) AYRI AYRI taranır ve kayıpsız birleştirilir (bkz. _merge_semantic_issues).
+    rv_semantic = _merge_semantic_issues(
+        parse_reviewer_semantic_issues(free_raw),
+        parse_reviewer_semantic_issues(scores_raw),
+    )
     has_view = reviewer_has_substance(free_raw)
 
     _pos_m = re.search(r'\*\*Pozisyon Yetkinlikleri:\*\*\s*\n([\s\S]*?)(?=\n\*\*[^\n]{2,60}:\*\*|\Z)', final_report)
