@@ -2754,6 +2754,7 @@ G: <adayın bu kriterde NE YAPABİLDİĞİ/NE BİLDİĞİ/NASIL YAKLAŞTIĞI —
 K: <[mm:ss] transkriptte GERÇEKTEN var olan bir an + kısa somut alıntı/özet. UYDURMA damga YASAK — sistem doğrular, geçemeyen kriter YENİDEN ÜRETTİRİLİR.>
 E: <GERÇEKTEN bir eksik/zayıflık varsa TEK cümle; YOKSA bu alanı TAMAMEN BOŞ bırak ('E: ~~' yazıp geç) — eksik UYDURMA, sorulmamış bir konu için EKSİK YAZMA.>
 S: <E doluysa, mülakatçının BU eksikliği ortaya çıkaran GERÇEK sorusunun [mm:ss] damgası (uydurma YASAK, sistem doğrular); E boşsa bu alanı BOŞ bırak.>
+KANIT SEÇMEDEN ÖNCE SEMANTİK ÖZ-DENETİM (KESİN — her kriter için ayrı ayrı uygula): K'yı yazmadan önce kendine sor: "Bu aday ifadesi GERÇEKTEN BU kriterin tanımını mı destekliyor, yoksa başka bir yetkinliği mi gösteriyor?" Yukarıda kriter için verilen TANIMA (parantez içindeki açıklama) bak — yalnızca kriterin ADINA değil. Aday ifadesi başka bir yetkinliğe (örn. genel ses tonu/üslup, başka bir konudaki deneyim, ilgisiz bir anekdot) aitse, o ifadeyi BU kriter için KULLANMA — sırf zamanca yakın olması veya kriterin adıyla kelime benzerliği taşıması YETERLİ DEĞİLDİR. Bu kritere GERÇEKTEN uygun bir kanıt bulamıyorsan, K'yı uydurmak yerine bu kriteri CRITERION_SCORING_RULE'daki eksik-veri kuralına göre değerlendir.
 ÖRNEK (eksik VAR): G: KDV beyannamesi hazırlama sürecini uçtan uca anlattı ~~ K: [08:12] "önce mizanı kontrol ederim, sonra beyannameyi keserim" ~~ E: Gecikme faizi hesaplamasını sorduğumuzda somut bir yöntem tarifleyemedi ~~ S: [09:40]
 ÖRNEK (eksik YOK): G: Enflasyon muhasebesi düzeltmelerini iki farklı senaryo üzerinden karşılaştırdı ~~ K: [14:03] "sabit kıymetlerde endeksleme farkını ayrı hesaplarım" ~~ E: ~~ S:
 Bu format DIŞINDA hiçbir cümle/açıklama YAZMA — sistem bu 4 alanı ayrıştırıp NİHAİ cümleyi kendisi kurar; format bozuksa veya damga uydurmaysa bu kriter YENİDEN ÜRETTİRİLİR."""
@@ -7000,7 +7001,7 @@ def regenerate_criterion_fields(candidate_id: int, level: int, provider: str, mo
                                 transcript_text: str, prior_fields: dict, violations: list,
                                 transcript_view: Optional[list] = None, accepted_claims: Optional[list] = None,
                                 criterion_id: Optional[str] = None, attempt: Optional[int] = None,
-                                source: str = "normal_validator_retry") -> Optional[dict]:
+                                source: str = "normal_validator_retry", crit_desc: Optional[str] = None) -> Optional[dict]:
     """GÖREV 2.3 — YALNIZCA bu kriterin G/K/E/S alanlarını, tespit edilen ihlal listesini modele
     AÇIKÇA vererek, HEDEFLİ olarak yeniden ürettirir (rapor genelini DEĞİL). Sağlayıcı, birincil
     rapor üretiminde kullanılanla AYNIDIR (provider run_deferred_finish_job'tan gelir — L1/L3
@@ -7014,7 +7015,14 @@ def regenerate_criterion_fields(candidate_id: int, level: int, provider: str, mo
     etkilemez. `source='normal_validator_retry'` (varsayılan, apply_structured_rationale_gate'in
     3-deneme döngüsü) veya `source='criterion_recovery'` (İş 4'ün post-diskalifiye recovery'si) —
     ikisi AI_usage_logs'ta ayrı `action` adıyla (criterion_rationale_retry / criterion_rationale_
-    recovery), Railway stdout'ta ayrı [CRITERION_AI_RETRY] satırıyla görünür."""
+    recovery), Railway stdout'ta ayrı [CRITERION_AI_RETRY] satırıyla görünür.
+    İŞ 6R — SEMANTİK KANIT ÖZ-DENETİMİ: `crit_desc` (kriterin tanımı, criteria_list'teki 'desc'
+    alanından — apply_structured_rationale_gate'in döngüsünde `c.get('desc')`) artık prompt'a
+    aktarılıyor; ÖNCEDEN retry yalnız `crit_name`+`cap` görüyordu, primary üretimden (build_criteria_
+    text) DAHA AZ bilgiyle çalışıyordu (İş 6Q teşhisi). `crit_desc` yoksa/boşsa (None veya "") prompt
+    yalnız kriter adıyla devam eder — CRASH YOK, davranış İş 6R ÖNCESİYLE AYNI (bkz. crit_desc=None
+    kolu aşağıda). YENİ validator kuralı YOK, YENİ AI çağrısı YOK — yalnız MEVCUT retry çağrısının
+    prompt'u güçlendirildi."""
     print(f"[CRITERION_AI_RETRY] c={candidate_id} L{level} criterion={criterion_id or '?'} "
           f"name={crit_name} attempt={attempt if attempt is not None else '?'} "
           f"violations={','.join(violations) if violations else '-'} source={source}")
@@ -7038,9 +7046,19 @@ def regenerate_criterion_fields(candidate_id: int, level: int, provider: str, mo
                 f"BİREBİR AYNI (kelimesi kelimesine kopyala) bırak — bu alanlar zaten SAĞLAM, gereksiz bir "
                 f"değişiklik YENİ bir hataya yol açabilir. Önceki üretimde bir alan BOŞSA ve bu alan yukarıdaki "
                 f"izin verilenler arasında DEĞİLSE, o alanı YİNE BOŞ bırak.")
+    # İŞ 6R — crit_desc None/boş olabilir (kriter listesinde 'desc' hiç yoksa) — bu durumda
+    # KRİTER satırı ESKİ haliyle (yalnız ad+tavan) kalır, CRASH/format bozulması YOK.
+    _desc_line = f"\nKRİTER TANIMI: {crit_desc.strip()}" if crit_desc and crit_desc.strip() else ""
+    _semantic_selfcheck = (
+        "\nKANIT SEÇMEDEN ÖNCE SEMANTİK ÖZ-DENETİM (KESİN): K'yı yazmadan/değiştirmeden önce kendine "
+        "sor: 'Bu aday ifadesi GERÇEKTEN bu kriterin tanımını mı destekliyor, yoksa başka bir yetkinliği "
+        "mi gösteriyor?' Yukarıdaki KRİTER TANIMINA bak — yalnızca kriter ADINA değil. Zamanca yakın "
+        "olması veya kriterin adıyla kelime benzerliği taşıması TEK BAŞINA YETERLİ DEĞİLDİR. Başka bir "
+        "yetkinliği (örn. genel ses tonu/üslup, ilgisiz bir konu/anekdot) gösteren bir ifadeyi BU kriter "
+        "için KULLANMA.")
     prompt = f"""Aşağıdaki TEK kriter için, önceki üretimin DOĞRULAYICIDAN GEÇEMEDİĞİ tespit edildi. SADECE bu kriter için YENİDEN üret — rapor genelini yazma, açıklama ekleme.
 
-KRİTER: {crit_name} (tavan: {cap} puan)
+KRİTER: {crit_name} (tavan: {cap} puan){_desc_line}
 
 ÖNCEKİ ÜRETİM:
 G: {(prior_fields or {}).get('g','')}
@@ -7051,6 +7069,7 @@ S: {(prior_fields or {}).get('s','')}
 TESPİT EDİLEN İHLALLER (HER BİRİNİ DÜZELT — SOMUT TALİMAT):
 {reasons}
 {_isolation_instruction}
+{_semantic_selfcheck}
 {_hint_block}
 
 ZORUNLU ÇIKTI FORMATI (başka HİÇBİR ŞEY yazma, tam olarak bu 4 satır, sırasıyla):
@@ -7320,6 +7339,9 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
         cid = f"{id_prefix}{idx}"
         cap = _safe_int(c.get("weight"))
         cname = c.get("name", "")
+        # İŞ 6R — kriter TANIMI (varsa) retry'a aktarılacak; kriter listesinde yoksa/boşsa
+        # regenerate_criterion_fields güvenli biçimde boş desc ile devam eder.
+        cdesc = c.get("desc") or ""
         if cap <= 0 or not cname:
             continue
         best_i, best_s = None, 0.0
@@ -7393,7 +7415,8 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
             new_fields = regenerate_criterion_fields(candidate_id, level, provider, model, cname, cap,
                                                       transcript_text, fields or {"g": "", "k": "", "e": "", "s": ""},
                                                       violations, transcript_view=transcript_view, accepted_claims=accepted_claims,
-                                                      criterion_id=cid, attempt=attempt, source="normal_validator_retry")
+                                                      criterion_id=cid, attempt=attempt, source="normal_validator_retry",
+                                                      crit_desc=cdesc)
             if new_fields is None:
                 break
             fields = new_fields
@@ -7436,7 +7459,8 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
             recovery_fields = regenerate_criterion_fields(candidate_id, level, provider, model, cname, cap,
                                                            transcript_text, fields or {"g": "", "k": "", "e": "", "s": ""},
                                                            violations, transcript_view=transcript_view, accepted_claims=accepted_claims,
-                                                           criterion_id=cid, attempt=attempt + 1, source="criterion_recovery")
+                                                           criterion_id=cid, attempt=attempt + 1, source="criterion_recovery",
+                                                           crit_desc=cdesc)
             if recovery_fields is not None:
                 recovery_violations = validate_criterion_fields(recovery_fields, cap, awarded, transcript_view, accepted_claims)
                 if not recovery_violations:
