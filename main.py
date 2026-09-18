@@ -6948,6 +6948,54 @@ def _build_violation_detail_lines(violations: list, cname: str, fields: Optional
             lines.append(f"- {v}: {_VIOLATION_TR.get(v, v)}")
     return lines
 
+# İŞ 6P — CRITERION RETRY ALAN İZOLASYONU (system-wide, hiçbir aday/pozisyon/kritere özel değil).
+# İş 6O'da doğrulanan kök neden: regenerate_criterion_fields TÜM G/K/E/S'i her seferinde yeniden
+# üretiyordu — tek bir evidence_timestamp_invalid (yalnız K'yi ilgilendiren) düzeltilirken model
+# kendi inisiyatifiyle sağlam bir E/S ekleyip YENİ, İLGİSİZ bir violation (unsourced_eksik) yaratmış
+# olabiliyordu. Aşağıdaki eşleme + iki yardımcı, HANGİ violation'ın HANGİ alan(lar)la ilişkili
+# olduğunu sabitliyor; yalnız o alan(lar)ın değişmesine izin veriliyor, gerisi PROMPT talimatı +
+# PARSE-SONRASI deterministik geri-yazma ile korunuyor (prompt'a TEK BAŞINA güvenilmiyor).
+_VIOLATION_RELATED_FIELDS = {
+    "banned_phrase_found": {"g", "e"},
+    "forbidden_transition_found": {"g", "e"},
+    "duplicate_claim": {"g"},
+    "evidence_timestamp_invalid": {"k"},
+    "unsourced_eksik": {"e", "s"},
+    "full_score_has_eksik": {"e"},
+    "score_direction_conflict": {"g", "e"},
+    "out_of_scope_high_score": {"g", "k"},
+}
+
+def _fields_related_to_violations(violations: Optional[list]) -> Optional[set]:
+    """İŞ 6P — violation kodlarının BİRLEŞİK olarak hangi G/K/E/S alan(lar)ıyla ilişkili olduğunu
+    döner. 'structure_invalid' VEYA eşlemede olmayan (bilinmeyen) bir kod varsa None döner —
+    bu durumda İZOLASYON UYGULANMAZ (güvenli varsayılan: tüm hücre zaten bozuk/tanımsız sayılır,
+    mevcut tam-yeniden-üretim davranışı korunur)."""
+    if not violations:
+        return None
+    related = set()
+    for v in violations:
+        fset = _VIOLATION_RELATED_FIELDS.get(v)
+        if fset is None:
+            return None
+        related |= fset
+    return related
+
+def _enforce_field_isolation(new_fields: dict, prior_fields: Optional[dict], violations: list) -> dict:
+    """İŞ 6P — DETERMİNİSTİK alan izolasyonu: yalnız mevcut violation'larla İLİŞKİLİ alan(lar)ın
+    değişmesine izin verir; İLİŞKİSİZ alanlar prior_fields'ten AYNEN geri yazılır — model prompt
+    talimatına uymayıp sağlam bir alanı değiştirse bile burada düzeltilir (prompt'a TEK BAŞINA
+    güvenilmez). related=None ise (structure_invalid/bilinmeyen kod veya prior_fields yok)
+    İZOLASYON UYGULANMAZ, new_fields OLDUĞU GİBİ döner (mevcut davranış)."""
+    related = _fields_related_to_violations(violations)
+    if related is None or not prior_fields:
+        return new_fields
+    result = dict(new_fields)
+    for key in ("g", "k", "e", "s"):
+        if key not in related:
+            result[key] = prior_fields.get(key, "")
+    return result
+
 def regenerate_criterion_fields(candidate_id: int, level: int, provider: str, model: str, crit_name: str, cap: int,
                                 transcript_text: str, prior_fields: dict, violations: list,
                                 transcript_view: Optional[list] = None, accepted_claims: Optional[list] = None,
@@ -6974,6 +7022,22 @@ def regenerate_criterion_fields(candidate_id: int, level: int, provider: str, mo
     reasons = "\n".join(_build_violation_detail_lines(violations, crit_name, prior_fields, transcript_view or [], accepted_claims or []))
     _hint_lines = _find_relevant_transcript_lines(crit_name, transcript_view or [], role=None, max_n=6)
     _hint_block = ("\n=== BU KRİTERLE İLGİLİ OLABİLECEK TRANSKRİPT ANLARI (referans için) ===\n" + "\n".join(_hint_lines)) if _hint_lines else ""
+    # İŞ 6P — ALAN İZOLASYONU talimatı: yalnız ihlal(ler)le ilişkili alan(lar) değiştirilebilir
+    # olduğunu AÇIKÇA belirt. Bu yalnız bir TALİMAT — asıl garanti parse-sonrası
+    # _enforce_field_isolation'da (aşağıda) deterministik olarak uygulanıyor.
+    _related_fields = _fields_related_to_violations(violations)
+    _isolation_instruction = ""
+    if _related_fields:
+        _fname = {"g": "G", "k": "K", "e": "E", "s": "S"}
+        _allowed = ", ".join(_fname[f] for f in ("g", "k", "e", "s") if f in _related_fields)
+        _locked = [_fname[f] for f in ("g", "k", "e", "s") if f not in _related_fields]
+        if _locked:
+            _isolation_instruction = (
+                f"\nALAN İZOLASYONU — ÇOK ÖNEMLİ: Bu ihlal(ler) yalnız {_allowed} alan(lar)ını ilgilendiriyor. "
+                f"SADECE {_allowed} alan(lar)ını düzelt. {', '.join(_locked)} alan(lar)ını ÖNCEKİ ÜRETİMDEKİYLE "
+                f"BİREBİR AYNI (kelimesi kelimesine kopyala) bırak — bu alanlar zaten SAĞLAM, gereksiz bir "
+                f"değişiklik YENİ bir hataya yol açabilir. Önceki üretimde bir alan BOŞSA ve bu alan yukarıdaki "
+                f"izin verilenler arasında DEĞİLSE, o alanı YİNE BOŞ bırak.")
     prompt = f"""Aşağıdaki TEK kriter için, önceki üretimin DOĞRULAYICIDAN GEÇEMEDİĞİ tespit edildi. SADECE bu kriter için YENİDEN üret — rapor genelini yazma, açıklama ekleme.
 
 KRİTER: {crit_name} (tavan: {cap} puan)
@@ -6986,6 +7050,7 @@ S: {(prior_fields or {}).get('s','')}
 
 TESPİT EDİLEN İHLALLER (HER BİRİNİ DÜZELT — SOMUT TALİMAT):
 {reasons}
+{_isolation_instruction}
 {_hint_block}
 
 ZORUNLU ÇIKTI FORMATI (başka HİÇBİR ŞEY yazma, tam olarak bu 4 satır, sırasıyla):
@@ -7037,7 +7102,10 @@ S: <E doluysa, mülakatçının bu eksikliği ortaya çıkaran sorusunun [mm:ss]
     }
     if not new_fields["g"] or not new_fields["k"]:
         return None
-    return new_fields
+    # İŞ 6P — DETERMİNİSTİK alan izolasyonu: prompt talimatına GÜVENMEDEN, ilişkisiz alanları
+    # önceki üretimden AYNEN geri yaz. Sonuç YİNE AYNI validate_criterion_fields'tan geçecek
+    # (çağıran tarafta, main.py apply_structured_rationale_gate) — validator BYPASS edilmiyor.
+    return _enforce_field_isolation(new_fields, prior_fields, violations)
 
 _OUT_OF_SCOPE_SCORE_CAP_RATIO = 0.25  # GÖREV 5.2 — alan dışı/devretme: tavanın EN FAZLA %25'i
 
