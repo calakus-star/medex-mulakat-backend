@@ -6385,13 +6385,17 @@ def _verify_scope_consistency(pos_table_text: str, prof_table_text: str, dropped
     return problems
 
 def append_reviewer_section(candidate_id: int, level: int, transcript_text: str, modality_block: str,
-                            position_criteria: Optional[list] = None) -> None:
+                            position_criteria: Optional[list] = None) -> dict:
     """İkinci (bağımsız) değerlendiriciyi NİHAİ rapor üzerinde çalıştırır. Yalnız birincilden
     GERÇEKTEN farklı puanladığı kriterleri diff olarak gösterir (iş emri madde 9 — karşılaştırma
     tablosu YOK); ayrıca kendi pozisyon/profil GENEL puanlarını türetip recompute_overall_decision
     ile Genel Puan'a (iş emri madde 6) katar. Müfettiş atlanır/patlarsa rapor DEĞİŞMEDEN kalır,
     Genel Puan yalnızca 1. değerlendiriciden hesaplanmış haliyle kalır. İdempotent: yer tutucu
-    zaten değiştirilmişse (blok zaten varsa) tekrar eklenmez."""
+    zaten değiştirilmişse (blok zaten varsa) tekrar eklenmez.
+    İŞ 6X-1 — Dönüş: {'rv_scores', 'rv_gerekce', 'rv_semantic'} sözlükleri — Final Report Quality
+    Gate'in (run_deferred_finish_job'da bu fonksiyondan SONRA çağrılır) reviewer bulgularını YENİDEN
+    AI/DB round-trip'i OLMADAN kullanabilmesi için. Erken çıkış yollarında boş sözlük döner (mevcut
+    davranış aynen korunur, yalnız dönüş tipi None'dan dict'e değişti)."""
     db = get_db()
     try:
         row = db.execute("SELECT report FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
@@ -6399,9 +6403,9 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
         db.close()
     final_report = (row["report"] if row else "") or ""
     if not final_report.strip():
-        return
+        return {}
     if _REVIEWER_HEAD in final_report or _REVIEWER_SLOT_MARK not in final_report:
-        return  # zaten işlendi (yeniden üretim/kurtarma taraması çift eklemez)
+        return {}  # zaten işlendi (yeniden üretim/kurtarma taraması çift eklemez)
 
     # İş emri — KANIT BÜTÜNLÜĞÜ VE İKİNCİ DEĞERLENDİRİCİ ÇIKTISI / KALEM 2 — devralmanın (aşağıda)
     # ikinci değerlendiricinin gerekçesindeki [mm:ss] referansını doğrulayabilmesi için transkript
@@ -6432,7 +6436,7 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     _set_reviewer_status(candidate_id, level, status, err)
     if not notes.strip():
         _save(final_report.replace(_REVIEWER_SLOT_MARK, "").strip())
-        return
+        return {}
 
     # İş emri GÖREV 4 — aday özgüveni izlenimi, "GÖRÜŞ YOK" mantığından TAMAMEN BAĞIMSIZ ayrı
     # bir blok (madde 4.1: kriter farkı/eleştiri olmasa bile MUTLAKA üretilir — yalnız veri
@@ -6646,6 +6650,10 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
                 _save(final_report)
     except Exception as e:
         print(f"UYARI (append_reviewer_section öneri gerekçesi güncelleme c={candidate_id} L{level}): {type(e).__name__}: {e}")
+
+    # İŞ 6X-1 — reviewer bulgularını çağırana (run_deferred_finish_job → Final Report Quality Gate)
+    # AKTAR. YENİ bir AI/DB round-trip GEREKMİYOR — bu üç sözlük zaten yukarıda hesaplandı.
+    return {"rv_scores": rv_scores, "rv_gerekce": rv_gerekce, "rv_semantic": rv_semantic}
 
 def parse_reviewer_meta(notes: str) -> dict:
     """Denetçi çıktısının sonundaki 'OZET_TON:' / 'DUSUK_PUAN:' etiketlerini ayrıştırır.
@@ -8310,8 +8318,9 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         # Müfettiş artık taslağı DEĞİL, basılacak nihai raporu (kriter tabloları + KARAR + gerekçe
         # dahil) görür. Çıktısı karara/puana ETKİ ETMEZ; rapora ayrı, tek blok olarak eklenir.
         # Müfettiş atlanır/patlarsa rapor DENETÇİSİZ ve DEĞİŞMEDEN kalır — basım engellenmez.
+        _reviewer_findings = {}
         try:
-            append_reviewer_section(candidate_id, level, transcript_text, modality_block, _pcrit)
+            _reviewer_findings = append_reviewer_section(candidate_id, level, transcript_text, modality_block, _pcrit) or {}
         except Exception as e:
             print(f"UYARI (müfettiş bölümü ekleme c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
@@ -8321,6 +8330,15 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             run_one_cikan_proje_recovery(candidate_id, level, _pcrit)
         except Exception as e:
             print(f"UYARI (one_cikan_proje recovery c={candidate_id} L{level}): {type(e).__name__}: {e}")
+
+        # ═══ İŞ 6X-1 — FINAL REPORT QUALITY GATE (pipeline'ın EN SONU) ═══
+        # Evaluator/validator/reviewer/takeover/proje-kurtarma TAMAMLANDIKTAN SONRA çalışan bağımsız
+        # SON kalite denetçisi. Hata/atlama → rapor DEĞİŞMEDEN kalır, basım ENGELLENMEZ (fail-closed,
+        # retry YOK — bkz. fonksiyon docstring'i).
+        try:
+            run_final_report_quality_gate(candidate_id, level, _pcrit, _reviewer_findings)
+        except Exception as e:
+            print(f"UYARI (final report quality gate c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
         print(f"[PROCESSING_DONE] candidate_id={candidate_id} level={level} regen={regen}")
     except AIError as e:
@@ -10659,6 +10677,363 @@ def run_one_cikan_proje_recovery(candidate_id: int, level: int, position_criteri
                                "TEK recovery denemesi somut/grounded bir bulgu üretemedi (ya da hiç "
                                "çağrılamadı) — mevcut fallback metni AYNEN korundu (ikinci deneme YAPILMADI).",
                                {"recovery_ham_cikti": (recovery_text or "")[:500]})
+
+# ============================================================================
+# İŞ 6X-1 — FINAL REPORT QUALITY GATE (system-wide, hiçbir aday/pozisyon/kritere özel değil).
+# ============================================================================
+# Pipeline'ın EN SONUNDA (run_one_cikan_proje_recovery'den HEMEN SONRA, run_deferred_finish_job
+# içinde) çalışır. Evaluator/validator/reviewer/takeover/proje-kurtarma TAMAMLANMIŞ, kaydedilmiş
+# interviews.report üzerinde BAĞIMSIZ bir SON kalite denetçisidir — YENİ bir değerlendirme YAPMAZ,
+# yalnız aşağıdaki WHITELIST'teki narrative bölümlerinde CİDDİ (BLOCKING), doğrulanabilir hatayı
+# DAR bir patch ile düzeltir. Kriter tabloları/puanlar/Genel Puan/karar/evaluability/Puanlama
+# Kapsamı/Öneri Gerekçesi/Öne Çıkan Proje — HİÇBİRİNE dokunamaz (whitelist dışı, KOD seviyesinde
+# garanti — İş 6P'nin alan-izolasyonu ile AYNI felsefe: prompt talimatına GÜVENMEDEN, parse-sonrası
+# deterministik doğrulama TEK gerçek garanti).
+_QUALITY_GATE_SECTION_HEADS = {
+    "YONETICI_OZETI": "Yönetici Özeti",
+    "ANALITIK_DUSUNME": "Analitik Düşünme ve Muhakeme",
+    "PROBLEM_COZME": "Problem Çözme ve Karar Verme Yaklaşımı",
+    "ILETISIM": "Kavrama ve İletişim",
+    "CV_MULAKAT_POZISYON_UYUMU": "CV ↔ Mülakat ↔ Pozisyon Uyumu",
+    "GUCLU_YONLER": "Güçlü Yönler",
+    "GELISIM_ALANLARI": "Gelişim Alanları",
+    "GENEL_KANI": "Genel Kanı",
+    "CV_OZETI": "CV Özeti",
+}
+QUALITY_GATE_MAX_TOKENS = 2000
+
+_QG_STATUS_RE = re.compile(r"(?im)^\s*QUALITY_GATE_STATUS\s*:\s*(PASS|PATCH)\s*$")
+_QG_ISSUE_RE = re.compile(r"(?im)^\s*ISSUE\s*:\s*([A-Z_]+)\s*=\s*(BLOCKING|NON_BLOCKING)\s*\|\s*(.+)$")
+_QG_PATCH_RE = re.compile(
+    r"(?ms)^\s*PATCH\s*:\s*([A-Z_]+)\s*=\s*(.+?)"
+    r"(?=\n\s*ISSUE\s*:|\n\s*PATCH\s*:|\n\s*QUALITY_GATE_STATUS\s*:|\Z)")
+# Genel başlık deseni — mevcut '\*\*[^\n]{2,60}:\*\*' ailesiyle AYNI (İş 1/6V/6T'de defalarca
+# kanıtlanmış), YENİ bir regex ailesi İCAT EDİLMEDİ.
+_QG_GENERIC_HEADING_RE = re.compile(r'(?m)^\*\*([^\n*]{2,60}):\*\*[ \t]*$')
+
+def parse_quality_gate_output(raw: str) -> dict:
+    """İŞ 6X-1 — line-grammar çıktısını ayrıştırır (KRITER_PUAN/SEMANTIC_ISSUE ile AYNI aile — YENİ
+    bir JSON/parser mimarisi DEĞİL). Dönüş: {'status': 'PASS'|'PATCH'|None, 'issues':
+    {SECTION_KEY: (severity, reason)}, 'patches': {SECTION_KEY: replacement_text}}. 'status' None ise
+    ÇIKTI MALFORMED sayılır — çağıran HİÇBİR mutasyon uygulamaz (fail-closed)."""
+    raw = raw or ""
+    sm = _QG_STATUS_RE.search(raw)
+    status = sm.group(1).upper() if sm else None
+    issues = {}
+    for m in _QG_ISSUE_RE.finditer(raw):
+        issues[m.group(1).upper()] = (m.group(2).upper(), m.group(3).strip())
+    patches = {}
+    for m in _QG_PATCH_RE.finditer(raw):
+        text = m.group(2).strip()
+        if text:
+            patches[m.group(1).upper()] = text
+    return {"status": status, "issues": issues, "patches": patches}
+
+def _split_report_into_heading_blocks(report_text: str) -> list:
+    """İŞ 6X-1 — raporu [(başlık_veya_None, TAM_blok_metni), ...] listesine böler (başlık satırı
+    dahil). Post-gate doğrulamanın TEK genel mekanizması buradan geçer: whitelist DIŞINDAKİ her
+    başlığın (kriter tabloları/Puanlama Kapsamı/Öneri Gerekçesi/Öne Çıkan Proje DAHİL) gövdesinin
+    byte-birebir korunduğunu doğrulamak için kullanılır."""
+    text = report_text or ""
+    matches = list(_QG_GENERIC_HEADING_RE.finditer(text))
+    if not matches:
+        return [(None, text)]
+    blocks = []
+    if matches[0].start() > 0:
+        blocks.append((None, text[:matches[0].start()]))
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        blocks.append((m.group(1).strip(), text[start:end]))
+    return blocks
+
+def _quality_gate_apply_patches(report_text: str, patches: dict) -> Optional[str]:
+    """İŞ 6X-1 — yalnız whitelist SECTION_KEY'lerin gövdesini (başlık satırı SABİT kalarak)
+    değiştirir. Hedef başlık raporda HİÇ YOKSA (bölüm hiç üretilmemişse) None döner — YENİ bir
+    bölüm İCAT EDİLMEZ, patch set'i BAŞTAN reddedilir (çağıran tarafta)."""
+    new_text = report_text
+    for key, replacement in patches.items():
+        head_label = _QUALITY_GATE_SECTION_HEADS.get(key)
+        if not head_label:
+            continue  # whitelist dışı — çağıran tarafta zaten filtrelenir, savunma amaçlı ek kontrol
+        pattern = re.compile(r'(\*\*' + re.escape(head_label) + r':\*\*[ \t]*\n)([\s\S]*?)(?=\n\*\*[^\n*]{2,60}:\*\*|\Z)')
+        if not pattern.search(new_text):
+            return None
+        new_text = pattern.sub(lambda mm, _r=replacement: mm.group(1) + _r.strip() + "\n", new_text, count=1)
+    return new_text
+
+def _quality_gate_locked_intact(pre_text: str, post_text: str, patched_keys) -> bool:
+    """İŞ 6X-1 — POST-GATE DETERMİNİSTİK DOĞRULAMA (madde 1/2/3/5/6/7/8/10, TEK genel mekanizmada):
+    (a) başlık listesi (sıra + ad) pre/post BİREBİR aynı olmalı — hiçbir başlık kaybolmadı/eklenmedi/
+    yer değiştirmedi (kriter tabloları, Puanlama Kapsamı, Öneri Gerekçesi, Öne Çıkan Proje DAHİL
+    HEPSİ birer başlık; whitelist'te OLMAYANLARIN LOCKED kaldığı burada garanti edilir); (b) whitelist
+    dışı VEYA whitelist'te olup BU TURDA patch EDİLMEMİŞ her başlığın gövdesi byte-birebir aynı
+    kalmalı. False dönerse çağıran TÜM patch set'ini reddeder (partial save YOK)."""
+    pre_blocks = _split_report_into_heading_blocks(pre_text)
+    post_blocks = _split_report_into_heading_blocks(post_text)
+    if [h for h, _ in pre_blocks] != [h for h, _ in post_blocks]:
+        return False
+    patched_labels = {_QUALITY_GATE_SECTION_HEADS[k] for k in patched_keys if k in _QUALITY_GATE_SECTION_HEADS}
+    for (h1, b1), (h2, b2) in zip(pre_blocks, post_blocks):
+        if h1 in patched_labels:
+            continue
+        if b1 != b2:
+            return False
+    return True
+
+def _quality_gate_new_evidence_safe(pre_body: str, new_body: str, transcript_view: list) -> bool:
+    """İŞ 6X-1 — madde 9: patch YENİ bir [mm:ss] damgası veya YENİ bir tırnaklı alıntı içeriyorsa
+    (önceki gövdede yoktu), MEVCUT grounding helper'larıyla (check_timestamp_grounded / _verbatim_in
+    — YENİ bir doğrulama mantığı İCAT EDİLMEDİ) doğrulanır. Doğrulanamayan HERHANGİ bir yeni kanıt
+    varsa False döner — çağıran TÜM patch set'ini reddeder."""
+    pre_ts = {f"{mm}:{ss}" for mm, ss in _TS_RE.findall(pre_body or "")}
+    new_ts = {f"{mm}:{ss}" for mm, ss in _TS_RE.findall(new_body or "")}
+    for ts in (new_ts - pre_ts):
+        if not check_timestamp_grounded(ts, transcript_view, role=None, tolerance_s=8):
+            return False
+    pre_quotes = {qm.group(1) for qm in _QUOTE_RE.finditer(pre_body or "")}
+    new_quotes = {qm.group(1) for qm in _QUOTE_RE.finditer(new_body or "")}
+    for q in (new_quotes - pre_quotes):
+        if not any(_verbatim_in(q, row.get("text") or "") for row in (transcript_view or [])):
+            return False
+    return True
+
+def _build_quality_gate_reviewer_findings_block(reviewer_findings: dict, position_criteria: list, profile_criteria: list) -> str:
+    """İŞ 6X-1 — reviewer'ın (append_reviewer_section'ın döndürdüğü) puan/gerekçe/semantik bulgu
+    sözlüklerini Quality Gate promptuna kompakt, kritere-bağlı satırlar halinde verir."""
+    rv_scores = (reviewer_findings or {}).get("rv_scores") or {}
+    rv_gerekce = (reviewer_findings or {}).get("rv_gerekce") or {}
+    rv_semantic = (reviewer_findings or {}).get("rv_semantic") or {}
+    lines = []
+    for criteria_list, prefix in ((position_criteria or [], "P"), (profile_criteria or [], "K")):
+        for i, c in enumerate(criteria_list, start=1):
+            cid = f"{prefix}{i}"
+            parts = []
+            if cid in rv_scores:
+                awarded, mx = rv_scores[cid]
+                parts.append(f"reviewer_puan={awarded}/{mx}")
+            if cid in rv_gerekce:
+                parts.append(f"gerekce={rv_gerekce[cid]}")
+            if cid in rv_semantic:
+                parts.append(f"semantik_not={rv_semantic[cid]}")
+            if parts:
+                name = c.get("name") if isinstance(c, dict) else c
+                lines.append(f"- {cid} ({name}): " + " | ".join(parts))
+    return "\n".join(lines) if lines else "(İkinci değerlendirici bu kriterlerin hiçbirinde birincilden FARKLI bir bulgu bildirmedi.)"
+
+def run_final_report_quality_gate(candidate_id: int, level: int, position_criteria: Optional[list] = None,
+                                  reviewer_findings: Optional[dict] = None) -> None:
+    """İŞ 6X-1 — bkz. modül başlığındaki not. TEK deneme (retry YOK); hata/timeout/malformed/
+    geçersiz patch/post-validation fail HER DURUMDA interviews.report'u DEĞİŞTİRMEDEN bırakır
+    (fail-closed) — rapor üretimi bu adım yüzünden ASLA çökmez."""
+    if not OPENAI_API_KEY:
+        return
+    db = get_db()
+    try:
+        interview = db.execute(
+            "SELECT report, messages, started_at, score, score_position, score_profile, recommendation, "
+            "reviewer_score_position, reviewer_score_profile FROM interviews WHERE candidate_id=? AND level=?",
+            (candidate_id, level)).fetchone()
+        candidate = db.execute("SELECT position, cv_text FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+    finally:
+        db.close()
+    if not interview:
+        return
+    pre_report = (interview["report"] or "").strip()
+    if not pre_report or _REVIEWER_SLOT_MARK in pre_report:
+        return  # reviewer bloğu henüz işlenmemiş (beklenmedik sıralama) — güvenli no-op
+
+    try:
+        transcript_view = build_transcript_view(interview["messages"] or "[]", level, interview["started_at"], for_report=True)
+        transcript_text_full = transcript_to_text(transcript_view)
+    except Exception as e:
+        print(f"UYARI (run_final_report_quality_gate transkript c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        record_system_decision(candidate_id, level, "quality_gate_atlandi",
+                               "Transkript hazırlanamadı — Final Report Quality Gate atlandı, rapor DEĞİŞMEDEN kaldı.", {})
+        return
+
+    # İŞ 6X-1 — mevcut gpt-4.1 çağrılarında (reviewer/retry) ZATEN kullanılan AYNI güvenli sınır
+    # (TRANSCRIPT_PROMPT_MAX_CHARS) yeniden kullanılır — YENİ bir transkript formatı/sınırı İCAT
+    # EDİLMEDİ. Kırpıldıysa modele AÇIKÇA bildirilir (TRANSCRIPT_PARTIAL) — görmediği kısım için
+    # kesin "uydurma/yanlış" hükmü vermemesi istenir.
+    transcript_partial = len(transcript_text_full) > TRANSCRIPT_PROMPT_MAX_CHARS
+    transcript_text = transcript_text_full[:TRANSCRIPT_PROMPT_MAX_CHARS]
+
+    pos_criteria = position_criteria or []
+    cv_excerpt = (candidate["cv_text"] or "").strip()[:1800] if (candidate and candidate["cv_text"]) else ""
+    reviewer_block = _build_quality_gate_reviewer_findings_block(reviewer_findings or {}, pos_criteria, PROFILE_CRITERIA)
+    section_list_text = "\n".join(f"- {k}: \"{v}\"" for k, v in _QUALITY_GATE_SECTION_HEADS.items())
+    state_lines = [
+        f"Genel Puan: {interview['score']}",
+        f"Pozisyon Puanı (birincil): {interview['score_position']}",
+        f"Profil Puanı (birincil): {interview['score_profile']}",
+        f"İkinci değerlendirici Pozisyon Puanı: {interview['reviewer_score_position']}",
+        f"İkinci değerlendirici Profil Puanı: {interview['reviewer_score_profile']}",
+        f"Öneri: {interview['recommendation']}",
+    ]
+
+    prompt = f"""Sen bitmiş bir işe alım raporunun BAĞIMSIZ SON KALİTE DENETÇİSİSİN (Final Report Quality Gate). Yeni bir DEĞERLENDİRME YAPMIYORSUN — bitmiş, zaten puanlanmış/onaylanmış bir raporu, transkriptle karşılaştırarak, CİDDİ ve DOĞRULANABİLİR hatalara karşı incelersin.
+
+GÖREVİN DEĞİL: puanı/kararı/kriterleri yeniden değerlendirmek, stil önerisi yapmak, farklı bir yorum sunmak.
+GÖREVİN: aşağıdaki türde CİDDİ (BLOCKING), doğrulanabilir hataları tespit et:
+- kanıt/timestamp transkriptle uyuşmuyor (alıntı o anda söylenmemiş)
+- kanıt bu kriterle AÇIKÇA ilgisiz
+- kanıttan AÇIKÇA daha güçlü bir sonuç çıkarılmış
+- olumsuz/sınırlı bir ifade AÇIKÇA olumluya çevrilmiş
+- kriter tablosu ile anlatı bölümleri AÇIKÇA çelişiyor
+- ikinci değerlendirici bulgusu ile anlatı AÇIKÇA çelişiyor
+- anlatı bölümleri birbiriyle AÇIKÇA çelişiyor
+- doğrulanmış puan/karar ile anlatı AÇIKÇA çelişiyor
+- önemli, transkriptte KARŞILIĞI olmayan bir olgusal iddia
+- CV/kaynak metinde OLMAYAN önemli bir CV iddiası
+
+Stil tercihi, farklı yorumlanabilecek bir değerlendirme, küçük tekrar BLOCKING DEĞİLDİR — bunlar için PATCH ÖNERME.
+
+SADECE aşağıdaki SECTION_KEY'lerden birini, YALNIZ bu türde bir hata GERÇEKTEN varsa düzelt:
+{section_list_text}
+
+Bunların DIŞINDAKİ hiçbir bölümü (kriter tabloları, Puanlama Kapsamı, Öneri Gerekçesi, Öne Çıkan Proje ve Deneyimler, Değerlendirilemeyen Alanlar dahil) PATCH ETMEYİ TEKLİF ETME — bunlar senin yetkinin DIŞINDA, kilitli.
+
+DÜZELTME KURALI (KESİN): Yeni bir değerlendirme/iddia/yetkinlik İCAT ETME. Yalnız: (a) yanlış iddiayı KALDIR, (b) aşırı güçlü ifadeyi ZAYIFLAT, (c) doğrulanmış duruma (puan/kriter tablosu/ikinci değerlendirici) UYUMLU hale getir, (d) kaynaksız CV bilgisini KALDIR. GÜÇLÜ YÖNLER'de yalnız SİLME/zayıflatma yap, YENİ güçlü yön EKLEME. CV ÖZETİ'nde yalnız desteklenmeyen kısmı SİL, CV/kaynakta olmayan YENİ bilgi EKLEME. YENİ bir [mm:ss] damgası veya YENİ bir tırnaklı alıntı EKLEMEN gerekiyorsa bu KESİNLİKLE transkriptte GERÇEKTEN var olmalı — uydurma damga/alıntı YASAK, sistem bunu ayrıca doğrular.
+
+TRANSCRIPT_PARTIAL={"true" if transcript_partial else "false"}
+{"NOT: Transkript uzunluk sınırı nedeniyle KISALTILDI — görmediğin bölüm hakkında 'uydurma/yanlış' diye KESİN hüküm VERME." if transcript_partial else ""}
+
+ÇIKTI FORMATI (KESİN, başka HİÇBİR ŞEY yazma):
+Ciddi/doğrulanabilir bir sorun YOKSA yalnız:
+QUALITY_GATE_STATUS: PASS
+
+Sorun VARSA:
+QUALITY_GATE_STATUS: PATCH
+ISSUE: <SECTION_KEY> = BLOCKING | <çok kısa (1 cümle) neden>
+PATCH: <AYNI SECTION_KEY> = <o bölümün TAMAMININ yeni, düzeltilmiş hali>
+(Birden fazla bölümde sorun varsa her biri için ayrı ISSUE+PATCH çifti yaz. NON_BLOCKING bir gözlemin varsa ISSUE olarak yaz ama PATCH ÜRETME — sistem NON_BLOCKING için patch uygulamaz.)
+
+=== DOĞRULANMIŞ FINAL DURUM (DEĞİŞTİRİLEMEZ) ===
+{chr(10).join(state_lines)}
+
+=== İKİNCİ DEĞERLENDİRİCİ BULGULARI (yalnız referans, sen değiştiremezsin) ===
+{reviewer_block}
+
+=== CV/KAYNAK METNİ (varsa) ===
+{cv_excerpt or "(CV metni yok veya çok kısa — bu durumda CV Özeti hakkında 'kaynaksız/uydurma' diye KESİN hüküm VERME, yalnız AÇIKÇA ve KESİNLİKLE çelişen bir şey varsa işaretle.)"}
+
+=== TRANSKRİPT{" (KISALTILMIŞ)" if transcript_partial else ""} ===
+{transcript_text}
+
+=== BİTMİŞ NİHAİ RAPOR (incelediğin metin) ===
+{pre_report[:16000]}"""
+
+    try:
+        resp = openai_call(
+            "POST", "https://api.openai.com/v1/chat/completions",
+            json_body={"model": OPENAI_REVIEWER_MODEL, "messages": [{"role": "user", "content": prompt}],
+                       "max_tokens": QUALITY_GATE_MAX_TOKENS, "temperature": 0},
+            timeout=60.0, step="quality_gate", severity="background", retry=False,
+            context={"candidate_id": candidate_id, "level": level},
+        )
+        result = resp.json()
+        record_openai_chat_usage(candidate_id, level, OPENAI_REVIEWER_MODEL, "quality_gate", result)
+        raw_out = (result["choices"][0]["message"]["content"] or "").strip()
+        print(f"[QUALITY_GATE_RAW] c={candidate_id} L{level} len={len(raw_out)}\n{raw_out[:1500]}")
+    except Exception as e:
+        print(f"UYARI (run_final_report_quality_gate çağrı c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        record_system_decision(candidate_id, level, "quality_gate_hata",
+                               "Final Report Quality Gate çağrısı başarısız/zaman aşımı — rapor DEĞİŞMEDEN korundu.",
+                               {"hata": f"{type(e).__name__}: {e}"})
+        return
+
+    parsed = parse_quality_gate_output(raw_out)
+    status = parsed["status"]
+    if status == "PASS":
+        record_system_decision(candidate_id, level, "quality_gate_pass",
+                               "Final Report Quality Gate: ciddi/doğrulanabilir bir sorun bulunmadı, rapora dokunulmadı.", {})
+        return
+    if status != "PATCH":
+        record_system_decision(candidate_id, level, "quality_gate_malformed",
+                               "Final Report Quality Gate çıktısı ayrıştırılamadı (beklenen QUALITY_GATE_STATUS satırı yok) — rapor DEĞİŞMEDEN korundu.",
+                               {"ham_cikti": raw_out[:1000]})
+        return
+
+    blocking_keys = {k for k, (sev, _r) in parsed["issues"].items() if sev == "BLOCKING"}
+    applicable_patches = {}
+    unresolved = []
+    for key, replacement in parsed["patches"].items():
+        if key not in blocking_keys:
+            continue  # NON_BLOCKING veya ISSUE'suz PATCH -> asla uygulanmaz
+        if key not in _QUALITY_GATE_SECTION_HEADS:
+            unresolved.append((key, "bilinmeyen SECTION_KEY"))
+            continue
+        applicable_patches[key] = replacement
+    for key in blocking_keys:
+        if key not in applicable_patches and key not in [k for k, _ in unresolved]:
+            unresolved.append((key, "BLOCKING işaretlendi ama uygulanabilir PATCH verilmedi"))
+
+    if not applicable_patches:
+        if blocking_keys:
+            print(f"QUALITY_GATE_BLOCKING_UNRESOLVED c={candidate_id} L{level} keys={list(blocking_keys)}")
+            record_system_decision(candidate_id, level, "quality_gate_blocking_cozulemedi",
+                                   "Final Report Quality Gate BLOCKING sorun bildirdi ama uygulanabilir/whitelist içi bir PATCH üretmedi — rapor DEĞİŞMEDEN korundu, insan incelemesi önerilir.",
+                                   {"issues": {k: v for k, v in parsed["issues"].items()}, "cozulemeyenler": unresolved})
+        else:
+            record_system_decision(candidate_id, level, "quality_gate_no_op",
+                                   "Final Report Quality Gate PATCH döndü ama uygulanabilir bir BLOCKING+whitelist patch yoktu — rapor DEĞİŞMEDEN korundu.", {})
+        return
+
+    patched_report = _quality_gate_apply_patches(pre_report, applicable_patches)
+    if patched_report is None:
+        print(f"QUALITY_GATE_BLOCKING_UNRESOLVED c={candidate_id} L{level} keys={list(applicable_patches)} sebep=heading_bulunamadi")
+        record_system_decision(candidate_id, level, "quality_gate_patch_reddedildi",
+                               "Final Report Quality Gate patch'i uygulanamadı (hedef bölüm başlığı raporda yok) — TÜM patch set'i reddedildi, rapor DEĞİŞMEDEN korundu.",
+                               {"denenen_anahtarlar": list(applicable_patches.keys())})
+        return
+
+    # POST-GATE DETERMİNİSTİK DOĞRULAMA — herhangi biri FAIL ederse TÜM patch set'i reddedilir,
+    # partial save YOK (madde: "Herhangi biri FAIL: TÜM Quality Gate patch setini reddet").
+    if not _quality_gate_locked_intact(pre_report, patched_report, set(applicable_patches.keys())):
+        print(f"QUALITY_GATE_BLOCKING_UNRESOLVED c={candidate_id} L{level} sebep=locked_section_degisti")
+        record_system_decision(candidate_id, level, "quality_gate_patch_reddedildi",
+                               "Final Report Quality Gate patch'i LOCKED bir bölümü değiştirdi (veya başlık bütünlüğünü bozdu) — TÜM patch set'i reddedildi, rapor DEĞİŞMEDEN korundu.",
+                               {"denenen_anahtarlar": list(applicable_patches.keys())})
+        return
+
+    for key, replacement in applicable_patches.items():
+        head_label = _QUALITY_GATE_SECTION_HEADS[key]
+        pre_pattern = re.compile(r'\*\*' + re.escape(head_label) + r':\*\*[ \t]*\n([\s\S]*?)(?=\n\*\*[^\n*]{2,60}:\*\*|\Z)')
+        pre_m = pre_pattern.search(pre_report)
+        pre_body = pre_m.group(1) if pre_m else ""
+        if not _quality_gate_new_evidence_safe(pre_body, replacement, transcript_view):
+            print(f"QUALITY_GATE_BLOCKING_UNRESOLVED c={candidate_id} L{level} sebep=dogrulanamayan_yeni_kanit key={key}")
+            record_system_decision(candidate_id, level, "quality_gate_patch_reddedildi",
+                                   "Final Report Quality Gate patch'i transkriptte doğrulanamayan YENİ bir timestamp/alıntı içeriyordu — TÜM patch set'i reddedildi, rapor DEĞİŞMEDEN korundu.",
+                                   {"denenen_anahtarlar": list(applicable_patches.keys()), "sorunlu_key": key})
+            return
+
+    db3 = get_db()
+    try:
+        _row_check = db3.execute(
+            "SELECT score, score_position, score_profile, recommendation FROM interviews WHERE candidate_id=? AND level=?",
+            (candidate_id, level)).fetchone()
+        if _row_check and (
+            _row_check["score"] != interview["score"] or _row_check["score_position"] != interview["score_position"]
+            or _row_check["score_profile"] != interview["score_profile"] or _row_check["recommendation"] != interview["recommendation"]
+        ):
+            # Savunma amaçlı: Quality Gate KENDİSİ bu alanlara hiç yazmaz; bu satırlar arada BAŞKA bir
+            # işlemle değişmişse (ör. eşzamanlı regenerate) patch güvenli tarafta bırakılır.
+            print(f"QUALITY_GATE_BLOCKING_UNRESOLVED c={candidate_id} L{level} sebep=eszamanli_skor_degisikligi")
+            record_system_decision(candidate_id, level, "quality_gate_patch_reddedildi",
+                                   "Final Report Quality Gate patch'i uygulanmadan önce skor/karar alanları başka bir işlemle değişmiş görünüyor — güvenlik için patch reddedildi.", {})
+            db3.close()
+            return
+        db3.execute("UPDATE interviews SET report=? WHERE candidate_id=? AND level=?", (patched_report, candidate_id, level))
+        db3.commit()
+    finally:
+        db3.close()
+
+    record_system_decision(candidate_id, level, "quality_gate_patch_uygulandi",
+                           "Final Report Quality Gate CİDDİ/doğrulanabilir bir sorun tespit etti ve whitelist içi narrative bölüm(ler)i düzeltti (skor/kriter/karar DEĞİŞMEDİ).",
+                           {"uygulanan_anahtarlar": list(applicable_patches.keys()),
+                            "issues": {k: v for k, v in parsed["issues"].items() if k in applicable_patches}})
 
 # GÖREV 1.7 — Profil Veto Kontrolü: eski mimaride modelin kendi yazdığı "[VETO: ...]" etiketine
 # dayanıyordu (detect_profile_veto, artık orphan — 2026-09 yeniden tasarımında ÇAĞRILMAZ hale
