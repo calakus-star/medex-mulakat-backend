@@ -168,9 +168,14 @@ check("6) reviewer prompt yalnız SORUN olan kriterler için satır istiyor",
 # ============================================================
 # 7/8/9) append_reviewer_section entegrasyonu: semantic issue G/K/E/S, puan, karar üzerinde
 # MUTASYON yapmıyor; mevcut reviewer-score/diff/takeover mekanizması AYNEN çalışıyor.
+# İŞ EMRİ — FINAL EVALUATION ARCHITECTURE: reviewer artık YALNIZ L3'te çalışıyor
+# (append_reviewer_section'ın kendi içindeki 'if level != 3: return {}' savunma kapısı) — bu blok
+# ESKİDEN LEVEL=1 ile test ediliyordu (o zamanki mimaride reviewer TÜM level'larda çalışıyordu),
+# şimdi LEVEL=3'e güncellendi. Test edilen ASIL mekanizma (semantic not/diff/takeover render'ı)
+# DEĞİŞMEDİ — yalnız hangi level'da çalıştığı değişti.
 # ============================================================
 TEST_CID = 9202
-LEVEL = 1
+LEVEL = 3
 POS_CRITERIA_LIVE = [{"name": "Test Kriteri Bir", "weight": 25, "desc": "adayın X konusunda somut örnek verme becerisi"}]
 
 POS_ROW = "| Test Kriteri Bir | 15/25 | G: Rapor sürecini uçtan uca anlattı ~~ K: [2:10] \"haftalık olarak düzenli rapor hazırlıyorum\" ~~ E: ~~ S: |"
@@ -312,8 +317,16 @@ finally:
 
 
 # ============================================================
-# 8b) Mevcut reviewer-score mekanizması (KRITER_PUAN farkı) AYNEN çalışıyor — semantic bloktan
-# BAĞIMSIZ. Aynı anda hem KRITER_PUAN farkı hem SEMANTIC_ISSUE varsa ikisi de doğru işlenmeli.
+# 8b) Reviewer-score mekanizması — semantic bloktan BAĞIMSIZ çalışıyor. Aynı anda hem KRITER_PUAN
+# farkı hem SEMANTIC_ISSUE varsa ikisi de doğru işlenmeli.
+# İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / madde 2 GÜNCELLEMESİ (Section 14 — davranış BİLİNÇLİ
+# DEĞİŞTİ, test buna göre güncellendi): KRITER_GEREKCE burada GROUNDED bir [2:10] damgası taşıyor
+# (TRANSCRIPT_VIEW'da gerçek bir aday satırına karşılık geliyor) — ESKİ mimaride (yalnız diskalifiye
+# satırlar devralınabilirdi) bu satır PASS olduğu için asla değişmezdi, farkı yalnız diff_block
+# gösterirdi. YENİ mimaride (apply_reviewer_criterion_correction, İş emri madde 2) GROUNDED bir
+# düzeltme artık PASS etmiş bir satırı da GERÇEKTEN düzeltir — bu KASITLI, istenen yeni davranış.
+# Düzeltme uygulandığı için tablo ARTIK 22/25 gösterir (15/25 DEĞİL) ve diff_block'ta bu kriter
+# için ayrıca satır YOKTUR (birincil ile "reviewer" artık AYNI sayı — gösterilecek fark kalmadı).
 # ============================================================
 REVIEWER_RAW_SCORE_DIFF_PLUS_SEMANTIC = """GÖRÜŞ YOK
 
@@ -329,11 +342,11 @@ GUVEN_DUZEYI: yüksek
 
 try:
     state_diff = run_append_with_mock(REVIEWER_RAW_SCORE_DIFF_PLUS_SEMANTIC)
-    check("8b) reviewer puan FARKI (diff_block) rapora yansıdı (mevcut mekanizma bozulmadı)",
-          "22/25" in state_diff["report"] and "(birincil: 15/25)" in state_diff["report"])
+    check("8b) GROUNDED reviewer düzeltmesi kriter tablosuna GERÇEKTEN UYGULANDI (22/25)",
+          "22/25" in state_diff["report"])
     check("8b) semantic not da AYNI ANDA rapora yansıdı", "Kanıtın yönü tersine çevrilmiş görünüyor" in state_diff["report"])
-    check("8b) Pozisyon Yetkinlikleri TABLOSUNDAKİ G/K/E/S hücresi semantic_issue'dan DEĞİL yalnız KRITER_PUAN/devralma mekanizmasından etkilendi (satır DEĞİŞMEDİ, çünkü 15/25 zaten payda dışı değil — takeover yalnız disqualified kriterlerde çalışır)",
-          POS_ROW in state_diff["report"])
+    check("8b) eski (15/25) primary değeri artık tabloda YOK (düzeltme sonrası)",
+          POS_ROW not in state_diff["report"])
 finally:
     db = m.get_db()
     try:

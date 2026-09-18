@@ -21,7 +21,11 @@ def check(label, condition):
 
 
 TEST_CID = 9401
-LEVEL = 1
+# İŞ EMRİ — FINAL EVALUATION ARCHITECTURE (Section 14): Quality Gate artık YALNIZ L3'te çalışıyor
+# (run_final_report_quality_gate'in 'if level != 3: return' savunma kapısı) — bu dosya ESKİDEN
+# LEVEL=1 idi (o zamanki mimaride Quality Gate TÜM level'larda çalışıyordu), LEVEL=3'e güncellendi.
+# Test edilen ASIL mekanizma (patch/whitelist/rollback) DEĞİŞMEDİ.
+LEVEL = 3
 POS_CRITERIA = [{"name": "Test Kriteri Bir", "weight": 25, "desc": "adayın X konusunda somut örnek verme becerisi"}]
 
 POS_ROW = "| Test Kriteri Bir | 20/25 | G: Süreci uçtan uca anlattı ~~ K: [1:00] \"süreci baştan sona ben yönettim\" ~~ E: ~~ S: |"

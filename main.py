@@ -25,6 +25,7 @@ import time
 import base64
 import traceback
 from xml.sax.saxutils import escape as xml_escape
+from decimal import Decimal, ROUND_HALF_UP
 
 app = FastAPI(title="MedeX Mülakat Sistemi")
 
@@ -539,6 +540,22 @@ def init_db():
         ("positions", "org_id", "BIGINT" if USE_POSTGRES else "INTEGER"),
         # B7 — panelden düzenlenmiş pozisyonlar deploy'da (init_db forced-update) EZİLMESİN.
         ("positions", "is_customized", "INTEGER DEFAULT 0"),
+        # İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / CANONICAL FINAL SCORE — FATAL AUDIT'in kesin
+        # bulgusu: blended Position/Profile RENDER anında hesaplanıyor, hiçbir DB sütununda
+        # persist EDİLMİYORDU (aynı raporda "Pozisyon Puanı" adıyla 3 farklı semantik değer
+        # görünmesinin kök nedeni). Artık final_score_position/final_score_profile TEK canonical
+        # kaynak: L1/L2'de = primary (second evaluator yok); L3'te = primary + VALIDATED Claude
+        # reviewer'dan deterministik türetilir (bkz. _persist_final_scores). Render sırasında
+        # gizli/yeniden hesaplama YOK — her yüzey (rapor metni/admin/PDF) BU sütunları okur.
+        ("interviews", "final_score_position", "INTEGER"),
+        ("interviews", "final_score_profile", "INTEGER"),
+        # İŞ EMRİ — madde 10: Quality Gate üç durumlu status (PASS | PATCHED_AND_VALIDATED |
+        # BLOCKED_INTEGRITY) — "BLOCKING bulundu ama sessizce geçirildi" açığını KAPATIR. Yalnız
+        # L3'te dolar; L1/L2'de her zaman NULL (Quality Gate hiç çalışmaz).
+        ("interviews", "quality_gate_status", "TEXT"),
+        # İŞ EMRİ — madde 11: AI Quality Gate'ten SONRA, DB finalization'dan ÖNCE çalışan
+        # deterministik bütünlük kapısının sonucu (PASS | FAIL) — yönetici görünür, ayrı log.
+        ("interviews", "final_integrity_status", "TEXT"),
     ]
     for table, column, definition in migrations:
         try:
@@ -3215,32 +3232,43 @@ def normalize_recommendation(score: int, ai_recommendation: Optional[str] = None
 # bu sayıdan üretilir; rapor metni (LLM prose'u) KARAR ÜRETMEZ, model bir öneri/karar kelimesi
 # yazmaz. Eski "veto" mekanizması KALDIRILDI — ciddi bulgular artık Gelişim Alanları'nda "RİSK:"
 # etiketiyle metinsel olarak yer alır, puanı/kararı OTOMATİK değiştirmez (iş emri madde 11).
+# İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / madde 5 — GENERAL SCORE VE ROUNDING. FATAL AUDIT
+# kesin bulgusu: Python'un yerleşik round() 'round-half-to-even' (banker's rounding) kullanıyordu
+# — 68.5→68, 79.5→80, 70.5→70 gibi aynı ".5" durumunun PARITY'YE göre farklı yöne yuvarlandığı,
+# kullanıcı için ÖNGÖRÜLEMEZ bir davranış (ör. gerçek bir production raporunda Genel:68 böyle
+# çıkmıştı). TEK canonical, deterministik yuvarlama kuralı: ROUND_HALF_UP (Decimal ile, float
+# tesadüflerine güvenmeden). 68.5→69, 70.5→71, 79.5→80. Skorlama ile ilgili HER yuvarlama
+# (compute_genel_puan, _final_component_score) BU TEK fonksiyondan geçer — aynı hesap birden
+# fazla yerde farklı şekilde yeniden implement EDİLMEZ.
+def _round_half_up(value) -> int:
+    """Skorlama için TEK canonical yuvarlama — ROUND_HALF_UP (ör. 68.5 -> 69), Decimal ile
+    deterministik. float'ın kendi ikili temsilinden kaynaklanan tesadüfi sapmalara karşı `str()`
+    üzerinden Decimal'e çevrilir (ör. Decimal(68.5) DEĞİL, Decimal('68.5'))."""
+    return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
 def compute_genel_puan(score_pos_1, score_profile_1=None, score_pos_2=None, score_profile_2=None):
-    """Mevcut puanların eşit ağırlıklı ortalaması, en yakın tam sayıya yuvarlanır. Hiçbiri yoksa
-    None (uydurma puan YOK — çağıran veri yetersizliğini ayrıca ele almalı)."""
+    """Mevcut puanların eşit ağırlıklı ortalaması, ROUND_HALF_UP ile en yakın tam sayıya
+    yuvarlanır (bkz. _round_half_up — madde 5). Hiçbiri yoksa None (uydurma puan YOK — çağıran
+    veri yetersizliğini ayrıca ele almalı)."""
     vals = [v for v in (score_pos_1, score_profile_1, score_pos_2, score_profile_2) if v is not None]
     if not vals:
         return None
-    return round(sum(vals) / len(vals))
+    return _round_half_up(sum(vals) / len(vals))
 
-# İŞ 6V-FIX — FINAL POSITION/PROFILE SCORE CONSISTENCY. Kök neden (İş 6V teşhisi): Öneri Gerekçesi
-# reviewer sonrası yeniden render edilirken (bkz. append_reviewer_section) General Score doğru
-# şekilde primary+reviewer harmanlanmış değeri kullanıyordu ('compute_genel_puan') ama Position/
-# Profile ALT puanları hâlâ SAF PRIMARY değerleriydi ('recompute_overall_decision'ın döndürdüğü
-# değerler aslında hiç değişmemiş DB satırıydı) — matematiksel tutarsızlık (ör. Genel: 63 ama
-# Öneri Gerekçesi'nde Pozisyon 64/Profil 66 yazıyordu). Bu helper, compute_genel_puan'daki AYNI
-# ('mevcutları filtrele + round(ortalama)') standardı TEK bileşen (yalnız pozisyon YA DA yalnız
-# profil) için tekrar kullanır — YENİ/bağımsız bir yuvarlama kuralı YOK, General Score formülü
-# DEĞİŞMEDİ. Yalnız GÖSTERİM (Öneri Gerekçesi render'ı) için kullanılır — interviews.score_position/
-# score_profile / reviewer_score_position/reviewer_score_profile DB alanlarına YAZILMAZ, hiçbirini
-# overwrite etmez.
+# İŞ 6V-FIX — FINAL POSITION/PROFILE SCORE CONSISTENCY (İŞ EMRİ — FINAL EVALUATION ARCHITECTURE
+# ile GENİŞLETİLDİ): bu helper artık yalnız GÖSTERİM için değil — CANONICAL final_score_position/
+# final_score_profile DB alanlarını hesaplamak için de kullanılır (bkz. _persist_final_scores).
+# AYNI ('mevcutları filtrele + _round_half_up(ortalama)') standardı TEK bileşen (yalnız pozisyon
+# YA DA yalnız profil) için tekrar kullanır — General Score formülü DEĞİŞMEDİ, yalnız yuvarlama
+# kuralı artık ROUND_HALF_UP (madde 5).
 def _final_component_score(primary_value, reviewer_value):
-    """Reviewer değeri VARSA primary+reviewer ortalaması (compute_genel_puan ile AYNI round()
-    standardı); reviewer değeri YOKSA/None ise yalnız primary. İkisi de None ise None."""
+    """Reviewer değeri VARSA primary+reviewer ortalaması (compute_genel_puan ile AYNI
+    _round_half_up standardı); reviewer değeri YOKSA/None ise yalnız primary. İkisi de None ise
+    None."""
     vals = [v for v in (primary_value, reviewer_value) if v is not None]
     if not vals:
         return None
-    return round(sum(vals) / len(vals))
+    return _round_half_up(sum(vals) / len(vals))
 
 def decide_recommendation(genel_puan) -> Optional[str]:
     """TEK karar kaynağı: <40 Reddet · 40-79 Değerlendir · ≥80 İşe Al. genel_puan None ise
@@ -4313,10 +4341,10 @@ def start_interview(payload=Depends(verify_token)):
 
     level = candidate["level"] or 1
 
-    if level == 2:
+    if level in (2, 3):
         db.close()
-        log_ai_provider(2, "claude", "blocked")
-        raise HTTPException(status_code=400, detail="Level 2 mülakatlar sesli (OpenAI Realtime) akışını kullanır. Lütfen /api/realtime/session üzerinden bağlanın.")
+        log_ai_provider(level, "claude", "blocked")
+        raise HTTPException(status_code=400, detail="Level 2/3 mülakatlar sesli (OpenAI Realtime) akışını kullanır. Lütfen /api/realtime/session üzerinden bağlanın.")
     existing = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
     lvl_cfg = get_level_config(level)
     total_seconds = lvl_cfg["minutes"] * 60
@@ -4392,9 +4420,9 @@ def interview_chat(data: ChatMessage, background_tasks: BackgroundTasks, payload
     if not candidate:
         raise HTTPException(status_code=404, detail="Aday bulunamadı")
 
-    if level == 2:
-        log_ai_provider(2, "claude", "blocked")
-        raise HTTPException(status_code=400, detail="Level 2 mülakatlar sesli (OpenAI Realtime) akışını kullanır, bu endpoint kullanılamaz.")
+    if level in (2, 3):
+        log_ai_provider(level, "claude", "blocked")
+        raise HTTPException(status_code=400, detail="Level 2/3 mülakatlar sesli (OpenAI Realtime) akışını kullanır, bu endpoint kullanılamaz.")
 
     # EŞZAMANLILIK GÜVENLİK AĞI: Mülakat zaten tamamlanmışsa (örn. çift gönderim, ağ
     # tekrar denemesi, yarış durumu) tekrar AI çağrısı yapıp yeni bir rapor/e-posta
@@ -4474,7 +4502,9 @@ GÖREV:
             db = get_db()
             save_interview_state(db, effective_candidate_id, messages, level)
             db.commit(); db.close()
-            _mark_finish_pending(effective_candidate_id, level, provider="claude", model="claude-sonnet-4-6",
+            # İŞ EMRİ — FINAL EVALUATION ARCHITECTURE: L1 birincil DEĞERLENDİRME/RAPOR artık OpenAI
+            # (canlı yazışma sohbeti DEĞİŞMEDİ, hâlâ Claude — yalnız RAPOR/PUANLAMA üretimi taşındı).
+            _mark_finish_pending(effective_candidate_id, level, provider="openai", model=OPENAI_REPORT_MODEL,
                                   system=system, payload=user_payload, terminated_reason=None, reason="normal")
             background_tasks.add_task(run_deferred_finish_job, effective_candidate_id, level)
             return {
@@ -4571,7 +4601,8 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             _set_result_meta(effective_candidate_id, level, partial=1,
                              completion_pct=min(100, round(len(real_answers) / max(1, lvl_cfg["min_q"]) * 100)),
                              result_reason="Aday mülakatı kendi isteğiyle erken sonlandırdı.")
-            _mark_finish_pending(effective_candidate_id, level, provider="claude", model="claude-sonnet-4-6",
+            # İŞ EMRİ — FINAL EVALUATION ARCHITECTURE: L1 birincil DEĞERLENDİRME/RAPOR artık OpenAI.
+            _mark_finish_pending(effective_candidate_id, level, provider="openai", model=OPENAI_REPORT_MODEL,
                                   system=system, payload=finish_payload,
                                   terminated_reason="Aday talebiyle erken sonlandırıldı", reason="aday_talebi")
             background_tasks.add_task(run_deferred_finish_job, effective_candidate_id, level)
@@ -5895,7 +5926,8 @@ def _set_reviewer_status(candidate_id: int, level: int, status: str, error: Opti
         print(f"UYARI (_set_reviewer_status c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
 def _reviewer_criteria_block(position_criteria: list) -> str:
-    """Müfettişe GPT ile AYNI kriter setini ve AYNI maksimum puanları, KİMLİK (ID) ile verir.
+    """Müfettişe (Claude, İŞ EMRİ — FINAL EVALUATION ARCHITECTURE'dan beri) primary ile AYNI kriter
+    setini ve AYNI maksimum puanları, KİMLİK (ID) ile verir.
     İş emri GÖREV 6.1 — kriter eşleştirmesi artık GÖRÜNEN ADA göre YAPILMAZ (benzer isimli
     pozisyon/profil kriterleri — ör. 'Analitik Yaklaşım' ↔ 'Analitik yapı ve muhakeme' —
     birbirine karışıyordu). Müfettiş KRITER_PUAN/KRITER_GEREKCE satırlarında kriter ADINI değil
@@ -5918,20 +5950,41 @@ def _reviewer_criteria_block(position_criteria: list) -> str:
 
 def run_report_reviewer(candidate_id: int, level: int, transcript_text: str, final_report: str, modality_block: str,
                         position_criteria: Optional[list] = None):
-    """GÖREV 1.3-1.6 — BAĞIMSIZ İKİNCİ DEĞERLENDİRİCİ. Artık NİHAİ raporu (basılacak hali:
-    kriter tabloları + KARAR + gerekçe dahil) görür; taslağı değil. Raporu YENİDEN YAZMAZ ve
-    karara/puana ETKİ ETMEZ. Serbestçe, kısıtsız kendi görüşünü yazar — GPT ile farklı görüşte
-    olabilir, şerh koyabilir. Ayrıca GPT ile AYNI kriter setinde KENDİ puanını verir (yalnız
-    referans tablo). Denetçi HER ZAMAN OpenAI (OPENAI_REVIEWER_MODEL); L2'de Anthropic'e gitmez.
+    """İŞ EMRİ — FINAL EVALUATION ARCHITECTURE: BAĞIMSIZ İKİNCİ DEĞERLENDİRİCİ. ARTIK YALNIZ L3'te
+    çağrılır (bkz. append_reviewer_section'ın level != 3 erken-dönüşü) ve ARTIK Claude/Anthropic
+    kullanır (ÖNCEDEN her zaman OpenAI'ydi — birincil L2/L3 zaten OpenAI olduğu için, ikinci
+    değerlendiricinin GERÇEKTEN bağımsız/farklı bir sağlayıcı olması için Claude'a taşındı).
+    NİHAİ raporu (basılacak hali: kriter tabloları + KARAR + gerekçe dahil) görür; taslağı değil.
+    Raporu YENİDEN YAZMAZ ve karara/puana DOĞRUDAN ETKİ ETMEZ — yalnız KRITER_PUAN/KRITER_GEREKCE
+    (grounding'i doğrulanırsa `apply_reviewer_criterion_correction` üzerinden KONTROLLÜ olarak final
+    duruma girebilir, bkz. o fonksiyon) ve SEMANTIC_ISSUE (yalnız görüntüleme) üretir.
     Dönüş: (notes, status, error). Hata/atlama → notes='' ve rapor DENETÇİSİZ, DEĞİŞMEDEN kalır."""
-    if not OPENAI_API_KEY:
-        return "", "skipped", "OPENAI_API_KEY tanımlı değil"
+    if not ANTHROPIC_API_KEY:
+        return "", "skipped", "ANTHROPIC_API_KEY tanımlı değil"
+    db_cv = get_db()
+    try:
+        _cand_cv = db_cv.execute("SELECT cv_text FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+    finally:
+        db_cv.close()
+    cv_excerpt = ((_cand_cv["cv_text"] or "").strip()[:1800]) if _cand_cv and _cand_cv["cv_text"] else ""
     # TUR 3 / GÖREV 2+3 — SERBEST METİN. Sabit 6-başlık şablonu KALDIRILDI (model, boş şablonu
     # doldurmak için "Belirgin bir görüş ayrılığı yok." klişesini 5 kez tekrarlıyordu). Artık:
     # yalnızca gerçekten SÖYLEYECEK bir şeyi varsa yazar; yoksa "GÖRÜŞ YOK" der ve bölüm hiç basılmaz.
-    prompt = f"""Sen bir işe alım raporunun BAĞIMSIZ İKİNCİ DEĞERLENDİRİCİSİSİN. Aşağıda bir mülakatın transkripti, sistemin ürettiği NİHAİ RAPOR ve (varsa) modalite kanıtları var.
+    prompt = f"""Sen bir işe alım raporunun BAĞIMSIZ İKİNCİ DEĞERLENDİRİCİSİSİN. Aşağıda bir mülakatın transkripti, sistemin ürettiği NİHAİ RAPOR, (varsa) modalite kanıtları ve (varsa) CV/kaynak metni var.
 
-Görevin: birincil değerlendirmeyi transkript karşısında DENETLEMEK. Kararı veya puanı DEĞİŞTİREMEZSİN — çıktın rapora ayrı bir "ikinci değerlendirici görüşü" bloğu olarak eklenir (yoksa hiç eklenmez).
+Görevin: birincil değerlendirmeyi transkript (ve varsa CV) karşısında BAĞIMSIZ OLARAK DENETLEMEK. Kararı veya puanı DOĞRUDAN DEĞİŞTİREMEZSİN — ama açık, kanıtlanabilir bir birincil hata bulursan bunu yalnız yorum olarak bırakmak YETERLİ DEĞİL: KRITER_PUAN/KRITER_GEREKCE ile somut, gerekçeli bir düzeltme öner (sistem bunu grounding'ini doğruladıktan SONRA kontrollü uygular).
+
+Şu hata sınıflarını ÖZELLİKLE kontrol et:
+1. Kanıt gerçekten ADAYA mı ait (mülakatçının sözü aday kanıtı gibi kullanılmış olabilir mi)?
+2. Kanıttaki [mm:ss] zaman damgası doğru mu?
+3. Alıntı/parafraz transkriptle GERÇEKTEN örtüşüyor mu (uydurma/başka ana ait olabilir mi)?
+4. CV'deki bir bilgi, mülakatta SÖYLENMİŞ gibi (interview evidence) sunulmuş mu?
+5. Kanıt, atandığı kriteri GERÇEKTEN destekliyor mu (başka bir yetkinliğe mi ait)?
+6. Kanıtın olumlu/olumsuz yönü doğru mu (bir sınırlılık/eksiklik olumluya çevrilmiş olabilir mi)?
+7. Puan, kanıt/gerekçeyle TUTARLI mı?
+8. "Değerlendirilemedi" kararı doğru mu (aslında yeterli veri VARDI mı, ya da tersine yetersiz veri olduğu halde puanlanmış mı)?
+9. Anlatı (narrative) bölümleri, birincil/kendi bulgularınla ÇELİŞİYOR mu?
+10. Ciddi bir kaynak/mantık hatası (rapor içi çelişki, kaynaksız önemli iddia) var mı?
 
 SERBEST METİN yaz — sabit başlık, numaralı madde, şablon YOK. Yalnızca GERÇEKTEN kayda değer, somut gözlemlerini yaz:
 - Raporda transkriptle desteklenmeyen / aşırı iddialı bir cümle görüyorsan: kısa alıntıyla belirt.
@@ -5973,18 +6026,18 @@ Hiçbir kriterde sorun görmüyorsan bu bölüme HİÇBİR SATIR yazma (boş bı
 {(final_report or '')[:16000]}
 
 === MODALİTE KANITLARI ===
-{modality_block or 'Yok'}"""
+{modality_block or 'Yok'}
+
+=== CV/KAYNAK METNİ (varsa — 4. madde: CV bilgisi mülakat kanıtı gibi kullanılmış mı kontrolü için) ===
+{cv_excerpt or "(CV metni yok veya çok kısa.)"}"""
     try:
-        resp = openai_call(
-            "POST", "https://api.openai.com/v1/chat/completions",
-            json_body={"model": OPENAI_REVIEWER_MODEL, "messages": [{"role": "user", "content": prompt}],
-                       "max_tokens": 1400, "temperature": 0.3},
-            timeout=60.0, step="report_reviewer", severity="background", retry=False,
-            context={"candidate_id": candidate_id, "level": level},
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
+        response = client.messages.create(
+            model="claude-sonnet-4-6", max_tokens=1400, temperature=0.3,
+            messages=[{"role": "user", "content": prompt}],
         )
-        result = resp.json()
-        record_openai_chat_usage(candidate_id, level, OPENAI_REVIEWER_MODEL, "report_reviewer", result)
-        raw_out = (result["choices"][0]["message"]["content"] or "").strip()
+        record_anthropic_usage(candidate_id, level, "claude-sonnet-4-6", "report_reviewer", response)
+        raw_out = (response.content[0].text or "").strip()
         # TUR 3 / GÖREV 2.1 — HAM çıktıyı (parse öncesi) logla + system_decision'a kalıcı iz.
         print(f"[REVIEWER_RAW] c={candidate_id} L{level} len={len(raw_out)}\n{raw_out[:1500]}")
         record_system_decision(candidate_id, level, "mufettis_ham_cikti",
@@ -6305,7 +6358,12 @@ def recompute_overall_decision(candidate_id: int, level: int, reviewer_score_pos
     Dönüş: (genel_puan, recommendation, score_position, score_profile) — YOK ise None. İş emri —
     RAPOR İÇERİK STANDARDI / A2: çağıran (append_reviewer_section) bu DEĞERLERİ artık Öneri
     Gerekçesi'ni yeniden üretmek için KULLANIR — önceden bu fonksiyon None dönüyordu, DB'yi
-    güncelliyordu ama rapor METNİNDEKİ (zaten basılmış) Öneri Gerekçesi asla haberdar olmuyordu."""
+    güncelliyordu ama rapor METNİNDEKİ (zaten basılmış) Öneri Gerekçesi asla haberdar olmuyordu.
+    İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / madde 3 — CANONICAL FINAL SCORE: bu fonksiyon artık
+    final_score_position/final_score_profile'ı da AYNI transaction'da, TEK YERDE yazar
+    (_final_component_score ile — İş 6V-FIX'in render-anı hesaplamasının YERİNE geçer, artık
+    PERSIST edilir). Bundan sonra HİÇBİR yüzey (rapor metni/admin/PDF) bu değeri yeniden
+    hesaplamaz, yalnız DB'den OKUR."""
     db = get_db()
     try:
         row = db.execute("SELECT score_position, score_profile FROM interviews WHERE candidate_id=? AND level=?",
@@ -6314,9 +6372,13 @@ def recompute_overall_decision(candidate_id: int, level: int, reviewer_score_pos
             return None
         genel_puan = compute_genel_puan(row["score_position"], row["score_profile"], reviewer_score_position, reviewer_score_profile)
         recommendation = decide_recommendation(genel_puan) or "Değerlendirilemedi"
-        db.execute("UPDATE interviews SET score=?, recommendation=?, reviewer_score_position=?, reviewer_score_profile=? "
+        final_score_position = _final_component_score(row["score_position"], reviewer_score_position)
+        final_score_profile = _final_component_score(row["score_profile"], reviewer_score_profile)
+        db.execute("UPDATE interviews SET score=?, recommendation=?, reviewer_score_position=?, reviewer_score_profile=?, "
+                  "final_score_position=?, final_score_profile=? "
                   "WHERE candidate_id=? AND level=?",
-                  (genel_puan, recommendation, reviewer_score_position, reviewer_score_profile, candidate_id, level))
+                  (genel_puan, recommendation, reviewer_score_position, reviewer_score_profile,
+                   final_score_position, final_score_profile, candidate_id, level))
         db.commit()
         return genel_puan, recommendation, row["score_position"], row["score_profile"]
     finally:
@@ -6395,7 +6457,14 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     İŞ 6X-1 — Dönüş: {'rv_scores', 'rv_gerekce', 'rv_semantic'} sözlükleri — Final Report Quality
     Gate'in (run_deferred_finish_job'da bu fonksiyondan SONRA çağrılır) reviewer bulgularını YENİDEN
     AI/DB round-trip'i OLMADAN kullanabilmesi için. Erken çıkış yollarında boş sözlük döner (mevcut
-    davranış aynen korunur, yalnız dönüş tipi None'dan dict'e değişti)."""
+    davranış aynen korunur, yalnız dönüş tipi None'dan dict'e değişti).
+    İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / DEĞİŞMEZ LEVEL MİMARİSİ: second evaluator ARTIK
+    YALNIZ L3'te çalışır (L1/L2'de reviewer YOK). Bu, çağıranın (run_deferred_finish_job) level
+    kontrolüyle SAĞLANIR — AMA yalnız çağırana güvenmek "Doğrudan endpoint çağrısıyla yanlış
+    pipeline'a girilmesi" riskini AÇIK bırakır; bu yüzden fonksiyon KENDİSİ de level != 3 ise
+    HİÇBİR AI çağrısı yapmadan erken döner (savunma amaçlı, ikinci bir kapı)."""
+    if level != 3:
+        return {}
     db = get_db()
     try:
         row = db.execute("SELECT report FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
@@ -6505,6 +6574,40 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
                                    {"devralinan": _takeover_log})
     except Exception as e:
         print(f"UYARI (append_reviewer_section devralma c={candidate_id} L{level}): {type(e).__name__}: {e}")
+
+    # İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / madde 2 — devralmanın (yukarıda, YALNIZ diskalifiye
+    # satırlar) HEMEN SONRASI: L3 Claude reviewer'ın ZATEN PUANLI bir kriterde bulduğu, GROUNDED
+    # (kanıtlanabilir) düzeltmesi de final duruma GİREBİLİR — apply_criterion_takeover'ın
+    # sorumluluk alanına (diskalifiye) HİÇ dokunmaz, yalnız onun DIŞINDA kalan satırlarda çalışır.
+    try:
+        _new_pos_tbl2, _new_score_pos_corr, _log_pos_corr = apply_reviewer_criterion_correction(
+            pos_table_text, position_criteria or [], rv_scores, rv_gerekce, "P", transcript_view)
+        _new_prof_tbl2, _new_score_prof_corr, _log_prof_corr = apply_reviewer_criterion_correction(
+            prof_table_text, PROFILE_CRITERIA, rv_scores, rv_gerekce, "K", transcript_view)
+        _correction_log = _log_pos_corr + _log_prof_corr
+        if _correction_log:
+            if _new_pos_tbl2 != pos_table_text:
+                final_report = final_report.replace(pos_table_text, _new_pos_tbl2, 1)
+                pos_table_text = _new_pos_tbl2
+            if _new_prof_tbl2 != prof_table_text:
+                final_report = final_report.replace(prof_table_text, _new_prof_tbl2, 1)
+                prof_table_text = _new_prof_tbl2
+            _db_corr = get_db()
+            try:
+                if _new_score_pos_corr is not None:
+                    _db_corr.execute("UPDATE interviews SET score_position=? WHERE candidate_id=? AND level=?",
+                                     (_new_score_pos_corr, candidate_id, level))
+                if _new_score_prof_corr is not None:
+                    _db_corr.execute("UPDATE interviews SET score_profile=? WHERE candidate_id=? AND level=?",
+                                     (_new_score_prof_corr, candidate_id, level))
+                _db_corr.commit()
+            finally:
+                _db_corr.close()
+            record_system_decision(candidate_id, level, "reviewer_kriter_duzeltmesi",
+                                   "İŞ EMRİ — L3 Claude second evaluator, ZATEN PUANLI bir kriterde kanıtlanabilir/grounded bir düzeltme buldu; deterministik doğrulamadan geçtiği için final duruma UYGULANDI (grounding geçemeyenler reddedildi, log'da ayrıca görünür).",
+                                   {"duzeltmeler": _correction_log})
+    except Exception as e:
+        print(f"UYARI (append_reviewer_section reviewer düzeltmesi c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
     # İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 1.4 (devam, sonraki tur) — devralma SONRASI
     # "Puanlama Kapsamı" bölümü (HER ZAMAN vardır — bkz. render_puanlama_kapsami) YENİDEN
@@ -6642,9 +6745,14 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
         _rc = recompute_overall_decision(candidate_id, level, reviewer_score_position, reviewer_score_profile)
         if _rc:
             _new_genel_puan, _new_recommendation, _primary_score_pos, _primary_score_prof = _rc
+            # İŞ EMRİ — madde 4: _final_component_score AYNI canonical helper (recompute_overall_
+            # decision'ın DB'ye PERSIST ettiğiyle birebir aynı hesap) — burada YALNIZ bu render için
+            # tekrar çağrılıyor (DB round-trip'ten kaçınmak için), YENİ/farklı bir mantık DEĞİL.
             _final_score_pos = _final_component_score(_primary_score_pos, reviewer_score_position)
             _final_score_prof = _final_component_score(_primary_score_prof, reviewer_score_profile)
-            _new_oneri_text = render_oneri_gerekcesi(_new_recommendation, _new_genel_puan, _final_score_pos, _final_score_prof)
+            _new_oneri_text = render_oneri_gerekcesi(_new_recommendation, _new_genel_puan, _primary_score_pos, _primary_score_prof,
+                                                     reviewer_score_position, reviewer_score_profile,
+                                                     _final_score_pos, _final_score_prof)
             if _new_oneri_text and _ONERI_GEREKCESI_HEAD in final_report:
                 final_report = _ONERI_GEREKCESI_RE.sub(_ONERI_GEREKCESI_HEAD + "\n" + _new_oneri_text, final_report, count=1)
                 _save(final_report)
@@ -7400,6 +7508,105 @@ def apply_criterion_takeover(table_text: str, criteria_list: list, rv_scores: di
         awarded_sum = sum(a for _, a in row_info if a is not None)
         denom = sum(cap for cap, a in row_info if a is not None)
         new_score = max(0, min(100, round(awarded_sum / denom * 100))) if denom > 0 else None
+        body = "\n".join(lines)
+        total_re = (r"(\*\*\s*PROF\S*\s+PUANI\s*[:：]\s*)(\d+)(\s*/\s*)(\d+)(\s*\*\*)" if id_prefix == "K"
+                   else r"(\*\*\s*TOPLAM\s+PUAN\s*[:：]\s*)(\d+)(\s*/\s*)(\d+)(\s*\*\*)")
+        if new_score is not None:
+            body = re.sub(total_re, lambda m: f"{m.group(1)}{new_score}{m.group(3)}100{m.group(5)}", body, count=1, flags=re.IGNORECASE)
+        lines = body.splitlines()
+
+    return "\n".join(lines), new_score, log
+
+# İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / madde 2 — L3 SECOND EVALUATOR'I GERÇEK DENETÇİ YAP.
+# FATAL AUDIT + bu iş emrinin kendi tespiti: apply_criterion_takeover YALNIZ diskalifiye
+# ('Değerlendirilemedi') satırlara dokunuyordu — PASS etmiş bir kriterde reviewer (Claude, L3)
+# AÇIK ve KANITLANABİLİR bir hata bulsa bile bunu yalnız 'yorum' (Ek Görüş/diff) olarak
+# bırakıyordu, final DURUMA hiç giremiyordu. Bu fonksiyon apply_criterion_takeover'ı GENELLEŞTİRİR:
+# ZATEN PUANLI (diskalifiye OLMAYAN) bir satırda da reviewer FARKLI puan+gerekçe verdiyse,
+# gerekçe DETERMİNİSTİK olarak grounded ise (AYNI _timestamp_field_grounded kapısı — YENİ bir
+# doğrulama icat EDİLMEDİ) düzeltme UYGULANIR. apply_criterion_takeover'dan KASITLI FARKI: burada
+# 'kaybedecek bir şey yok' durumu GEÇERLİ DEĞİL (geçerli bir puanın üzerine yazılıyor) — bu yüzden
+# grounding takeover'dan DAHA SIKI: [mm:ss] damgası YOKSA da REDDEDİLİR (takeover'da damgasız
+# genel değerlendirme kabul edilebiliyordu, burada edilemez). Diskalifiye satırlara HİÇ dokunmaz
+# (onlar zaten yukarıdaki apply_criterion_takeover'ın sorumluluğunda — ÇİFT İŞLEME YOK, sorumluluk
+# net ayrık). ONE PRIMARY + ONE REVIEWER: reviewer zaten TEK kez çalıştı (run_report_reviewer,
+# retry=False) — bu fonksiyon YENİ bir AI çağrısı YAPMAZ, yalnız var olan reviewer çıktısını
+# deterministik olarak uygular/reddeder.
+def apply_reviewer_criterion_correction(table_text: str, criteria_list: list, rv_scores: dict, rv_gerekce: dict,
+                                        id_prefix: str, transcript_view: Optional[list] = None) -> tuple:
+    """Dönüş: (yeni_table_text, yeni_score_veya_None, log[]). Yalnız ZATEN PUANLI (diskalifiye
+    OLMAYAN) satırlarda çalışır; diskalifiye satırlar apply_criterion_takeover'ın sorumluluğunda
+    kalır (bu fonksiyon onlara DOKUNMAZ)."""
+    if not table_text or not criteria_list:
+        return table_text, None, []
+    lines = table_text.splitlines()
+    log = []
+    used_lines = set()
+    changed = False
+    row_info = []
+
+    for idx, c in enumerate(criteria_list, start=1):
+        cid = f"{id_prefix}{idx}"
+        cap = _safe_int(c.get("weight"))
+        cname = c.get("name", "")
+        if cap <= 0 or not cname:
+            continue
+        best_i, best_s = None, 0.0
+        for i, ln in enumerate(lines):
+            if i in used_lines or ln.count("|") < 2:
+                continue
+            cells = [x.strip() for x in ln.strip().strip("|").split("|")]
+            if len(cells) < 3:
+                continue
+            c0 = _norm_name(re.sub(r"[*_`]", "", cells[0]))
+            if len(c0) < 2:
+                continue
+            sc = _name_score(cname, cells[0])
+            if sc > best_s:
+                best_i, best_s = i, sc
+        if best_i is None or best_s < 0.34:
+            continue
+        used_lines.add(best_i)
+        cells = [x.strip() for x in lines[best_i].strip().strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        score_cell = cells[1]
+        if _DISQUALIFIED_CELL_RE.search(score_cell):
+            continue  # diskalifiye — apply_criterion_takeover'ın sorumluluğu, burada ATLANIR
+        award_m = re.search(r"(?<![\d/])(\d+)\s*/\s*(\d+)(?![\d/])", score_cell)
+        current_awarded = _safe_int(award_m.group(1)) if award_m else None
+
+        rv = rv_scores.get(cid)
+        rv_g = rv_gerekce.get(cid)
+        if rv is None or not (rv_g or "").strip():
+            row_info.append((cap, current_awarded))
+            continue  # reviewer bu kriter için farklı bir şey söylemedi — primary AYNEN kalır
+
+        rv_awarded = max(0, min(_safe_int(rv[0]), cap))
+        if current_awarded is not None and rv_awarded == current_awarded:
+            row_info.append((cap, current_awarded))
+            continue  # aynı puan — düzeltme DEĞİL, dokunma
+
+        rv_ts = _extract_timestamp(rv_g)
+        if not rv_ts or not _timestamp_field_grounded(rv_g, transcript_view or [], role="aday"):
+            log.append({"kriter": cname, "kimlik": cid, "sonuc": "reviewer_duzeltmesi_reddedildi_kanit_gecersiz"})
+            row_info.append((cap, current_awarded))
+            continue
+
+        cells[1] = f"{rv_awarded}/{cap}"
+        cells[2] = rv_g.strip()
+        lines[best_i] = "| " + " | ".join(cells) + " |"
+        log.append({"kriter": cname, "kimlik": cid, "sonuc": "reviewer_duzeltmesi_uygulandi",
+                   "onceki_puan": (f"{current_awarded}/{cap}" if current_awarded is not None else None),
+                   "yeni_puan": f"{rv_awarded}/{cap}"})
+        row_info.append((cap, rv_awarded))
+        changed = True
+
+    new_score = None
+    if changed:
+        awarded_sum = sum(a for _, a in row_info if a is not None)
+        denom = sum(cap for cap, a in row_info if a is not None)
+        new_score = max(0, min(100, _round_half_up(awarded_sum / denom * 100))) if denom > 0 else None
         body = "\n".join(lines)
         total_re = (r"(\*\*\s*PROF\S*\s+PUANI\s*[:：]\s*)(\d+)(\s*/\s*)(\d+)(\s*\*\*)" if id_prefix == "K"
                    else r"(\*\*\s*TOPLAM\s+PUAN\s*[:：]\s*)(\d+)(\s*/\s*)(\d+)(\s*\*\*)")
@@ -8175,7 +8382,13 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
                 reply = exit_response.content[0].text
                 terminated_reason = terminated_reason or "Aday talebiyle erken sonlandırıldı"
         elif provider == "openai":
-            _msgs = [{"role": "user", "content": primary_payload}]
+            # İŞ EMRİ — FINAL EVALUATION ARCHITECTURE: L1 birincil rapor/değerlendirme artık bu dala
+            # (OpenAI) giriyor ve L1'in 'system' alanı (get_system_prompt — pozisyon/kriter/CV/
+            # talimat) DOLU geliyor; L2/L3'te 'system' zaten None (build_l2_report_prompt TEK
+            # kendi-içinde-tam user mesajı üretir) — bu satır L2/L3 davranışını DEĞİŞTİRMEZ, yalnız
+            # L1 için system'in SESSİZCE ATLANMASINI (ve dolayısıyla pozisyon/kriterlerin modele hiç
+            # gitmemesini) önler.
+            _msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": primary_payload}]
             resp = openai_call(
                 "POST", "https://api.openai.com/v1/chat/completions",
                 json_body={"model": model or OPENAI_REPORT_MODEL, "messages": _msgs, "max_tokens": REPORT_MAX_TOKENS, "temperature": 0},  # GÖREV 4.4 — determinizm
@@ -8314,31 +8527,47 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         # ═══ GÖREV 1.3 — NİHAİ RAPORU ÜRET (karar + tüm deterministik düzenleme burada biter) ═══
         finalize_interview(candidate_id, reply, terminated_reason=terminated_reason, level=level, regen=regen)
 
-        # ═══ GÖREV 1.3-1.6 — MÜFETTİŞ (ikinci model) EN SONDA, NİHAİ BELGE ÜZERİNDE ═══
-        # Müfettiş artık taslağı DEĞİL, basılacak nihai raporu (kriter tabloları + KARAR + gerekçe
-        # dahil) görür. Çıktısı karara/puana ETKİ ETMEZ; rapora ayrı, tek blok olarak eklenir.
-        # Müfettiş atlanır/patlarsa rapor DENETÇİSİZ ve DEĞİŞMEDEN kalır — basım engellenmez.
+        # ═══ İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / DEĞİŞMEZ LEVEL MİMARİSİ ═══
+        # Second evaluator (Claude reviewer) ve Final Report Quality Gate ARTIK YALNIZ L3'te
+        # çalışır — L1/L2'de bu adımlar HİÇ ÇAĞRILMAZ (gereksiz AI çağrısı/maliyet YOK). Çağrı
+        # sitesindeki bu 'if level == 3' kontrolüne EK olarak her iki fonksiyon da KENDİ İÇİNDE
+        # level != 3 ise erken döner (savunma amaçlı ikinci kapı — doğrudan/beklenmedik çağrıya
+        # karşı da güvenli).
         _reviewer_findings = {}
-        try:
-            _reviewer_findings = append_reviewer_section(candidate_id, level, transcript_text, modality_block, _pcrit) or {}
-        except Exception as e:
-            print(f"UYARI (müfettiş bölümü ekleme c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        if level == 3:
+            # Müfettiş artık taslağı DEĞİL, basılacak nihai raporu (kriter tabloları + KARAR +
+            # gerekçe dahil) görür. Atlanır/patlarsa rapor DENETÇİSİZ ve DEĞİŞMEDEN kalır.
+            try:
+                _reviewer_findings = append_reviewer_section(candidate_id, level, transcript_text, modality_block, _pcrit) or {}
+            except Exception as e:
+                print(f"UYARI (müfettiş bölümü ekleme c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
         # İŞ 5 — validator+reviewer+takeover TAMAMLANDIKTAN SONRA, yalnız 'Öne Çıkan Proje ve
-        # Deneyimler' hâlâ fallback'teyse TEK hedefli recovery denemesi (bkz. fonksiyon docstring'i).
+        # Deneyimler' hâlâ fallback'teyse TEK hedefli recovery denemesi (tüm level'larda çalışır —
+        # bu iş emrinin kapsamı DIŞINDA, DEĞİŞMEDİ).
         try:
             run_one_cikan_proje_recovery(candidate_id, level, _pcrit)
         except Exception as e:
             print(f"UYARI (one_cikan_proje recovery c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
-        # ═══ İŞ 6X-1 — FINAL REPORT QUALITY GATE (pipeline'ın EN SONU) ═══
-        # Evaluator/validator/reviewer/takeover/proje-kurtarma TAMAMLANDIKTAN SONRA çalışan bağımsız
-        # SON kalite denetçisi. Hata/atlama → rapor DEĞİŞMEDEN kalır, basım ENGELLENMEZ (fail-closed,
-        # retry YOK — bkz. fonksiyon docstring'i).
+        if level == 3:
+            # ═══ FINAL REPORT QUALITY GATE (pipeline'ın EN SONU, yalnız L3) ═══
+            # Evaluator/validator/reviewer/takeover/proje-kurtarma TAMAMLANDIKTAN SONRA çalışan
+            # bağımsız SON kalite denetçisi. Hata/atlama → rapor DEĞİŞMEDEN kalır (fail-closed,
+            # retry YOK — bkz. fonksiyon docstring'i).
+            try:
+                run_final_report_quality_gate(candidate_id, level, _pcrit, _reviewer_findings)
+            except Exception as e:
+                print(f"UYARI (final report quality gate c={candidate_id} L{level}): {type(e).__name__}: {e}")
+
+        # ═══ İŞ EMRİ — madde 11: FINAL DETERMINISTIC INTEGRITY GATE (pipeline'ın GERÇEK SONU,
+        # TÜM level'larda — AI Quality Gate'ten SONRA, ama L1/L2'de kendisi de zaten no-op'a
+        # yakın çalışır çünkü reviewer alanları hiç dolmaz). AI ÇAĞRISI YAPMAZ. FAIL olsa bile
+        # rapor SİLİNMEZ/geri ALINMAZ — yalnız işaretlenir, pipeline ÇÖKMEZ.
         try:
-            run_final_report_quality_gate(candidate_id, level, _pcrit, _reviewer_findings)
+            run_final_deterministic_integrity_check(candidate_id, level)
         except Exception as e:
-            print(f"UYARI (final report quality gate c={candidate_id} L{level}): {type(e).__name__}: {e}")
+            print(f"UYARI (final integrity check c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
         print(f"[PROCESSING_DONE] candidate_id={candidate_id} level={level} regen={regen}")
     except AIError as e:
@@ -8962,14 +9191,24 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     _tech_note = None
 
     if regen:
-        # EK — geriye dönük yeniden üretim: orijinal bitiş saati (completed_at) KORUNUR,
-        # rapor üretim zamanı ayrı alanda (report_regenerated_at). completed_at IS NULL guard'ı yok.
+        # İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / madde 6 — REGENERATE STALE REVIEWER FIX.
+        # FATAL AUDIT (HIGH) bulgusu: regenerate edilip o turda second evaluator (Claude, yalnız
+        # L3) BAŞARISIZ olursa, ESKİ reviewer_score_position/profile bu satırda kalıyor, YENİ
+        # primary state ile SESSİZCE karışabiliyordu. Fix: HER primary yazımı (regen dahil)
+        # reviewer'a bağlı TÜM alanları BASELINE'a (final=primary, reviewer=NULL, gate
+        # durumları=NULL) SIFIRLAR — yalnız BU TURUN reviewer'ı (varsa, L3) GERÇEKTEN başarıyla
+        # tamamlanırsa (append_reviewer_section → recompute_overall_decision) final_score_*
+        # blended değerle YENİDEN yazılır. Eski değere fallback YOK.
         db.execute("""
             UPDATE interviews SET report=?, standard_cv=?, score=?, score_position=?, score_profile=?, recommendation=?,
+                   final_score_position=?, final_score_profile=?,
+                   reviewer_score_position=NULL, reviewer_score_profile=NULL,
+                   quality_gate_status=NULL, final_integrity_status=NULL,
                    report_regenerated_at=CURRENT_TIMESTAMP, technical_annex=?,
                    report_tech_note=?, processing_status='completed', processing_error=NULL
             WHERE candidate_id=? AND level=?
-        """, (report, standard_cv, score, score_position, score_profile, recommendation, _technical_annex, _tech_note, candidate_id, level))
+        """, (report, standard_cv, score, score_position, score_profile, recommendation,
+              score_position, score_profile, _technical_annex, _tech_note, candidate_id, level))
         db.commit()
         db.close()
         record_system_decision(candidate_id, level, "rapor_yeniden_uretildi",
@@ -8985,12 +9224,19 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     # KALEM 4 — completed_at = mülakatın GERÇEK bitiş anı (interview_ended_at); rapor üretimi
     # arka planda saatler sonra bitse bile completed_at o zamanı yansıtmaz. report_generated_at
     # ayrı alan: raporun fiilen üretildiği an.
+    # İŞ EMRİ — madde 3/6: ilk üretimde de final_score_position/profile BASELINE olarak
+    # primary'ye eşitlenir (L1/L2 için bu NİHAİ değerdir — second evaluator hiç çalışmaz);
+    # reviewer'a bağlı alanlar taze satırda zaten NULL, açıkça da sıfırlanır (tutarlılık).
     cur = db.execute("""
         UPDATE interviews SET report=?, standard_cv=?, score=?, score_position=?, score_profile=?, recommendation=?,
+               final_score_position=?, final_score_profile=?,
+               reviewer_score_position=NULL, reviewer_score_profile=NULL,
+               quality_gate_status=NULL, final_integrity_status=NULL,
                completed_at=COALESCE(interview_ended_at, CURRENT_TIMESTAMP), report_generated_at=CURRENT_TIMESTAMP,
                technical_annex=?, report_tech_note=?, processing_status='completed', processing_error=NULL
         WHERE candidate_id=? AND level=? AND completed_at IS NULL
-    """, (report, standard_cv, score, score_position, score_profile, recommendation, _technical_annex, _tech_note, candidate_id, level))
+    """, (report, standard_cv, score, score_position, score_profile, recommendation,
+          score_position, score_profile, _technical_annex, _tech_note, candidate_id, level))
     already_finalized = cur.rowcount == 0
     # candidates.status sadece adayın O AN İÇİN AKTİF OLDUĞU level tamamlandığında güncellenir
     # (adayın current level'ı değiştiyse, bu eski bir çağrı olabilir — dokunma).
@@ -9112,8 +9358,9 @@ def report_violation(data: ViolationReport, background_tasks: BackgroundTasks, p
             "veri toplanamayan kriterler 'değerlendirilmedi' işaretlenir. 'Sonuç Gerekçesi' bölümüne ihlali SOMUT yaz: "
             "ne olduğu, mülakatın kaçıncı dakikası, transkriptteki ilgili söz. [MÜLAKATBİTTİ] etiketini kullan."
         )
-        log_ai_provider(candidate_level, "claude", "analysis")
-        _mark_finish_pending(data.candidate_id, candidate_level, provider="claude", model="claude-sonnet-4-6",
+        # İŞ EMRİ — FINAL EVALUATION ARCHITECTURE: L1 birincil DEĞERLENDİRME/RAPOR artık OpenAI.
+        log_ai_provider(candidate_level, "openai", "analysis")
+        _mark_finish_pending(data.candidate_id, candidate_level, provider="openai", model=OPENAI_REPORT_MODEL,
                               system=system, payload=force_msg, terminated_reason=terminated_reason, reason="violation")
         background_tasks.add_task(run_deferred_finish_job, data.candidate_id, candidate_level)
         return {
@@ -10821,11 +11068,34 @@ def _build_quality_gate_reviewer_findings_block(reviewer_findings: dict, positio
                 lines.append(f"- {cid} ({name}): " + " | ".join(parts))
     return "\n".join(lines) if lines else "(İkinci değerlendirici bu kriterlerin hiçbirinde birincilden FARKLI bir bulgu bildirmedi.)"
 
+_QUALITY_GATE_STATUSES = ("PASS", "PATCHED_AND_VALIDATED", "BLOCKED_INTEGRITY")
+
+def _set_quality_gate_status(candidate_id: int, level: int, status: str) -> None:
+    """İŞ EMRİ — madde 10: üç durumlu Quality Gate status'u (PASS | PATCHED_AND_VALIDATED |
+    BLOCKED_INTEGRITY) DB'ye yazar. Admin panel zaten 'SELECT i.*' ile TÜM interview alanlarını
+    döndürdüğü için bu sütun EK bir endpoint/frontend değişikliği GEREKMEDEN admin'de görünür
+    olur (bkz. get_interview)."""
+    if status not in _QUALITY_GATE_STATUSES:
+        return
+    db = get_db()
+    try:
+        db.execute("UPDATE interviews SET quality_gate_status=? WHERE candidate_id=? AND level=?",
+                  (status, candidate_id, level))
+        db.commit()
+    finally:
+        db.close()
+
 def run_final_report_quality_gate(candidate_id: int, level: int, position_criteria: Optional[list] = None,
                                   reviewer_findings: Optional[dict] = None) -> None:
     """İŞ 6X-1 — bkz. modül başlığındaki not. TEK deneme (retry YOK); hata/timeout/malformed/
     geçersiz patch/post-validation fail HER DURUMDA interviews.report'u DEĞİŞTİRMEDEN bırakır
-    (fail-closed) — rapor üretimi bu adım yüzünden ASLA çökmez."""
+    (fail-closed) — rapor üretimi bu adım yüzünden ASLA çökmez.
+    İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / DEĞİŞMEZ LEVEL MİMARİSİ: Quality Gate ARTIK YALNIZ
+    L3'te çalışır. Çağıranın (run_deferred_finish_job) level kontrolüne EK olarak fonksiyon
+    KENDİSİ de level != 3 ise hiçbir AI çağrısı yapmadan erken döner (savunma amaçlı ikinci kapı —
+    doğrudan/yanlış çağrıyla L1/L2'de tetiklenemez)."""
+    if level != 3:
+        return
     if not OPENAI_API_KEY:
         return
     db = get_db()
@@ -10946,12 +11216,17 @@ PATCH: <AYNI SECTION_KEY> = <o bölümün TAMAMININ yeni, düzeltilmiş hali>
     parsed = parse_quality_gate_output(raw_out)
     status = parsed["status"]
     if status == "PASS":
+        _set_quality_gate_status(candidate_id, level, "PASS")
         record_system_decision(candidate_id, level, "quality_gate_pass",
                                "Final Report Quality Gate: ciddi/doğrulanabilir bir sorun bulunmadı, rapora dokunulmadı.", {})
         return
     if status != "PATCH":
+        # İŞ EMRİ — madde 10: "BLOCKING ama raporu yine ver" açığı — malformed çıktı, gate'in
+        # GERÇEKTEN temiz mi BLOCKING mi olduğunu belirleyemediği bir durumdur; GÜVENLİ TARAF
+        # BLOCKED_INTEGRITY'dir (rapor sessizce 'başarılı final' sayılmaz, ama silinmez/çökmez).
+        _set_quality_gate_status(candidate_id, level, "BLOCKED_INTEGRITY")
         record_system_decision(candidate_id, level, "quality_gate_malformed",
-                               "Final Report Quality Gate çıktısı ayrıştırılamadı (beklenen QUALITY_GATE_STATUS satırı yok) — rapor DEĞİŞMEDEN korundu.",
+                               "Final Report Quality Gate çıktısı ayrıştırılamadı (beklenen QUALITY_GATE_STATUS satırı yok) — rapor DEĞİŞMEDEN korundu, BLOCKED_INTEGRITY olarak işaretlendi.",
                                {"ham_cikti": raw_out[:1000]})
         return
 
@@ -10972,10 +11247,12 @@ PATCH: <AYNI SECTION_KEY> = <o bölümün TAMAMININ yeni, düzeltilmiş hali>
     if not applicable_patches:
         if blocking_keys:
             print(f"QUALITY_GATE_BLOCKING_UNRESOLVED c={candidate_id} L{level} keys={list(blocking_keys)}")
+            _set_quality_gate_status(candidate_id, level, "BLOCKED_INTEGRITY")
             record_system_decision(candidate_id, level, "quality_gate_blocking_cozulemedi",
-                                   "Final Report Quality Gate BLOCKING sorun bildirdi ama uygulanabilir/whitelist içi bir PATCH üretmedi — rapor DEĞİŞMEDEN korundu, insan incelemesi önerilir.",
+                                   "Final Report Quality Gate BLOCKING sorun bildirdi ama uygulanabilir/whitelist içi bir PATCH üretmedi — rapor DEĞİŞMEDEN korundu, BLOCKED_INTEGRITY olarak işaretlendi, insan incelemesi önerilir.",
                                    {"issues": {k: v for k, v in parsed["issues"].items()}, "cozulemeyenler": unresolved})
         else:
+            _set_quality_gate_status(candidate_id, level, "PASS")
             record_system_decision(candidate_id, level, "quality_gate_no_op",
                                    "Final Report Quality Gate PATCH döndü ama uygulanabilir bir BLOCKING+whitelist patch yoktu — rapor DEĞİŞMEDEN korundu.", {})
         return
@@ -10983,8 +11260,9 @@ PATCH: <AYNI SECTION_KEY> = <o bölümün TAMAMININ yeni, düzeltilmiş hali>
     patched_report = _quality_gate_apply_patches(pre_report, applicable_patches)
     if patched_report is None:
         print(f"QUALITY_GATE_BLOCKING_UNRESOLVED c={candidate_id} L{level} keys={list(applicable_patches)} sebep=heading_bulunamadi")
+        _set_quality_gate_status(candidate_id, level, "BLOCKED_INTEGRITY")
         record_system_decision(candidate_id, level, "quality_gate_patch_reddedildi",
-                               "Final Report Quality Gate patch'i uygulanamadı (hedef bölüm başlığı raporda yok) — TÜM patch set'i reddedildi, rapor DEĞİŞMEDEN korundu.",
+                               "Final Report Quality Gate patch'i uygulanamadı (hedef bölüm başlığı raporda yok) — TÜM patch set'i reddedildi, rapor DEĞİŞMEDEN korundu, BLOCKED_INTEGRITY olarak işaretlendi.",
                                {"denenen_anahtarlar": list(applicable_patches.keys())})
         return
 
@@ -10992,8 +11270,9 @@ PATCH: <AYNI SECTION_KEY> = <o bölümün TAMAMININ yeni, düzeltilmiş hali>
     # partial save YOK (madde: "Herhangi biri FAIL: TÜM Quality Gate patch setini reddet").
     if not _quality_gate_locked_intact(pre_report, patched_report, set(applicable_patches.keys())):
         print(f"QUALITY_GATE_BLOCKING_UNRESOLVED c={candidate_id} L{level} sebep=locked_section_degisti")
+        _set_quality_gate_status(candidate_id, level, "BLOCKED_INTEGRITY")
         record_system_decision(candidate_id, level, "quality_gate_patch_reddedildi",
-                               "Final Report Quality Gate patch'i LOCKED bir bölümü değiştirdi (veya başlık bütünlüğünü bozdu) — TÜM patch set'i reddedildi, rapor DEĞİŞMEDEN korundu.",
+                               "Final Report Quality Gate patch'i LOCKED bir bölümü değiştirdi (veya başlık bütünlüğünü bozdu) — TÜM patch set'i reddedildi, rapor DEĞİŞMEDEN korundu, BLOCKED_INTEGRITY olarak işaretlendi.",
                                {"denenen_anahtarlar": list(applicable_patches.keys())})
         return
 
@@ -11004,8 +11283,9 @@ PATCH: <AYNI SECTION_KEY> = <o bölümün TAMAMININ yeni, düzeltilmiş hali>
         pre_body = pre_m.group(1) if pre_m else ""
         if not _quality_gate_new_evidence_safe(pre_body, replacement, transcript_view):
             print(f"QUALITY_GATE_BLOCKING_UNRESOLVED c={candidate_id} L{level} sebep=dogrulanamayan_yeni_kanit key={key}")
+            _set_quality_gate_status(candidate_id, level, "BLOCKED_INTEGRITY")
             record_system_decision(candidate_id, level, "quality_gate_patch_reddedildi",
-                                   "Final Report Quality Gate patch'i transkriptte doğrulanamayan YENİ bir timestamp/alıntı içeriyordu — TÜM patch set'i reddedildi, rapor DEĞİŞMEDEN korundu.",
+                                   "Final Report Quality Gate patch'i transkriptte doğrulanamayan YENİ bir timestamp/alıntı içeriyordu — TÜM patch set'i reddedildi, rapor DEĞİŞMEDEN korundu, BLOCKED_INTEGRITY olarak işaretlendi.",
                                    {"denenen_anahtarlar": list(applicable_patches.keys()), "sorunlu_key": key})
             return
 
@@ -11021,19 +11301,122 @@ PATCH: <AYNI SECTION_KEY> = <o bölümün TAMAMININ yeni, düzeltilmiş hali>
             # Savunma amaçlı: Quality Gate KENDİSİ bu alanlara hiç yazmaz; bu satırlar arada BAŞKA bir
             # işlemle değişmişse (ör. eşzamanlı regenerate) patch güvenli tarafta bırakılır.
             print(f"QUALITY_GATE_BLOCKING_UNRESOLVED c={candidate_id} L{level} sebep=eszamanli_skor_degisikligi")
-            record_system_decision(candidate_id, level, "quality_gate_patch_reddedildi",
-                                   "Final Report Quality Gate patch'i uygulanmadan önce skor/karar alanları başka bir işlemle değişmiş görünüyor — güvenlik için patch reddedildi.", {})
             db3.close()
+            _set_quality_gate_status(candidate_id, level, "BLOCKED_INTEGRITY")
+            record_system_decision(candidate_id, level, "quality_gate_patch_reddedildi",
+                                   "Final Report Quality Gate patch'i uygulanmadan önce skor/karar alanları başka bir işlemle değişmiş görünüyor — güvenlik için patch reddedildi, BLOCKED_INTEGRITY olarak işaretlendi.", {})
             return
-        db3.execute("UPDATE interviews SET report=? WHERE candidate_id=? AND level=?", (patched_report, candidate_id, level))
+        db3.execute("UPDATE interviews SET report=?, quality_gate_status=? WHERE candidate_id=? AND level=?",
+                   (patched_report, "PATCHED_AND_VALIDATED", candidate_id, level))
         db3.commit()
     finally:
         db3.close()
 
     record_system_decision(candidate_id, level, "quality_gate_patch_uygulandi",
-                           "Final Report Quality Gate CİDDİ/doğrulanabilir bir sorun tespit etti ve whitelist içi narrative bölüm(ler)i düzeltti (skor/kriter/karar DEĞİŞMEDİ).",
+                           "Final Report Quality Gate CİDDİ/doğrulanabilir bir sorun tespit etti ve whitelist içi narrative bölüm(ler)i düzeltti (skor/kriter/karar DEĞİŞMEDİ). Durum: PATCHED_AND_VALIDATED.",
                            {"uygulanan_anahtarlar": list(applicable_patches.keys()),
                             "issues": {k: v for k, v in parsed["issues"].items() if k in applicable_patches}})
+
+# İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / madde 11 — FINAL DETERMINISTIC INTEGRITY GATE.
+# AI Quality Gate'ten (varsa, YALNIZ L3) SONRA VE DB finalization'dan (bu fonksiyonun kendisi
+# finalization'ın SON adımıdır) ÖNCE çalışan, hiçbir AI çağrısı YAPMAYAN son kapı. L1/L2 için de
+# çalışır (daha hafif — reviewer/Quality Gate'e özel kontroller o levellerda doğal olarak no-op,
+# çünkü reviewer alanları zaten None). Yalnız MEVCUT deterministik helper'ları (compute_genel_puan,
+# decide_recommendation, _final_component_score, check_timestamp_grounded) yeniden kullanır — YENİ
+# bir doğrulama mantığı İCAT EDİLMEDİ. FAIL durumunda rapor SİLİNMEZ/geri ALINMAZ — yalnız
+# final_integrity_status='FAIL' olarak İŞARETLENİR (yönetici görünür, bkz. çağıran).
+def run_final_deterministic_integrity_check(candidate_id: int, level: int) -> str:
+    """Dönüş: 'PASS' | 'FAIL'. Kontrol listesi (madde 11): final_score_position/profile canonical
+    hesapla aynı mı; General canonical hesapla aynı mı; Recommendation General ile uyumlu mu;
+    reviewer alanları 'yarı dolu' bir tutarsız durumda mı; zorunlu başlıklar (Öneri Gerekçesi/
+    Puanlama Kapsamı) var mı; kriter tablolarındaki [mm:ss] damgaları transkriptte grounded mı."""
+    db = get_db()
+    try:
+        interview = db.execute(
+            "SELECT report, score, score_position, score_profile, recommendation, "
+            "reviewer_score_position, reviewer_score_profile, final_score_position, final_score_profile, "
+            "messages, started_at FROM interviews WHERE candidate_id=? AND level=?",
+            (candidate_id, level)).fetchone()
+    finally:
+        db.close()
+    if not interview:
+        return "FAIL"
+    problems = []
+    report_text = interview["report"] or ""
+    if not report_text.strip():
+        problems.append("rapor_bos")
+    if _ONERI_GEREKCESI_HEAD not in report_text:
+        problems.append("oneri_gerekcesi_baslik_eksik")
+    if _PUANLAMA_KAPSAMI_HEAD not in report_text:
+        problems.append("puanlama_kapsami_baslik_eksik")
+
+    expected_general = compute_genel_puan(interview["score_position"], interview["score_profile"],
+                                          interview["reviewer_score_position"], interview["reviewer_score_profile"])
+    if expected_general is not None and interview["score"] is not None and interview["score"] != expected_general:
+        problems.append(f"general_score_mismatch(db={interview['score']},canonical={expected_general})")
+
+    if interview["score"] is not None:
+        expected_rec = decide_recommendation(interview["score"])
+        if expected_rec and interview["recommendation"] and interview["recommendation"] not in (expected_rec, "Değerlendirilemedi"):
+            problems.append(f"recommendation_mismatch(db={interview['recommendation']},canonical={expected_rec})")
+
+    expected_final_pos = _final_component_score(interview["score_position"], interview["reviewer_score_position"])
+    expected_final_prof = _final_component_score(interview["score_profile"], interview["reviewer_score_profile"])
+    if interview["final_score_position"] != expected_final_pos:
+        problems.append(f"final_score_position_mismatch(db={interview['final_score_position']},canonical={expected_final_pos})")
+    if interview["final_score_profile"] != expected_final_prof:
+        problems.append(f"final_score_profile_mismatch(db={interview['final_score_profile']},canonical={expected_final_prof})")
+
+    if (interview["reviewer_score_position"] is None) != (interview["reviewer_score_profile"] is None):
+        problems.append("reviewer_yari_durum")
+
+    try:
+        transcript_view = build_transcript_view(interview["messages"] or "[]", level, interview["started_at"], for_report=True)
+        _pos_m = re.search(r'\*\*Pozisyon Yetkinlikleri:\*\*\s*\n([\s\S]*?)(?=\n\*\*[^\n]{2,60}:\*\*|\Z)', report_text)
+        _prof_m = re.search(r'\*\*Kişisel ve Bilişsel Profil:\*\*\s*\n([\s\S]*?)(?=\n\*\*[^\n]{2,60}:\*\*|\Z)', report_text)
+        for _tbl in (_pos_m.group(1) if _pos_m else "", _prof_m.group(1) if _prof_m else ""):
+            for ln in _tbl.splitlines():
+                if ln.count("|") < 2:
+                    continue
+                cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+                if len(cells) < 3:
+                    continue
+                for mm, ss in _TS_RE.findall(cells[2]):
+                    ts = f"{mm}:{ss}"
+                    if not check_timestamp_grounded(ts, transcript_view, role=None, tolerance_s=8):
+                        problems.append(f"grounding_fail({ts})")
+        # İŞ EMRİ — madde 8 — ÖNE ÇIKAN PROJE AÇIĞINI KAPAT: bu bölüm PRIMARY tarafından
+        # doğrudan üretilmiş (fallback'e hiç düşmemiş) olsa bile artık AYNI temel grounding
+        # kontrolünden (mevcut check_timestamp_grounded — YENİ mantık İCAT EDİLMEDİ) geçer. Quality
+        # Gate bu bölümü LOCKED tutmaya devam eder (whitelist'te YOK) — düzeltme burada YAPILMAZ,
+        # yalnız SORUN varsa final_integrity_status='FAIL' ile İŞARETLENİR.
+        _proj_m = _ONE_CIKAN_PROJE_RE.search(report_text)
+        _proj_text = _proj_m.group(1) if _proj_m else ""
+        if _proj_text and _tr_upper(_proj_text.strip()) != _tr_upper(_NO_NARRATIVE_EVIDENCE_FALLBACK):
+            for mm, ss in _TS_RE.findall(_proj_text):
+                ts = f"{mm}:{ss}"
+                if not check_timestamp_grounded(ts, transcript_view, role="aday", tolerance_s=8):
+                    problems.append(f"proje_grounding_fail({ts})")
+    except Exception as e:
+        print(f"UYARI (final integrity grounding taraması c={candidate_id} L{level}): {type(e).__name__}: {e}")
+
+    result = "FAIL" if problems else "PASS"
+    db2 = get_db()
+    try:
+        db2.execute("UPDATE interviews SET final_integrity_status=? WHERE candidate_id=? AND level=?",
+                   (result, candidate_id, level))
+        db2.commit()
+    finally:
+        db2.close()
+    if problems:
+        print(f"[FINAL_INTEGRITY_FAIL] c={candidate_id} L{level} problems={problems}")
+        record_system_decision(candidate_id, level, "final_integrity_fail",
+                               "Final Deterministic Integrity Gate BAŞARISIZ — rapor SİLİNMEDİ/geri ALINMADI, yalnız işaretlendi; insan incelemesi önerilir.",
+                               {"problemler": problems})
+    else:
+        record_system_decision(candidate_id, level, "final_integrity_pass",
+                               "Final Deterministic Integrity Gate PASS.", {})
+    return result
 
 # GÖREV 1.7 — Profil Veto Kontrolü: eski mimaride modelin kendi yazdığı "[VETO: ...]" etiketine
 # dayanıyordu (detect_profile_veto, artık orphan — 2026-09 yeniden tasarımında ÇAĞRILMAZ hale
@@ -11072,7 +11455,17 @@ def render_profile_veto_control(profile_table_text: str) -> str:
 # GÖREV 1.5 — Öneri Gerekçesi: TAMAMEN deterministik, skor/öneriden TÜRETİLİR — bu, "öneriyle
 # TUTARLI olmak zorunda" şartını (madde 1.5) YAPI GEREĞİ sağlar (modelin bağımsız yazdığı bir
 # gerekçe metniyle karar arasında çelişki riski hiç oluşmaz, çünkü ikisi AYNI sayılardan üretilir).
-def render_oneri_gerekcesi(recommendation: str, score, score_position, score_profile) -> str:
+# İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / madde 4 — PUAN ETİKETLERİNİ SEMANTİK OLARAK AYIR.
+# FATAL AUDIT kesin bulgusu: aynı raporda "Pozisyon Puanı" adı altında üç FARKLI semantik değer
+# (birincil/ikincil/blended) açıklamasız gösterilebiliyordu. Artık HER katman AÇIKÇA etiketli:
+# "Birinci Değerlendirici" / "İkinci Değerlendirici" (yalnız GERÇEKTEN varsa — L1/L2'de reviewer
+# hiç çalışmadığı için bu blok TAMAMEN ATLANIR, boş kart gösterilmez) / "Nihai". Nihai değerler
+# ARTIK render-anında YENİDEN HESAPLANMIYOR — çağıran (finalize_interview / append_reviewer_section)
+# DB'ye PERSIST edilmiş final_score_position/final_score_profile'ı bu fonksiyona doğrudan verir
+# (bkz. _persist_final_scores / recompute_overall_decision) — TEK canonical kaynak.
+def render_oneri_gerekcesi(recommendation: str, score, score_position, score_profile,
+                           reviewer_score_position=None, reviewer_score_profile=None,
+                           final_score_position=None, final_score_profile=None) -> str:
     parts_ = []
     if recommendation == "Reddet":
         parts_.append(f"Adayın Genel Puanı ({score}/100) pozisyon için gerekli eşiğin (40) altında kalmıştır.")
@@ -11082,10 +11475,28 @@ def render_oneri_gerekcesi(recommendation: str, score, score_position, score_pro
         parts_.append(f"Adayın Genel Puanı ({score}/100), doğrudan işe alım veya ret için yeterli olmayan, değerlendirmeye açık bir aralıktadır (40-79).")
     else:
         return ""
-    if score_position is not None:
-        parts_.append(f"Pozisyon yetkinlikleri puanı {score_position}/100.")
-    if score_profile is not None:
-        parts_.append(f"Kişisel ve bilişsel profil puanı {score_profile}/100.")
+    _has_second = reviewer_score_position is not None or reviewer_score_profile is not None
+    if _has_second:
+        # L3 — second evaluator (Claude) GERÇEKTEN çalıştı: üç katman da AÇIKÇA etiketli gösterilir.
+        if score_position is not None or score_profile is not None:
+            parts_.append(f"Birinci Değerlendirici — Pozisyon: {score_position if score_position is not None else '-'}/100 · "
+                          f"Profil: {score_profile if score_profile is not None else '-'}/100.")
+        parts_.append(f"İkinci Değerlendirici — Pozisyon: {reviewer_score_position if reviewer_score_position is not None else '-'}/100 · "
+                      f"Profil: {reviewer_score_profile if reviewer_score_profile is not None else '-'}/100.")
+        if final_score_position is not None:
+            parts_.append(f"Nihai Pozisyon Puanı: {final_score_position}/100.")
+        if final_score_profile is not None:
+            parts_.append(f"Nihai Profil Puanı: {final_score_profile}/100.")
+    else:
+        # L1/L2 — second evaluator YOK: boş/placeholder "İkinci Değerlendirici" kartı GÖSTERİLMEZ.
+        # Tek katman var (= primary = nihai) — "Nihai" etiketiyle, ileride second evaluator
+        # eklenirse bile GEÇMİŞ metinlerle karışmayacak şekilde baştan net.
+        _fp = final_score_position if final_score_position is not None else score_position
+        _fpr = final_score_profile if final_score_profile is not None else score_profile
+        if _fp is not None:
+            parts_.append(f"Nihai Pozisyon Puanı: {_fp}/100.")
+        if _fpr is not None:
+            parts_.append(f"Nihai Profil Puanı: {_fpr}/100.")
     return " ".join(parts_)
 
 # GÖREV 1.2/1.3 — bu turda geri eklenen anlatı bölümleri (Analitik Düşünme, Problem Çözme,
@@ -12863,8 +13274,11 @@ def regenerate_report(candidate_id: int, background_tasks: BackgroundTasks, leve
         prompt = build_l2_report_prompt(cand, level, clean_transcript, criteria_coverage=_cov, extra_notes=_regen_note_txt)
         prov, mdl, system = "openai", OPENAI_REPORT_MODEL, None
     else:
-        if not ANTHROPIC_API_KEY:
-            raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY tanımlı değil")
+        # İŞ EMRİ — FINAL EVALUATION ARCHITECTURE: L1 birincil DEĞERLENDİRME/RAPOR artık OpenAI
+        # (system+prompt biçimi DEĞİŞMEDİ — yalnız provider/model OpenAI'ye taşındı; OpenAI dalı
+        # artık 'system' alanını da gönderiyor, bkz. run_deferred_finish_job).
+        if not OPENAI_API_KEY:
+            raise HTTPException(status_code=503, detail="OPENAI_API_KEY tanımlı değil")
         system = get_system_prompt(cand["position"], cand["name"], cand["cv_text"], cand["ai_note"],
                                    cand["education"], cand["university"], cand["department"], cand["experience_years"],
                                    level, cand["interview_language"] or "tr", cand["report_language"] or "tr",
@@ -12873,7 +13287,7 @@ def regenerate_report(candidate_id: int, background_tasks: BackgroundTasks, leve
         prompt = (f"GÖREV: Aşağıdaki tam transkriptten mülakatı bitir ve raporu üret (yönetici talebiyle YENİDEN üretim). "
                   f"Elindeki veriyle adil değerlendir; sorulmamış kriterleri 'değerlendirilemedi' işaretle. [MÜLAKATBİTTİ] etiketini kullan.{_regen_note_txt}\n\n"
                   f"=== TAM TRANSKRİPT ===\n{clean_transcript[:TRANSCRIPT_PROMPT_MAX_CHARS]}")
-        prov, mdl = "claude", "claude-sonnet-4-6"
+        prov, mdl = "openai", OPENAI_REPORT_MODEL
 
     # EK — completed_at (orijinal bitiş saati) EZİLMEZ. run_deferred_finish_job regen=True ile
     # guard'ı atlar; finalize_interview regen=True completed_at'e dokunmaz, report_regenerated_at yazar.

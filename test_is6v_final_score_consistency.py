@@ -26,8 +26,10 @@ def check(label, condition):
 
 # 1) Reviewer position + profile ikisi de var -> ortalama (İş 6V regresyon örneği)
 check("1) final_position = mean(64,60) = 62", m._final_component_score(64, 60) == 62)
-check("1) final_profile = mean(66,63) = 64 (round-half-to-even, compute_genel_puan ile AYNI)",
-      m._final_component_score(66, 63) == 64)
+# İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / madde 5 (Section 14): rounding artık ROUND_HALF_UP
+# (round-half-to-even DEĞİL) — mean(66,63)=64.5 artık 65'e yuvarlanıyor (64'e DEĞİL).
+check("1) final_profile = mean(66,63) = 65 (ROUND_HALF_UP, compute_genel_puan ile AYNI standart)",
+      m._final_component_score(66, 63) == 65)
 
 # 2) Yalnız reviewer position var (profile yok) -> profile'da primary fallback
 check("2) reviewer profile YOK -> primary fallback (66)", m._final_component_score(66, None) == 66)
@@ -52,9 +54,13 @@ check("compute_genel_puan(64,66,60,63) hâlâ 63 (formül DEĞİŞMEDİ)",
 
 # ============================================================
 # Uçtan uca: append_reviewer_section — İş 6V regresyon örneği (64/66 primary, 60/63 reviewer)
+# İŞ EMRİ — FINAL EVALUATION ARCHITECTURE (Section 14): reviewer artık YALNIZ L3'te çalışıyor
+# (append_reviewer_section'ın 'if level != 3: return {}' savunma kapısı) — bu test ESKİDEN
+# LEVEL=1 idi (o zamanki mimaride reviewer TÜM level'larda çalışıyordu), LEVEL=3'e güncellendi.
+# Test edilen ASIL mekanizma (final score persistence) DEĞİŞMEDİ.
 # ============================================================
 TEST_CID = 9301
-LEVEL = 1
+LEVEL = 3
 POS_CRITERIA_LIVE = [{"name": "Test Kriteri Bir", "weight": 100, "desc": "adayın X konusunda somut örnek verme becerisi"}]
 POS_ROW = "| Test Kriteri Bir | 64/100 | G: Süreci uçtan uca anlattı ~~ K: [2:10] \"haftalık olarak düzenli rapor hazırlıyorum\" ~~ E: ~~ S: |"
 
@@ -135,8 +141,14 @@ def read_state():
 # hedefiyle orantılı) — build_reviewer_diff_block sadece FARKLI puanları algılar, biz reviewer_score_
 # position/profile'ı DOĞRUDAN compute_reviewer_overall üzerinden simüle etmek için gerçek KRITER_PUAN
 # satırları kullanıyoruz (profil kriterlerinin TAMAMINA reviewer puanı veriyoruz ki toplam 63/100 olsun).
+# İŞ EMRİ — FINAL EVALUATION ARCHITECTURE (Section 14): KRITER_GEREKCE'lerden KASITLI olarak
+# [mm:ss] damgası ÇIKARILDI — bu test yalnız General/Nihai BLEND+PERSIST mantığını izole eder;
+# apply_reviewer_criterion_correction'ın (İş emri madde 2, grounding gerektiren) kriter-tablosu
+# düzeltmesini TETİKLEMEMESİ gerekir (o mekanizma test_final_evaluation_architecture.py'de AYRI
+# test ediliyor). Damgalı bir gerekçe burada primary tabloyu da değiştirir, bu testin "primary
+# tablo/score_position DEĞİŞMEDİ" iddiasını KASITSIZCA bozardı.
 def _reviewer_kriter_puan_lines():
-    lines = ["KRITER_PUAN: P1 = 60/100", "KRITER_GEREKCE: P1 = Kanıt sınırlı bulundu [2:10]."]
+    lines = ["KRITER_PUAN: P1 = 60/100", "KRITER_GEREKCE: P1 = Kanıt sınırlı bulundu, somut zaman referansı olmadan genel bir gözlem."]
     total_target = 63
     n = len(m.PROFILE_CRITERIA)
     running = 0
@@ -148,7 +160,7 @@ def _reviewer_kriter_puan_lines():
             awarded = round(c["weight"] * (total_target / 100))
             running += awarded
         lines.append(f"KRITER_PUAN: {cid} = {awarded}/{c['weight']}")
-        lines.append(f"KRITER_GEREKCE: {cid} = Gözlem farklı değerlendirildi [2:10].")
+        lines.append(f"KRITER_GEREKCE: {cid} = Gözlem farklı değerlendirildi, somut zaman referansı olmadan genel bir gözlem.")
     return "\n".join(lines)
 
 
@@ -203,15 +215,17 @@ try:
     check("recommendation 'Değerlendir' (40-79 aralığı, formül DEĞİŞMEDİ)",
           after_state["recommendation"] == "Değerlendir")
 
-    # AFTER) Öneri Gerekçesi artık FINAL/BLENDED değerleri gösteriyor
-    check("AFTER) Öneri Gerekçesi ARTIK PRIMARY 64/66 GÖSTERMİYOR",
-          "Pozisyon yetkinlikleri puanı 64/100" not in after_state["report"]
-          and "Kişisel ve bilişsel profil puanı 66/100" not in after_state["report"])
-    check("AFTER) Öneri Gerekçesi FINAL blended Position (62) gösteriyor",
-          "Pozisyon yetkinlikleri puanı 62/100" in after_state["report"])
+    # AFTER) Öneri Gerekçesi artık AÇIKÇA ETİKETLİ üç katman gösteriyor (İş emri madde 4 —
+    # eski, TEK/ambiguous "Pozisyon yetkinlikleri puanı" ifadesi ARTIK KULLANILMIYOR).
+    check("AFTER) eski, etiketsiz 'Pozisyon yetkinlikleri puanı' ifadesi ARTIK YOK",
+          "Pozisyon yetkinlikleri puanı" not in after_state["report"])
+    check("AFTER) 'Birinci Değerlendirici' AÇIKÇA 64/100 gösteriyor", "Birinci Değerlendirici — Pozisyon: 64" in after_state["report"])
+    check("AFTER) 'İkinci Değerlendirici' AÇIKÇA 60/100 gösteriyor", "İkinci Değerlendirici — Pozisyon: 60" in after_state["report"])
+    check("AFTER) Öneri Gerekçesi FINAL blended Position (62) 'Nihai' etiketiyle gösteriyor",
+          "Nihai Pozisyon Puanı: 62/100" in after_state["report"])
     _expected_final_profile = m._final_component_score(66.0, 63)
-    check(f"AFTER) Öneri Gerekçesi FINAL blended Profile ({_expected_final_profile}) gösteriyor",
-          f"Kişisel ve bilişsel profil puanı {_expected_final_profile}/100" in after_state["report"])
+    check(f"AFTER) Öneri Gerekçesi FINAL blended Profile ({_expected_final_profile}) 'Nihai' etiketiyle gösteriyor",
+          f"Nihai Profil Puanı: {_expected_final_profile}/100" in after_state["report"])
 
     # Criterion tabloları DEĞİŞMEDİ (yalnız Öneri Gerekçesi patch edildi — Pozisyon/Profil tabloları
     # reviewer'ın farklı puan verdiği bu kriterler için BİLEREK değiştirilmedi, madde 21)
