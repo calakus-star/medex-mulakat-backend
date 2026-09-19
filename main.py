@@ -11133,7 +11133,8 @@ def run_final_report_quality_gate(candidate_id: int, level: int, position_criter
     try:
         interview = db.execute(
             "SELECT report, messages, started_at, score, score_position, score_profile, recommendation, "
-            "reviewer_score_position, reviewer_score_profile FROM interviews WHERE candidate_id=? AND level=?",
+            "reviewer_score_position, reviewer_score_profile, final_score_position, final_score_profile "
+            "FROM interviews WHERE candidate_id=? AND level=?",
             (candidate_id, level)).fetchone()
         candidate = db.execute("SELECT position, cv_text FROM candidates WHERE id=?", (candidate_id,)).fetchone()
     finally:
@@ -11160,16 +11161,37 @@ def run_final_report_quality_gate(candidate_id: int, level: int, position_criter
     transcript_partial = len(transcript_text_full) > TRANSCRIPT_PROMPT_MAX_CHARS
     transcript_text = transcript_text_full[:TRANSCRIPT_PROMPT_MAX_CHARS]
 
+    # İŞ EMRİ — L3 FINAL QUALITY GATE / madde 3 — KÖK NEDEN (bu turda bulundu): denetlenen METNİN
+    # KENDİSİ (pre_report) sabit 16000 KARAKTERE (transkriptin kendi sınırı olan
+    # TRANSCRIPT_PROMPT_MAX_CHARS'tan bile DAHA DÜŞÜK) sessizce kırpılıyordu — transkriptin aksine
+    # hiçbir "PARTIAL" bildirimi YOKTU; uzun bir L3 raporunda (özellikle 'derin' depth_tier) rapor
+    # bu sınırı aşarsa QG, raporun SONUNU (ör. Genel Kanı/Öneri Gerekçesi'ne en yakın bölümler) hiç
+    # GÖRMEDEN "PASS" diyebiliyordu. QG'nin denetlediği ARTEFAKTIN KENDİSİ olduğu için transkriptle
+    # AYNI cömertlikte bir sınır (TRANSCRIPT_PROMPT_MAX_CHARS) kullanılır + kırpılırsa AÇIKÇA
+    # bildirilir — YENİ bir sınır/format İCAT EDİLMEDİ, var olan aynen yeniden kullanıldı.
+    report_partial = len(pre_report) > TRANSCRIPT_PROMPT_MAX_CHARS
+    report_text_for_gate = pre_report[:TRANSCRIPT_PROMPT_MAX_CHARS]
+
     pos_criteria = position_criteria or []
     cv_excerpt = (candidate["cv_text"] or "").strip()[:1800] if (candidate and candidate["cv_text"]) else ""
     reviewer_block = _build_quality_gate_reviewer_findings_block(reviewer_findings or {}, pos_criteria, PROFILE_CRITERIA)
     section_list_text = "\n".join(f"- {k}: \"{v}\"" for k, v in _QUALITY_GATE_SECTION_HEADS.items())
+    # İŞ EMRİ — L3 FINAL QUALITY GATE / madde 3+7 — KÖK NEDEN (bu turda bulundu): bu blok yalnız
+    # birincil ve ikinci değerlendiricinin KENDİ bileşen puanlarını veriyordu; canonical NİHAİ
+    # (final_score_position/profile — raporun "Öneri Gerekçesi" bölümünde zaten "Nihai Pozisyon/
+    # Profil Puanı" olarak AÇIKÇA yazan, DB'nin tek gerçek kaynağı) hiç verilmiyordu. QG bu yüzden
+    # "nihai skorla anlatı açıkça çelişiyor mu" sorusunu YALNIZ birincil+ikinciden kendi kendine
+    # ORTALAMA ALARAK çıkarmak zorunda kalıyordu — bu, QG'nin KENDİ BAŞINA bir ikinci puanlama
+    # motoruna dönüşmesi riski taşır (madde 7'nin yasakladığı şey). Düzeltme: canonical final
+    # değerler DOĞRUDAN, DB'den okunmuş halleriyle veriliyor — QG hesaplamıyor, yalnız KARŞILAŞTIRIYOR.
     state_lines = [
         f"Genel Puan: {interview['score']}",
         f"Pozisyon Puanı (birincil): {interview['score_position']}",
         f"Profil Puanı (birincil): {interview['score_profile']}",
         f"İkinci değerlendirici Pozisyon Puanı: {interview['reviewer_score_position']}",
         f"İkinci değerlendirici Profil Puanı: {interview['reviewer_score_profile']}",
+        f"Nihai (canonical) Pozisyon Puanı: {interview['final_score_position']}",
+        f"Nihai (canonical) Profil Puanı: {interview['final_score_profile']}",
         f"Öneri: {interview['recommendation']}",
     ]
 
@@ -11222,8 +11244,9 @@ PATCH: <AYNI SECTION_KEY> = <o bölümün TAMAMININ yeni, düzeltilmiş hali>
 === TRANSKRİPT{" (KISALTILMIŞ)" if transcript_partial else ""} ===
 {transcript_text}
 
-=== BİTMİŞ NİHAİ RAPOR (incelediğin metin) ===
-{pre_report[:16000]}"""
+=== BİTMİŞ NİHAİ RAPOR{" (KISALTILMIŞ)" if report_partial else ""} (incelediğin metin) ===
+{"NOT: Rapor uzunluk sınırı nedeniyle KISALTILDI — görmediğin sondaki bölümler hakkında 'uydurma/yanlış/çelişkili' diye KESİN hüküm VERME." if report_partial else ""}
+{report_text_for_gate}"""
 
     try:
         resp = openai_call(
