@@ -7490,7 +7490,10 @@ def apply_criterion_takeover(table_text: str, criteria_list: list, rv_scores: di
     if took_over:
         awarded_sum = sum(a for _, a in row_info if a is not None)
         denom = sum(cap for cap, a in row_info if a is not None)
-        new_score = max(0, min(100, round(awarded_sum / denom * 100))) if denom > 0 else None
+        # İŞ EMRİ — NİHAİ RAPOR TUTARLILIĞI: TEK canonical yuvarlama (_round_half_up, madde 5) —
+        # burada yalnız yerleşik round() (banker's rounding) kullanılıyordu, sistemin geri kalanıyla
+        # tutarsızdı (ör. 68.5 burada 68, compute_genel_puan'da 69 çıkabiliyordu).
+        new_score = max(0, min(100, _round_half_up(awarded_sum / denom * 100))) if denom > 0 else None
         body = "\n".join(lines)
         total_re = (r"(\*\*\s*PROF\S*\s+PUANI\s*[:：]\s*)(\d+)(\s*/\s*)(\d+)(\s*\*\*)" if id_prefix == "K"
                    else r"(\*\*\s*TOPLAM\s+PUAN\s*[:：]\s*)(\d+)(\s*/\s*)(\d+)(\s*\*\*)")
@@ -7878,7 +7881,8 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
     if any(r["disqualified"] for r in rendered_rows) or any(g.get("sonuc") == "alan_disi_puan_kelepceledi" for g in log):
         awarded_sum = sum(r["awarded"] for r in rendered_rows if not r["disqualified"])
         denom = sum(r["cap"] for r in rendered_rows if not r["disqualified"])
-        new_score = max(0, min(100, round(awarded_sum / denom * 100))) if denom > 0 else None
+        # İŞ EMRİ — NİHAİ RAPOR TUTARLILIĞI: TEK canonical yuvarlama (_round_half_up, madde 5).
+        new_score = max(0, min(100, _round_half_up(awarded_sum / denom * 100))) if denom > 0 else None
         body = "\n".join(lines)
         total_re = (r"(\*\*\s*PROF\S*\s+PUANI\s*[:：]\s*)(\d+)(\s*/\s*)(\d+)(\s*\*\*)" if id_prefix == "K"
                    else r"(\*\*\s*TOPLAM\s+PUAN\s*[:：]\s*)(\d+)(\s*/\s*)(\d+)(\s*\*\*)")
@@ -8067,7 +8071,8 @@ def apply_scope_clamp_transcript_wide(table_text: str, criteria_list: list, tran
     if changed:
         awarded_sum = sum(a for _, a in row_info if a is not None)
         denom = sum(cap for cap, a in row_info if a is not None)
-        new_score = max(0, min(100, round(awarded_sum / denom * 100))) if denom > 0 else None
+        # İŞ EMRİ — NİHAİ RAPOR TUTARLILIĞI: TEK canonical yuvarlama (_round_half_up, madde 5).
+        new_score = max(0, min(100, _round_half_up(awarded_sum / denom * 100))) if denom > 0 else None
         body = "\n".join(lines)
         total_re = (r"(\*\*\s*PROF\S*\s+PUANI\s*[:：]\s*)(\d+)(\s*/\s*)(\d+)(\s*\*\*)" if id_prefix == "K"
                    else r"(\*\*\s*TOPLAM\s+PUAN\s*[:：]\s*)(\d+)(\s*/\s*)(\d+)(\s*\*\*)")
@@ -10454,7 +10459,10 @@ def compute_reviewer_overall(criteria_list: list, primary_table_text: str, revie
         cap_sum += eff_cap
     if cap_sum <= 0:
         return None
-    return max(0, min(100, round(awarded_sum / cap_sum * 100)))
+    # İŞ EMRİ — NİHAİ RAPOR TUTARLILIĞI: TEK canonical yuvarlama (_round_half_up, madde 5) —
+    # ikinci değerlendiricinin kendi pozisyon/profil puanı da bu final skorlara girdi olduğu için
+    # aynı kuraldan geçmeli.
+    return max(0, min(100, _round_half_up(awarded_sum / cap_sum * 100)))
 
 def render_cv_ozeti_fallback(candidate: dict, transcript: str = "") -> str:
     """CV Özeti — model üretemediyse/çok kısaysa DETERMİNİSTİK yedek. İş emri madde 13: boş alan
@@ -11725,7 +11733,9 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
                         + "; ".join(f"{s['kriter']} ({s['gerekce']})" for s in cand_missing))
     if evaluated_cap <= 0:
         return _reattach("\n".join(lines)), model_score, warnings
-    normalized = max(0, min(100, round(awarded_sum / evaluated_cap * 100)))
+    # İŞ EMRİ — NİHAİ RAPOR TUTARLILIĞI: TEK canonical yuvarlama (_round_half_up, madde 5) —
+    # bu, birincil score_position'ın kendisi; sonraki tüm final hesaplar buna dayanır.
+    normalized = max(0, min(100, _round_half_up(awarded_sum / evaluated_cap * 100)))
     total_weight = sum(_safe_int(c.get("weight")) for c in position_criteria)
     body = "\n".join(lines)
     m_total = re.search(r"(\*\*\s*TOPLAM\s+PUAN\s*[:：]\s*)(\d+)\s*/\s*(\d+)(\s*\*\*)", body, re.IGNORECASE)
@@ -11936,7 +11946,9 @@ def recompute_profile_section(profile_region: str, transcript: str = None, crite
     if denom_cap <= 0:
         warnings.append("[PROFİL] Değerlendirilebilir profil kriteri yok — PROFİL PUANI hesaplanamadı.")
         return body, None, warnings
-    normalized = max(0, min(100, round(awarded_sum / denom_cap * 100)))
+    # İŞ EMRİ — NİHAİ RAPOR TUTARLILIĞI: TEK canonical yuvarlama (_round_half_up, madde 5) —
+    # bu, birincil score_profile'ın kendisi; sonraki tüm final hesaplar buna dayanır.
+    normalized = max(0, min(100, _round_half_up(awarded_sum / denom_cap * 100)))
     m_total = re.search(r"(\*\*\s*PROF\S*\s+PUANI\s*[:：]\s*)(\d+)\s*/\s*(\d+)(\s*\*\*)", body, re.IGNORECASE)
     model_total = _safe_int(m_total.group(2)) if m_total else None
     new_total_line = (f"**PROFİL PUANI: {normalized}/100**  {_PROFILE_SCORE_FIXED_MARK} {awarded_sum}/{denom_cap}; "
@@ -12819,6 +12831,12 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
         has_second = r_pos is not None or r_prof is not None
         if has_second:
             rows.append(["İkinci", _c(r_pos), _c(r_prof)])
+            # İŞ EMRİ — NİHAİ RAPOR TUTARLILIĞI / madde 3: rapor metninde ("Öneri Gerekçesi" bölümü,
+            # render_oneri_gerekcesi) zaten "Nihai Pozisyon/Profil Puanı" AÇIKÇA yazıyor — bu tablo
+            # o satırı GÖSTERMİYORDU (Birinci/İkinci/Genel Puan vardı, Nihai yoktu), aynı PDF içinde
+            # metin ile tablo arasında görünür bir boşluk/uyumsuzluk oluşturuyordu. DB'nin canonical
+            # final_score_position/final_score_profile alanları AYNEN (yeniden hesaplanmadan) eklendi.
+            rows.append(["Nihai", _c(interview.get("final_score_position")), _c(interview.get("final_score_profile"))])
         genel_idx = len(rows)
         rows.append(["Genel Puan", (f"{score}/100" if score is not None else ""), ""])
         st = Table([[Paragraph(ptxt(c), styles["BodyWrap"]) for c in row] for row in rows],
