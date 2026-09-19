@@ -5967,6 +5967,32 @@ def _reviewer_criteria_block(position_criteria: list) -> str:
         lines.append(f"- K{i}: {pc['name']} — __/{pc['weight']}{_pdesc_suffix}")
     return "\n".join(lines)
 
+# İŞ EMRİ — L3 İKİNCİ DEĞERLENDİRME TUTARLILIĞI + SOURCE VISIBILITY / madde 4 — KÖK NEDEN: birincil
+# rapor üretici (build_l2_report_prompt, "KAYIT FORMU BEYANI" bloğu) eğitim/üniversite/bölüm/deneyim
+# yılı gibi adayın/adminin BAŞVURU FORMUNA girdiği alanları görüyordu; Claude second evaluator ve
+# Final Report Quality Gate bu alanları HİÇ görmüyordu — yalnız (zaten üretilmiş) rapor METNİNDE bu
+# bilgiyi buluyor, CV/transkriptte karşılığını arayıp bulamayınca haklı biçimde "kaynağı belirsiz"
+# sanıyorlardı. TEK yerden üretilen bu blok, İKİSİNE de AYNI kaynak anlamıyla (CV DEĞİL, transkript
+# DEĞİL, kayıt/başvuru formu) veriliyor — reviewer/QG bu veriyi puanlamaz, yalnız kaynak ayrımı için
+# kullanır.
+def _basvuru_formu_beyani_block(candidate) -> str:
+    edu = candidate["education"] if candidate and "education" in candidate.keys() else None
+    uni = candidate["university"] if candidate and "university" in candidate.keys() else None
+    dept = candidate["department"] if candidate and "department" in candidate.keys() else None
+    exp = candidate["experience_years"] if candidate and "experience_years" in candidate.keys() else None
+    email = candidate["email"] if candidate and "email" in candidate.keys() else None
+    if not any([edu, uni, dept, (exp not in (None, "", 0))]):
+        return "(Başvuru formunda ek beyan yok.)"
+    return (
+        "Bu bilgiler CV METNİ DEĞİLDİR, TRANSKRİPT DEĞİLDİR — adayın/adminin başvuru/kayıt formuna "
+        "girdiği, kendi başına GEÇERLİ, AYRI bir kaynaktır. Bu bilginin CV'de veya transkriptte AYRICA "
+        "geçmemesi TEK BAŞINA 'kaynaksız/uydurma/halüsinasyon' sayılmaz — kaynağı zaten bu formdur; "
+        "yalnız CV'de VEYA transkriptte GERÇEKTEN ÇELİŞEN bir ifade varsa bunu işaretle.\n"
+        f"- E-posta: {email or '—'}\n"
+        f"- Eğitim: {edu or '—'} · Üniversite: {uni or '—'} · Bölüm: {dept or '—'}\n"
+        f"- Deneyim yılı (beyan): {exp if exp not in (None, '', 0) else '—'}"
+    )
+
 def run_report_reviewer(candidate_id: int, level: int, transcript_text: str, final_report: str, modality_block: str,
                         position_criteria: Optional[list] = None):
     """İŞ EMRİ — FINAL EVALUATION ARCHITECTURE: BAĞIMSIZ İKİNCİ DEĞERLENDİRİCİ. ARTIK YALNIZ L3'te
@@ -5982,10 +6008,13 @@ def run_report_reviewer(candidate_id: int, level: int, transcript_text: str, fin
         return "", "skipped", "ANTHROPIC_API_KEY tanımlı değil"
     db_cv = get_db()
     try:
-        _cand_cv = db_cv.execute("SELECT cv_text FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+        _cand_cv = db_cv.execute(
+            "SELECT cv_text, email, education, university, department, experience_years "
+            "FROM candidates WHERE id=?", (candidate_id,)).fetchone()
     finally:
         db_cv.close()
     cv_excerpt = ((_cand_cv["cv_text"] or "").strip()[:1800]) if _cand_cv and _cand_cv["cv_text"] else ""
+    basvuru_formu_block = _basvuru_formu_beyani_block(_cand_cv)
     # TUR 3 / GÖREV 2+3 — SERBEST METİN. Sabit 6-başlık şablonu KALDIRILDI (model, boş şablonu
     # doldurmak için "Belirgin bir görüş ayrılığı yok." klişesini 5 kez tekrarlıyordu). Artık:
     # yalnızca gerçekten SÖYLEYECEK bir şeyi varsa yazar; yoksa "GÖRÜŞ YOK" der ve bölüm hiç basılmaz.
@@ -5997,7 +6026,7 @@ Görevin: birincil değerlendirmeyi transkript (ve varsa CV) karşısında BAĞI
 1. Kanıt gerçekten ADAYA mı ait (mülakatçının sözü aday kanıtı gibi kullanılmış olabilir mi)?
 2. Kanıttaki [mm:ss] zaman damgası doğru mu?
 3. Alıntı/parafraz transkriptle GERÇEKTEN örtüşüyor mu (uydurma/başka ana ait olabilir mi)?
-4. CV'deki bir bilgi, mülakatta SÖYLENMİŞ gibi (interview evidence) sunulmuş mu?
+4. CV'deki bir bilgi, mülakatta SÖYLENMİŞ gibi (interview evidence) sunulmuş mu? (NOT: aşağıdaki BAŞVURU FORMU BEYANI ayrı ve KENDİ BAŞINA geçerli bir kaynaktır — bir bilginin yalnız CV'de/transkriptte değil BAŞVURU FORMUNDA geçmesi TEK BAŞINA kaynaksızlık/uydurma SAYILMAZ.)
 5. Kanıt, atandığı kriteri GERÇEKTEN destekliyor mu (başka bir yetkinliğe mi ait)?
 6. Kanıtın olumlu/olumsuz yönü doğru mu (bir sınırlılık/eksiklik olumluya çevrilmiş olabilir mi)?
 7. Puan, kanıt/gerekçeyle TUTARLI mı?
@@ -6024,6 +6053,9 @@ Mülakatın TAMAMINA (akış baskısı olmadan, dışarıdan) bakarak adayın ö
 KRITER_PUAN: <KİMLİK, ör. P1 veya K3 — AŞAĞIDAKİ LİSTEDEN, kriter ADINI YAZMA> = <senin puanın>/<maksimum>
 KRITER_GEREKCE: <AYNI KİMLİK> = <2-3 cümle gerekçe, en az bir [dk] damgalı somut kanıt>
 (YALNIZCA birincil değerlendirmeden GERÇEKTEN FARKLI puan verdiğin kriterler için — aynı puanı veriyorsan o kriter için HİÇBİR satır yazma, atla; rapordaki puanları KOPYALAMA, transkripte göre KENDİ değerlendirmeni yap. KRITER_PUAN yazıp KRITER_GEREKCE YAZMAMAK KABUL EDİLMEZ — her KRITER_PUAN satırının hemen altında AYNI kimlikle bir KRITER_GEREKCE satırı OLMALI.)
+YAPISAL TUTARLILIK ZORUNLULUĞU (KESİN — SERBEST METİN/SEMANTİK TUTARLILIK bölümleri burasıyla ÇELİŞEMEZ): Yukarıdaki SERBEST METİN'de veya aşağıdaki SEMANTİK TUTARLILIK bölümünde bir kriterin puanına AÇIKÇA itiraz ediyorsan — "bu puan fazla yüksek/düşük", "bu kanıt bu kritere ait değil ve değerlendirmeyi etkiliyor" gibi puanı GERÇEKTEN etkileyen bir tespit yapıyorsan — bunu YALNIZ yorum olarak bırakman KABUL EDİLMEZ: o kriter için BURADA kendi KRITER_PUAN/KRITER_GEREKCE'ni de ZORUNLU olarak üretmelisin. "İtiraz var ama sayı yok" durumu KABUL EDİLMEZ. Kanıt yanlış kritere atanmış diyorsan: o kriter için GERÇEKTEN GEÇERLİ bir kanıt transkriptte var mı diye ayrıca bak — VARSA o kanıtla kendi puanını üret; net biçimde YOKSA aşağıdaki TEK KURAL'a göre karar ver (YENİ bir değerlendirilebilirlik kategorisi UYDURMA, bu dört durumun DIŞINA ÇIKMA):
+{CRITERION_SCORING_RULE}
+Yalnızca puana AÇIKÇA itiraz ETMEDEN küçük bir üslup/vurgu gözlemi paylaşıyorsan (puanı GERÇEKTEN değiştirmeni gerektirmeyen bir gözlem) bunu yalnız SEMANTIC_ISSUE'de veya serbest metinde bırakabilirsin — KRITER_PUAN ZORUNLU DEĞİL. Aynı puana KATILIYORSAN mevcut davranış aynen geçerli: KRITER_PUAN yazma, atla.
 GUVEN_DUZEYI: <yüksek|orta|düşük> — <kendi değerlendirmene duyduğun güven düşükse KISA neden; yüksekse yalnızca 'yüksek' yaz> (bu satır ADAYIN değil SENİN kendi değerlendirmene duyduğun güvendir — rapora BASILMAZ, yalnız yönetici kaydı için)
 
 === SEMANTİK TUTARLILIK ===
@@ -6035,6 +6067,7 @@ Bu senin işin DEĞİL: adayın söyleminin mesleki/regülasyonel açıdan doğr
 ÇIKTI EKONOMİSİ (KESİN): PASS olan (belirgin bir sorun görmediğin) kriterleri TEK TEK YAZMA — hiçbir satır üretme. YALNIZ belirgin bir semantik sorun gördüğün kriterler için, aşağıdaki TEK SATIR formatında yaz:
 SEMANTIC_ISSUE: <KİMLİK, ör. P1 veya K3> = <çok kısa (1 cümle) neden>
 Hiçbir kriterde sorun görmüyorsan bu bölüme HİÇBİR SATIR yazma (boş bırak) — "GÖRÜŞ YOK" gibi bir cümle de YAZMA, sadece atla.
+ÖNEMLİ: Burada bir SEMANTIC_ISSUE yazman, yukarıdaki "=== KRİTER PUANLARI ===" bölümündeki YAPISAL TUTARLILIK ZORUNLULUĞUNU karşılamış SAYILMAZ — tespit ettiğin sorun puanı GERÇEKTEN etkiliyorsa (yalnız üslup/vurgu değilse) o kriter için AYRICA KRITER_PUAN/KRITER_GEREKCE de yazmalısın.
 
 {_reviewer_criteria_block(position_criteria)}
 
@@ -6048,7 +6081,10 @@ Hiçbir kriterde sorun görmüyorsan bu bölüme HİÇBİR SATIR yazma (boş bı
 {modality_block or 'Yok'}
 
 === CV/KAYNAK METNİ (varsa — 4. madde: CV bilgisi mülakat kanıtı gibi kullanılmış mı kontrolü için) ===
-{cv_excerpt or "(CV metni yok veya çok kısa.)"}"""
+{cv_excerpt or "(CV metni yok veya çok kısa.)"}
+
+=== BAŞVURU FORMU BEYANI ===
+{basvuru_formu_block}"""
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
         response = client.messages.create(
@@ -11156,7 +11192,9 @@ def run_final_report_quality_gate(candidate_id: int, level: int, position_criter
             "reviewer_score_position, reviewer_score_profile, final_score_position, final_score_profile "
             "FROM interviews WHERE candidate_id=? AND level=?",
             (candidate_id, level)).fetchone()
-        candidate = db.execute("SELECT position, cv_text FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+        candidate = db.execute(
+            "SELECT position, cv_text, email, education, university, department, experience_years "
+            "FROM candidates WHERE id=?", (candidate_id,)).fetchone()
     finally:
         db.close()
     if not interview:
@@ -11194,6 +11232,10 @@ def run_final_report_quality_gate(candidate_id: int, level: int, position_criter
 
     pos_criteria = position_criteria or []
     cv_excerpt = (candidate["cv_text"] or "").strip()[:1800] if (candidate and candidate["cv_text"]) else ""
+    # İŞ EMRİ — L3 İKİNCİ DEĞERLENDİRME TUTARLILIĞI + SOURCE VISIBILITY / madde 4 — QG de (reviewer
+    # ile AYNI TEK yerden üretilen blok üzerinden) başvuru formu alanlarını görür; bu bilginin CV/
+    # transkriptte AYRICA geçmemesi TEK BAŞINA "kaynaksız" saymasına yol açmaz.
+    basvuru_formu_block = _basvuru_formu_beyani_block(candidate)
     reviewer_block = _build_quality_gate_reviewer_findings_block(reviewer_findings or {}, pos_criteria, PROFILE_CRITERIA)
     section_list_text = "\n".join(f"- {k}: \"{v}\"" for k, v in _QUALITY_GATE_SECTION_HEADS.items())
     # İŞ EMRİ — L3 FINAL QUALITY GATE / madde 3+7 — KÖK NEDEN (bu turda bulundu): bu blok yalnız
@@ -11230,6 +11272,8 @@ GÖREVİN: aşağıdaki türde CİDDİ (BLOCKING), doğrulanabilir hataları tes
 - önemli, transkriptte KARŞILIĞI olmayan bir olgusal iddia
 - CV/kaynak metinde OLMAYAN önemli bir CV iddiası
 
+NOT — KAYNAK AYRIMI (KESİN): Aşağıda TRANSKRİPT, CV/KAYNAK METNİ ve BAŞVURU FORMU BEYANI AYRI AYRI verilmiştir. BAŞVURU FORMU BEYANI ne CV ne transkript — adayın/adminin kayıt formuna girdiği, KENDİ BAŞINA geçerli bir kaynaktır. Bir bilginin yalnız CV'de veya yalnız transkriptte GEÇMEMESİ, o bilgi BAŞVURU FORMUNDA VARSA, TEK BAŞINA "kaynaksız/uydurma" SAYILMAZ — yalnız bir kaynağın GERÇEKTEN ÇELİŞTİĞİ (ör. formda "20 yıl" derken transkriptte aday açıkça "3 yıl" dediyse) durumlar BLOCKING'tir.
+
 Stil tercihi, farklı yorumlanabilecek bir değerlendirme, küçük tekrar BLOCKING DEĞİLDİR — bunlar için PATCH ÖNERME.
 
 SADECE aşağıdaki SECTION_KEY'lerden birini, YALNIZ bu türde bir hata GERÇEKTEN varsa düzelt:
@@ -11260,6 +11304,9 @@ PATCH: <AYNI SECTION_KEY> = <o bölümün TAMAMININ yeni, düzeltilmiş hali>
 
 === CV/KAYNAK METNİ (varsa) ===
 {cv_excerpt or "(CV metni yok veya çok kısa — bu durumda CV Özeti hakkında 'kaynaksız/uydurma' diye KESİN hüküm VERME, yalnız AÇIKÇA ve KESİNLİKLE çelişen bir şey varsa işaretle.)"}
+
+=== BAŞVURU FORMU BEYANI ===
+{basvuru_formu_block}
 
 === TRANSKRİPT{" (KISALTILMIŞ)" if transcript_partial else ""} ===
 {transcript_text}
@@ -12957,12 +13004,11 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
         has_second = r_pos is not None or r_prof is not None
         if has_second:
             rows.append(["İkinci", _c(r_pos), _c(r_prof)])
-            # İŞ EMRİ — NİHAİ RAPOR TUTARLILIĞI / madde 3: rapor metninde ("Öneri Gerekçesi" bölümü,
-            # render_oneri_gerekcesi) zaten "Nihai Pozisyon/Profil Puanı" AÇIKÇA yazıyor — bu tablo
-            # o satırı GÖSTERMİYORDU (Birinci/İkinci/Genel Puan vardı, Nihai yoktu), aynı PDF içinde
-            # metin ile tablo arasında görünür bir boşluk/uyumsuzluk oluşturuyordu. DB'nin canonical
-            # final_score_position/final_score_profile alanları AYNEN (yeniden hesaplanmadan) eklendi.
-            rows.append(["Nihai", _c(interview.get("final_score_position")), _c(interview.get("final_score_profile"))])
+        # İŞ EMRİ — L3 İKİNCİ DEĞERLENDİRME TUTARLILIĞI + SOURCE VISIBILITY / madde 6: PDF'in
+        # yapısal "Değerlendirme Puanları" tablosundan görsel "Nihai" satırı KALDIRILDI (yalnız bu
+        # tablo satırı — final_score_position/final_score_profile DB alanları, hesaplanmaları ve
+        # rapor METNİNDEKİ ("Öneri Gerekçesi" → "Nihai Pozisyon/Profil Puanı") canonical ifadeleri
+        # AYNEN KALIYOR, DEĞİŞMEDİ). Tablo artık yalnız Birinci / İkinci / Genel Puan gösterir.
         genel_idx = len(rows)
         rows.append(["Genel Puan", (f"{score}/100" if score is not None else ""), ""])
         st = Table([[Paragraph(ptxt(c), styles["BodyWrap"]) for c in row] for row in rows],

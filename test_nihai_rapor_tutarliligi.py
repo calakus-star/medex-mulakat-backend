@@ -309,12 +309,17 @@ try:
             break
     check("E) DB->PDF: 'Değerlendirme Puanları' tablosu üretildi", score_table is not None)
     if score_table:
+        # İŞ EMRİ — L3 İKİNCİ DEĞERLENDİRME TUTARLILIĞI + SOURCE VISIBILITY / madde 6: PDF'in
+        # yapısal tablosundan görsel "Nihai" satırı KALDIRILDI (yalnız bu satır — final_score_*
+        # DB alanları ve rapor METNİNDEKİ "Nihai Pozisyon/Profil Puanı" ifadesi DEĞİŞMEDİ, bkz.
+        # yukarıdaki "DB->Report" kontrolleri). Tablo artık yalnız Birinci/İkinci/Genel Puan.
         nihai_row = next((r for r in score_table if r[0] == "Nihai"), None)
+        birinci_row = next((r for r in score_table if r[0] == "Birinci"), None)
+        ikinci_row = next((r for r in score_table if r[0] == "İkinci"), None)
         genel_row = next((r for r in score_table if r[0] == "Genel Puan"), None)
-        check("E) DB->PDF: 'Nihai' satırı VAR (rapor metniyle aynı kavram, tabloda da görünür)", nihai_row is not None)
-        if nihai_row:
-            check("E) DB->PDF: Nihai Pozisyon PDF'de DB ile AYNI (72/100)", nihai_row[1] == f"{DB_FINAL_POS}/100")
-            check("E) DB->PDF: Nihai Profil PDF'de DB ile AYNI (63/100)", nihai_row[2] == f"{DB_FINAL_PROF}/100")
+        check("E) DB->PDF: 'Nihai' satırı ARTIK YOK (bu iş emriyle kaldırıldı)", nihai_row is None)
+        check("E) DB->PDF: 'Birinci' satırı hâlâ var", birinci_row is not None)
+        check("E) DB->PDF: 'İkinci' satırı hâlâ var", ikinci_row is not None)
         check("E) DB->PDF: Genel Puan PDF'de DB ile AYNI (69/100)", genel_row is not None and genel_row[1] == f"{DB_SCORE}/100")
 
     # ============================================================
