@@ -4054,7 +4054,7 @@ def admin_update_candidate(candidate_id: int, data: CandidateUpdate, payload=Dep
     db = None
     try:
         db = get_db()
-        candidate = db.execute("SELECT id, level FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+        candidate = db.execute("SELECT id, level, person_id FROM candidates WHERE id=?", (candidate_id,)).fetchone()
         if not candidate:
             raise HTTPException(status_code=404, detail="Aday bulunamadı")
 
@@ -4079,6 +4079,26 @@ def admin_update_candidate(candidate_id: int, data: CandidateUpdate, payload=Dep
         if fields:
             set_clause = ", ".join(f"{k}=?" for k in fields.keys())
             db.execute(f"UPDATE candidates SET {set_clause} WHERE id=?", list(fields.values()) + [candidate_id])
+
+        # İŞ EMRİ — KİŞİ GEÇMİŞİ / DÜZENLE SENKRONİZASYONU: candidate'ın Ad Soyad/E-posta/Telefonu
+        # değiştiğinde, bağlı persons ana kaydı (varsa) AYNI candidate_id/person_id İLİŞKİSİ
+        # üzerinden senkronize edilir — isim/e-posta metniyle eşleştirme YAPILMAZ, yeni person
+        # OLUŞTURULMAZ. Kök neden: bu uç nokta yalnızca candidates satırını güncelliyordu;
+        # PersonDetail.js'in üst başlığı/kişi kartı ise persons.full_name/email/phone'dan (ayrı bir
+        # kopya) okunuyor — ikisi arasında hiçbir senkronizasyon yoktu.
+        person_id = candidate["person_id"] if "person_id" in candidate.keys() else None
+        if person_id:
+            person_fields = {}
+            if "name" in fields:
+                person_fields["full_name"] = fields["name"]
+            if "email" in fields:
+                person_fields["email"] = fields["email"]
+            if "phone" in fields:
+                person_fields["phone"] = fields["phone"]
+            if person_fields:
+                person_set_clause = ", ".join(f"{k}=?" for k in person_fields.keys())
+                db.execute(f"UPDATE persons SET {person_set_clause} WHERE id=?",
+                          list(person_fields.values()) + [person_id])
 
         if level_changed:
             # Aday farklı bir seviyeye taşındı: bu seviye için yeni bir mülakat denemesi
