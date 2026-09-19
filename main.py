@@ -2414,7 +2414,7 @@ def derive_attempt_status(a: dict) -> dict:
 # build_l2_realtime_instructions (L2/L3 ses) bu bloğu birebir kullanır.
 INTERVIEWER_REASK_RULES = """SORU TEKRARI VE CEVAPSIZLIK — KESİN KURALLAR:
 - Bir kriteri/konuyu hedefleyen soru EN FAZLA 2 kez sorulur. 2. deneme AYNI CÜMLE DEĞİL; kısalt, sadeleştir, somut bir örnekle yeniden ifade et.
-- 2. deneme de cevapsız/kaçamak kalırsa "Bunu geçelim." de, o kriteri BIRAK ve yeni kritere geç. O kriter raporda "değerlendirilemedi (soruldu, cevap alınamadı)" işaretlenir — 3. kez ISRAR ETME.
+- 2. deneme de cevapsız/kaçamak kalırsa "Bunu geçelim." de, o kriteri BIRAK ve yeni kritere geç — 3. kez ISRAR ETME. Bu kriter "sorulmuş ama yeterli cevap alınamamış" sayılır; bu "değerlendirilemedi" İLE AYNI ŞEY DEĞİLDİR (kriter hiç sorulmadıysa "değerlendirilemedi" olur) — raporlama aşamasında TEK KURAL'a göre otomatik taban puanla (tavanın %25'i) puanlanır, sen puan/etiket hesaplama.
 - Aday "anlamadım / tekrar eder misiniz / pardon?" derse soruyu ASLA aynen tekrarlama: kısalt ve basitleştir, gerekirse tek bir örnek ver.
 - Art arda 2 tur adayın cevabı BOŞ veya anlamsız/halüsinasyon (ör. "thank you", "bye", kopuk İngilizce dolgu) gelirse: yeni soruya GEÇME, önce teyit sorusu sor — "Beni duyabiliyor musunuz? Sesiniz bana net gelmiyor." Cevap gelince kaldığın yerden devam et."""
 
@@ -2453,7 +2453,7 @@ Kriterler: {criteria_compact}. CV özeti: {cv_compact}. Özel not: {note_compact
 
 {INTERVIEWER_REASK_RULES}
 
-KRİTER KAPSAMA: Akış içinde mekanik kapı yok. Ama end_interview çağırmadan ÖNCE kontrol et: hiç dokunulmamış kriter varsa en az bir soru sor. Yine de sorulamayan kalırsa raporda "değerlendirilmedi" işaretlenir — uydurma değerlendirme yapma.
+KRİTER KAPSAMA (ÖNEMLİ — İŞ EMRİ): Amaç, tanımlı kriterlerin TAMAMININ mülakat sırasında gerçekten ölçülme fırsatı bulmasıdır — bu opsiyonel bir "varsa kontrol et" değil, mülakatın asıl işlevidir. Akış içinde mekanik kapı yok, ama end_interview çağırmadan ÖNCE her kriteri tek tek gözden geçir: hiç dokunulmamış olan varsa en az bir soru sor. Adayın verdiği TEK bir cevap birden fazla kriter için geçerli kanıt oluşturabilir — böyle bir kriteri tekrar sormaya ZORUNLU değilsin, gereksiz tekrar soru üretme. Yine de mülakat sonunda gerçekten hiç sorulamayan bir kriter kalırsa raporda "değerlendirilmedi" işaretlenir — uydurma değerlendirme yapma.
 
 İNSAN GİBİ, DOĞAL:
 - Her turda tek, net soru. Uzun özet, gereksiz övgü, konu anlatımı, danışmanlık yapma — aday daha çok konuşsun.
@@ -2506,22 +2506,38 @@ def build_criteria_text(criteria: list) -> str:
         lines.append(f"- {c['name']} ({c['weight']} puan): {c.get('desc', '')}")
     return "\n".join(lines)
 
-# Kriter hücresi: sayı  |  sistem-kaynaklı eksik (PAYDA DIŞI)  |  yalnız açık ret/alakasız cevapta 0 (PAYDADA)
+# Kriter hücresi: sayı  |  sistem-kaynaklı eksik (PAYDA DIŞI)  |  yeterli cevap alınamadı (TABAN PUAN,
+# PAYDADA)  |  yalnız açık ret/alakasız cevapta 0 (PAYDADA)
 _CRIT_CELL_HINT = ("__/{w}  |  VEYA  |  Değerlendirilemedi (sistem) — <gerekçe>  "
+                   "|  VEYA  |  Yetersiz Cevap (taban puan) — <gerekçe>  "
                    "|  VEYA  |  0/{w} — aday açıkça reddetti / tamamen alakasız cevap verdi")
 
-# TEK KURAL (eksik veri) — hem PUAN 1 hem PUAN 2 için; prompt'larda birebir kullanılır.
+# İŞ EMRİ — KRİTER KAPSAMA + YETERSİZ CEVAP PUANLAMA: TEK KURAL (eksik veri) — hem PUAN 1 hem PUAN 2
+# için; prompt'larda birebir kullanılır. ÜÇ AYRI DURUM birbirine KARIŞTIRILMAZ: (1) kriter HİÇ
+# sorulmadı → Değerlendirilemedi (payda dışı); (2) kriter sorulmuş/yeterli fırsat verilmiş ama
+# değerlendirilebilir cevap yok → TABAN PUAN (payda içinde, sistem otomatik %25 uygular —
+# "bilmiyorum"/"deneyimim yok"/boş/anlamadım/kısa-anlamsız cevap DA BU KATEGORİDİR, Değerlendirilemedi
+# DEĞİLDİR); (3) değerlendirilebilir (zayıf da olsa) bir cevap varsa normal puanlama devam eder.
 CRITERION_SCORING_RULE = (
-    "KRİTER PUANLAMA — EKSİK VERİ (KESİN, TEK KURAL):\n"
-    "- Kriter hiç sorulmadıysa VEYA sorulan turlarda adayın cevabı boş / '[SİSTEM: … halüsinasyon]' işaretli / "
-    "'anlamadım / tekrar eder misiniz' ise: **Değerlendirilemedi (sistem) — <gerekçe>**. Bu kriter PUANA ve "
-    "PAYDAYA GİRMEZ; adayın kusuru değildir.\n"
-    "- Kriter DÜZGÜN soruldu (tekrar/karışıklık/teknik sorun yok) ve aday cevap verdi ama cevap yüzeysel/eksik ise: "
-    "**DÜŞÜK PUAN ver (kanıt düzeyine göre), 0 DEĞİL.**\n"
-    "- **0/<tavan>** yalnızca şu iki durumda: aday cevap vermeyi AÇIKÇA reddetti VEYA tamamen alakasız/konu dışı "
-    "cevap verdi. Bu durumda 0 paydaya girer.\n"
+    "KRİTER PUANLAMA — EKSİK VERİ (KESİN, TEK KURAL, ÜÇ AYRI DURUM):\n"
+    "1) Kriter mülakatta HİÇ SORULMADIYSA (transkriptin başka bir yerinde de o kriteri değerlendirmeye "
+    "yetecek anlamlı bir veri YOKSA): **Değerlendirilemedi (sistem) — <gerekçe>**. Bu kriter PUANA ve "
+    "PAYDAYA GİRMEZ.\n"
+    "2) Kriter DÜZGÜN SORULDUYSA (gerekirse en fazla 2. denemeyle kısaltılmış/basitleştirilmiş biçimde "
+    "yeniden de soruldu) ama aday cevap VERMEDİ, 'bilmiyorum' / 'bu konuda deneyimim/tecrübem yok' dedi, "
+    "cevabı boş / '[SİSTEM: … halüsinasyon]' işaretli kaldı, veya 'anlamadım / tekrar eder misiniz' gibi "
+    "bir anlamlı cevap oluşmadı: BU 'DEĞERLENDİRİLEMEDİ' DEĞİLDİR — kriter SORULMUŞ ve DEĞERLENDİRİLMİŞ "
+    "sayılır. **Yetersiz Cevap (taban puan) — <gerekçe>** yaz; bu kriter kendi tavanının %25'i ile PUANA "
+    "ve PAYDAYA GİRER — kesin rakamı SEN hesaplama/yazma, sistem otomatik uygular.\n"
+    "3) Kriter DÜZGÜN soruldu ve aday DEĞERLENDİRİLEBİLİR bir cevap verdi ama cevap yüzeysel/kısa/eksik "
+    "kaldıysa (2. maddedeki 'anlamlı cevap YOK' durumuyla KARIŞTIRMA — burada gerçek bir cevap İÇERİĞİ "
+    "VAR): **DÜŞÜK PUAN ver (kanıt düzeyine göre, SCORING_RUBRIC'e göre)** — otomatik %25'e veya 0'a "
+    "ZORLAMA, cevabın kendi kalitesine göre puanla.\n"
+    "- **0/<tavan>** yalnızca şu iki durumda: aday cevap vermeyi AÇIKÇA reddetti VEYA tamamen alakasız/konu "
+    "dışı cevap verdi. Bu durumda 0 paydaya girer (2. maddedeki taban puan İLE KARIŞTIRMA — bu daha "
+    "adversarial/dar bir durumdur).\n"
     "- Halüsinasyon olarak işaretlenmiş turlar ve mülakatçının aynı soruyu tekrarladığı turlar HİÇBİR kriterin "
-    "puanını düşürme gerekçesi OLAMAZ — bunlar sistem kaynaklı eksiktir.\n"
+    "puanını (2. maddedeki taban puandan AŞAĞI) düşürme gerekçesi OLAMAZ.\n"
     "- Bu kural POZİSYON (PUAN 1) ve PROFİL (PUAN 2) tablolarının İKİSİ için de geçerlidir."
 )
 
@@ -3104,7 +3120,7 @@ DERİNLİK ({lvl_cfg["depth_label"]}): ~{lvl_cfg["minutes"]} dakika ve en az {lv
 {INTERVIEWER_REASK_RULES}
 - Yukarıdaki "en fazla 2 kez" kuralı gereği bir kriteri YENİDEN sorduğun her mesajın EN BAŞINA `[YENIDEN]` etiketini koy (adaya gösterilmez, sistem sayar).
 
-KRİTER KAPSAMA: Akış sırasında mekanik kapı YOK — sırayı sen belirlersin. Ancak mülakatı BİTİRMEDEN ÖNCE kontrol et: hiç dokunulmamış bir kriter varsa en az bir soru sor. Bu kontrol kapanış anındadır, akışı bölmez. Yine de sorulamayan bir kriter kalırsa raporda "değerlendirilmedi" olarak işaretlenir — uydurma değerlendirme yapma.
+KRİTER KAPSAMA (ÖNEMLİ — İŞ EMRİ): Amaç, tanımlı kriterlerin TAMAMININ mülakat sırasında gerçekten ölçülme fırsatı bulmasıdır — bu opsiyonel bir "varsa kontrol et" değil, mülakatın asıl işlevidir. Akış sırasında mekanik kapı YOK — sırayı sen belirlersin. Ancak mülakatı BİTİRMEDEN ÖNCE her kriteri tek tek gözden geçir: hiç dokunulmamış bir kriter varsa en az bir soru sor. Bu kontrol kapanış anındadır, akışı bölmez. Adayın verdiği TEK bir cevap birden fazla kriter için geçerli kanıt oluşturabilir — böyle bir kriteri tekrar sormaya ZORUNLU değilsin, gereksiz tekrar soru üretme. Yine de sorulamayan bir kriter kalırsa raporda "değerlendirilmedi" olarak işaretlenir — uydurma değerlendirme yapma.
 
 İNSAN GİBİ:
 - Dinlediğini belli et, cevaba tepki ver, adayın söylediğine bağlanarak devam et — kopuk soru dizisi sorma. Doğal geçişler kur.
@@ -10290,7 +10306,11 @@ _SCORE_FIXED_MARK = "(ham puan:"
 # Aday cevabının GEÇERLİ (özlü) sayılıp sayılmadığı: boş / halüsinasyon / "anlamadım-tekrar" değilse geçerli.
 _NONANSWER_RE = re.compile(
     r"^\s*(anlamad|anlayamad|tekrar\s+ed|tekrar\s+eder\s*mis|pardon|duyamad|efendim|bilmiyorum|"
-    r"fikrim\s+yok|geçelim|geç(ebilir|ebilir\s*miy)|bir\s+sonrakine|hat[ıi]rlam[ıi]yorum)", re.IGNORECASE)
+    r"fikrim\s+yok|geçelim|geç(ebilir|ebilir\s*miy)|bir\s+sonrakine|hat[ıi]rlam[ıi]yorum|"
+    # İŞ EMRİ — KRİTER KAPSAMA + YETERSİZ CEVAP PUANLAMA: "bu konuda deneyimim/tecrübem/bilgim yok"
+    # türü beyanlar da değerlendirilebilir bir kanıt İÇERMEZ (bilmiyorum ile AYNI sınıf) — normal
+    # puanlama yerine taban puan kuralına girsin diye burada da yakalanır.
+    r"(bu\s+konuda\s+)?(deneyim|tecr[üu]be|bilgi)im\s+(hiç\s+)?yok)", re.IGNORECASE)
 
 def _is_substantive_answer(txt: str) -> bool:
     t = (txt or "").strip()
@@ -10301,6 +10321,18 @@ def _is_substantive_answer(txt: str) -> bool:
     if _NONANSWER_RE.match(t):
         return False
     return True
+
+# İŞ EMRİ — KRİTER KAPSAMA + YETERSİZ CEVAP PUANLAMA / madde 3 — TEK canonical taban puan hesabı:
+# kriter yeterince sorgulanmış (ve INTERVIEWER_REASK_RULES'a göre uygun takip fırsatı verilmiş)
+# olmasına rağmen değerlendirilebilir bir aday cevabı alınamıyorsa PUAN = tavanın %25'i. "Değerlen-
+# dirilemedi" (payda dışı) DEĞİLDİR — kriter DEĞERLENDİRİLMİŞ sayılır, payda İÇİNDE kalır. Kesirli
+# sonuç sistemin TEK canonical yuvarlama kuralından (_round_half_up, ROUND_HALF_UP) geçer — burada
+# yeni/bağımsız bir yuvarlama YOK.
+def _insufficient_answer_floor_score(cap: int) -> int:
+    cap = _safe_int(cap)
+    if cap <= 0:
+        return 0
+    return max(0, min(cap, _round_half_up(cap * 0.25)))
 
 # Aday cevabının AÇIK RET / TAMAMEN ALAKASIZ olduğu — 0 puanın verilebileceği DAR koşul.
 _OPEN_REFUSAL_RE = re.compile(
@@ -10314,7 +10346,10 @@ def _criterion_ask_status(cname: str, criteria_coverage, transcript: str, repeat
        'valid_ask'            — düzgün soruldu VE en az bir GEÇERLİ aday cevabı alındı
        'asked_no_valid_answer'— soruldu ama tüm cevaplar boş/halüsinasyon/'anlamadım' YA DA aynı soru tekrarlandı
        'not_asked'            — mülakatta sorulduğuna dair kanıt yok
-    'asked_no_valid_answer' ve 'not_asked' → SİSTEM kaynaklı eksik (PAYDA DIŞI)."""
+    İŞ EMRİ — KRİTER KAPSAMA + YETERSİZ CEVAP PUANLAMA: yalnız 'not_asked' → SİSTEM kaynaklı eksik
+    (PAYDA DIŞI, 'Değerlendirilemedi'). 'asked_no_valid_answer' artık 'Değerlendirilemedi' DEĞİL —
+    kriter SORULMUŞ sayılır, TABAN PUAN (tavanın %25'i, bkz. _insufficient_answer_floor_score) ile
+    PAYDA İÇİNDE puanlanır (çağıranlar: recompute_and_fix_score, recompute_profile_section)."""
     # detect_repeated_questions bu kriterde ısrar tespit ettiyse: sistem kaynaklı (mülakatçı soruyu yönetememiş)
     if repeated_unanswered:
         for rn in repeated_unanswered:
@@ -11663,9 +11698,15 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
         mm = _mm_frac or _mm_lead
 
         if not mm:
-            # ── SAYI YOK → YENİ TEK KURAL: varsayılan SİSTEM kaynaklı (PAYDA DIŞI 'Değerlendirilemedi
-            #    (sistem)'). 0/cap — Yetersiz (aday) YALNIZCA çok dar koşulda: kriter DÜZGÜN soruldu
-            #    (geçerli aday cevabı alınmış) VE hücre açık ret / tamamen alakasız cevap diyor.
+            # ── SAYI YOK → İŞ EMRİ — KRİTER KAPSAMA + YETERSİZ CEVAP PUANLAMA: ÜÇ DURUM.
+            #    (a) HİÇ SORULMADI (transkriptte/coverage'da kanıt yok) → SİSTEM kaynaklı, PAYDA
+            #        DIŞI, 'Değerlendirilemedi (sistem)'.
+            #    (b) AÇIK RET / tamamen alakasız cevap (dar koşul, DEĞİŞMEDİ) → 0/cap, PAYDA İÇİNDE.
+            #    (c) SORULDU (yeterli fırsat/takip verilmiş — bkz. INTERVIEWER_REASK_RULES) ama
+            #        değerlendirilebilir bir cevap alınamadı (boş/'bilmiyorum'/anlamadım/mülakatçı
+            #        ısrarı, VEYA valid_ask olduğu halde model puan yazmamış) → TABAN PUAN (tavanın
+            #        %25'i, _insufficient_answer_floor_score), PAYDA İÇİNDE — 'Değerlendirilemedi'
+            #        DEĞİL, adayın kusuru da DEĞİL; sorgulama GERÇEKTEN yapıldı.
             gm = re.search(r"[—:–\-]\s*(.+)$", re.sub(r"\((?:sorulmad[ıi]|soruldu[^)]*|sistem)\)", "", puan_cell, flags=re.IGNORECASE))
             reason = (gm.group(1).strip() if gm else "")
             status = _criterion_ask_status(cname, criteria_coverage, transcript, _repeated_unanswered)
@@ -11673,19 +11714,16 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
             _found = best is not None and best_s >= 0.34
 
             if _found and status == "valid_ask" and refusal:
-                # (b) ADAY kaynaklı 0 — DAR KOŞUL
+                # (b) ADAY kaynaklı 0 — DAR KOŞUL, DEĞİŞMEDİ
                 denom_cap += cap
                 _gk = reason or "aday cevap vermeyi reddetti / tamamen alakasız cevap verdi"
                 cand_missing.append({"kriter": cname, "gerekce": _gk})
                 li = best["line_idx"]
                 lines[li] = lines[li].replace(f"| {puan_cell} |", f"| 0/{cap} — Yetersiz (aday): {_gk} |", 1)
-            else:
-                # (a) SİSTEM kaynaklı — PAYDA DIŞI
-                _sysreason = {
-                    "asked_no_valid_answer": "sorulan turlarda geçerli aday cevabı alınamadı (boş / halüsinasyon / 'anlamadım' / mülakatçı ısrarı)",
-                    "not_asked": "bu kriter mülakatta sorulmadı",
-                }.get(status, reason or "yeterli veri oluşmadı")
-                if _found and refusal and status != "valid_ask":
+            elif status == "not_asked":
+                # (a) SİSTEM kaynaklı — PAYDA DIŞI, DEĞİŞMEDİ
+                _sysreason = "bu kriter mülakatta sorulmadı"
+                if _found and refusal:
                     warnings.append(f"'{cname}' hücrede 'ret' geçiyor ama geçerli aday cevabı yok → sistem kaynaklı eksik sayıldı (payda dışı).")
                 if not _found:
                     warnings.append(f"'{cname}' kriteri rapor tablosunda bulunamadı — sistem kaynaklı eksik (payda dışı).")
@@ -11693,6 +11731,18 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
                 if _found and puan_cell:
                     li = best["line_idx"]
                     lines[li] = lines[li].replace(f"| {puan_cell} |", f"| Değerlendirilemedi (sistem) — {_sysreason} |", 1)
+            else:
+                # (c) YENİ — TABAN PUAN (%25), PAYDA İÇİNDE
+                floor_awarded = _insufficient_answer_floor_score(cap)
+                _gk = reason or "kriter sorulmuş, sorgulama/takip fırsatına rağmen değerlendirilebilir bir aday cevabı alınamadı"
+                denom_cap += cap
+                awarded_sum += floor_awarded
+                cand_missing.append({"kriter": cname, "gerekce": _gk, "puan_turu": "taban_puan_25"})
+                if not _found:
+                    warnings.append(f"'{cname}' kriteri rapor tablosunda bulunamadı ama sorulduğuna dair kanıt var — taban puan ({floor_awarded}/{cap}) uygulandı, payda içinde sayıldı.")
+                elif puan_cell:
+                    li = best["line_idx"]
+                    lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} — Taban puan (sorgulandı, yeterli cevap alınamadı): {_gk} |", 1)
             continue
 
         awarded = _safe_int(mm.group(1))
@@ -11702,17 +11752,28 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
             awarded = cap
         elif written_cap is not None and written_cap != cap:
             warnings.append(f"'{cname}' payda {written_cap} yazılmış, gerçek tavan {cap} → düzeltildi.")
-        # YENİ KURAL — modelin verdiği 0: geçerli aday cevabı YOKSA (halüsinasyon/tekrar/hiç sorulmadı)
-        # bu 0 SİSTEM kaynaklı eksiktir, paydaya girmez. Geçerli cevap varsa modelin 0'ı korunur.
+        # YENİ KURAL — modelin verdiği 0: hiç sorulmadıysa SİSTEM kaynaklı eksiktir (paydaya
+        # girmez). SORULDU ama geçerli cevap yoksa İŞ EMRİ — KRİTER KAPSAMA + YETERSİZ CEVAP
+        # PUANLAMA gereği artık 'Değerlendirilemedi' DEĞİL — TABAN PUAN (%25, payda İÇİNDE).
+        # Geçerli cevap varsa (valid_ask) modelin 0'ı olduğu gibi korunur (aşağıya düşer).
         if awarded == 0:
             _st0 = _criterion_ask_status(cname, criteria_coverage, transcript, _repeated_unanswered)
-            if _st0 != "valid_ask":
-                _sr0 = {"asked_no_valid_answer": "sorulan turlarda geçerli aday cevabı alınamadı",
-                        "not_asked": "bu kriter mülakatta sorulmadı"}.get(_st0, "yeterli veri oluşmadı")
-                warnings.append(f"'{cname}' modelce 0/{cap} verilmiş ama geçerli aday cevabı yok → 'Değerlendirilemedi (sistem)', payda dışı.")
+            if _st0 == "not_asked":
+                _sr0 = "bu kriter mülakatta sorulmadı"
+                warnings.append(f"'{cname}' modelce 0/{cap} verilmiş ama bu kriter hiç sorulmamış → 'Değerlendirilemedi (sistem)', payda dışı.")
                 sys_missing.append({"kriter": cname, "gerekce": _sr0})
                 li = best["line_idx"]
                 lines[li] = lines[li].replace(f"| {puan_cell} |", f"| Değerlendirilemedi (sistem) — {_sr0} |", 1)
+                continue
+            elif _st0 != "valid_ask":
+                floor_awarded = _insufficient_answer_floor_score(cap)
+                _sr0 = "kriter sorulmuş, sorgulama/takip fırsatına rağmen değerlendirilebilir bir aday cevabı alınamadı"
+                warnings.append(f"'{cname}' modelce 0/{cap} verilmiş, kriter sorulmuş ama geçerli cevap yok → taban puan {floor_awarded}/{cap} uygulandı (payda içinde, 'Değerlendirilemedi' DEĞİL).")
+                cand_missing.append({"kriter": cname, "gerekce": _sr0, "puan_turu": "taban_puan_25"})
+                li = best["line_idx"]
+                lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} — Taban puan (sorgulandı, yeterli cevap alınamadı): {_sr0} |", 1)
+                awarded_sum += floor_awarded
+                denom_cap += cap
                 continue
         li = best["line_idx"]
         _cell_new = f"{awarded}/{cap}"
@@ -11892,8 +11953,10 @@ def recompute_profile_section(profile_region: str, transcript: str = None, crite
         mm = _mm_frac or _mm_lead
 
         if not mm:
-            # YENİ TEK KURAL (PUAN 1 ile aynı): varsayılan SİSTEM kaynaklı (payda dışı 'Değerlendirilemedi
-            # (sistem)'). 0 yalnızca DÜZGÜN sorulmuş + açık ret / tamamen alakasız cevapta.
+            # İŞ EMRİ — KRİTER KAPSAMA + YETERSİZ CEVAP PUANLAMA (PUAN 1 ile AYNI ÜÇ DURUM):
+            #    (a) HİÇ SORULMADI → SİSTEM kaynaklı, PAYDA DIŞI, 'Değerlendirilemedi (sistem)'.
+            #    (b) AÇIK RET / tamamen alakasız cevap (dar koşul, DEĞİŞMEDİ) → 0/cap, PAYDA İÇİNDE.
+            #    (c) SORULDU ama değerlendirilebilir cevap alınamadı → TABAN PUAN (%25), PAYDA İÇİNDE.
             gm = re.search(r"[—:–\-]\s*(.+)$", re.sub(r"\((?:sorulmad[ıi]|soruldu[^)]*|sistem)\)", "", puan_cell, flags=re.IGNORECASE))
             reason = (gm.group(1).strip() if gm else "")
             status = _criterion_ask_status(cname, criteria_coverage, transcript, _repeated_unanswered)
@@ -11905,15 +11968,25 @@ def recompute_profile_section(profile_region: str, transcript: str = None, crite
                 cand_missing.append({"kriter": cname, "gerekce": _gk})
                 li = best["line_idx"]
                 lines[li] = lines[li].replace(f"| {puan_cell} |", f"| 0/{cap} — Yetersiz (aday): {_gk} |", 1)
-            else:
-                _sr = {"asked_no_valid_answer": "sorulan turlarda geçerli aday cevabı alınamadı",
-                       "not_asked": "bu kriter mülakatta ölçülmedi"}.get(status, reason or "yeterli veri oluşmadı")
+            elif status == "not_asked":
+                _sr = "bu kriter mülakatta ölçülmedi"
                 if not _found:
                     warnings.append(f"[PROFİL] '{cname}' profil tablosunda bulunamadı — sistem kaynaklı eksik (payda dışı).")
                 sys_missing.append({"kriter": cname, "gerekce": _sr})
                 if _found and puan_cell:
                     li = best["line_idx"]
                     lines[li] = lines[li].replace(f"| {puan_cell} |", f"| Değerlendirilemedi (sistem) — {_sr} |", 1)
+            else:
+                floor_awarded = _insufficient_answer_floor_score(cap)
+                _gk = reason or "kriter sorulmuş, sorgulama/takip fırsatına rağmen değerlendirilebilir bir aday cevabı alınamadı"
+                denom_cap += cap
+                awarded_sum += floor_awarded
+                cand_missing.append({"kriter": cname, "gerekce": _gk, "puan_turu": "taban_puan_25"})
+                if not _found:
+                    warnings.append(f"[PROFİL] '{cname}' profil tablosunda bulunamadı ama sorulduğuna dair kanıt var — taban puan ({floor_awarded}/{cap}) uygulandı, payda içinde sayıldı.")
+                elif puan_cell:
+                    li = best["line_idx"]
+                    lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} — Taban puan (sorgulandı, yeterli cevap alınamadı): {_gk} |", 1)
             continue
 
         awarded = _safe_int(mm.group(1))
@@ -11925,12 +11998,22 @@ def recompute_profile_section(profile_region: str, transcript: str = None, crite
             warnings.append(f"[PROFİL] '{cname}' payda {written_cap} yazılmış, gerçek tavan {cap} → düzeltildi.")
         if awarded == 0:
             _st0 = _criterion_ask_status(cname, criteria_coverage, transcript, _repeated_unanswered)
-            if _st0 != "valid_ask":
-                _sr0 = {"asked_no_valid_answer": "sorulan turlarda geçerli aday cevabı alınamadı",
-                        "not_asked": "bu kriter mülakatta ölçülmedi"}.get(_st0, "yeterli veri oluşmadı")
-                warnings.append(f"[PROFİL] '{cname}' modelce 0/{cap} verilmiş ama geçerli aday cevabı yok → 'Değerlendirilemedi (sistem)', payda dışı.")
+            if _st0 == "not_asked":
+                _sr0 = "bu kriter mülakatta ölçülmedi"
+                warnings.append(f"[PROFİL] '{cname}' modelce 0/{cap} verilmiş ama bu kriter hiç sorulmamış → 'Değerlendirilemedi (sistem)', payda dışı.")
                 sys_missing.append({"kriter": cname, "gerekce": _sr0})
                 lines[best["line_idx"]] = lines[best["line_idx"]].replace(f"| {puan_cell} |", f"| Değerlendirilemedi (sistem) — {_sr0} |", 1)
+                continue
+            elif _st0 != "valid_ask":
+                # İŞ EMRİ — KRİTER KAPSAMA + YETERSİZ CEVAP PUANLAMA: sorulmuş ama geçerli cevap
+                # alınamamışsa 'Değerlendirilemedi' DEĞİL — TABAN PUAN (%25), payda İÇİNDE.
+                floor_awarded = _insufficient_answer_floor_score(cap)
+                _sr0 = "kriter sorulmuş, sorgulama/takip fırsatına rağmen değerlendirilebilir bir aday cevabı alınamadı"
+                warnings.append(f"[PROFİL] '{cname}' modelce 0/{cap} verilmiş, kriter sorulmuş ama geçerli cevap yok → taban puan {floor_awarded}/{cap} uygulandı (payda içinde, 'Değerlendirilemedi' DEĞİL).")
+                cand_missing.append({"kriter": cname, "gerekce": _sr0, "puan_turu": "taban_puan_25"})
+                lines[best["line_idx"]] = lines[best["line_idx"]].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} — Taban puan (sorgulandı, yeterli cevap alınamadı): {_sr0} |", 1)
+                awarded_sum += floor_awarded
+                denom_cap += cap
                 continue
         li = best["line_idx"]
         _cell_new = f"{awarded}/{cap}"
