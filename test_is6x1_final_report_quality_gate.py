@@ -10,6 +10,18 @@ import json
 import contextlib
 import main as m
 
+# İŞ EMRİ — SON DAR DÜZELTME: rolling-window token admission'ın önceki test dosyalarından kalan
+# ai_jobs satırlarıyla YANLIŞ kapasite baskısı yaratmaması için (yalnız local dev/test hijyeni).
+# Bu dosyanın senaryoları (çok sayıda ardışık mock çağrı, TEK process içinde) scheduler'ın kapasite THROTTLE'ını test ETMİYOR (o test_ai_job_queue_scheduler.py'nin işi) — rolling-window bütçesi gerçekçi bir tek-worker/tek-rapor trafiğini varsayar, testin kendi TEK process'i içindeki hızlı ardışık senaryo sayısını değil. Bu yüzden yalnız BU dosya için bütçe pratik olarak sınırsız yapılır (main.py'nin gerçek varsayılanı DEĞİŞMEZ, yalnız bu process'in içi).
+m.AI_JOB_TOKEN_BUDGET["openai"] = 10_000_000
+m.AI_JOB_TOKEN_BUDGET["anthropic"] = 10_000_000
+_db0 = m.get_db()
+try:
+    _db0.execute("DELETE FROM ai_jobs")
+    _db0.commit()
+finally:
+    _db0.close()
+
 FAILURES = []
 
 

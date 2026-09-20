@@ -5472,15 +5472,19 @@ AI_JOB_MAX_CONCURRENT = {
     "openai": int(os.getenv("AI_JOB_MAX_CONCURRENT_OPENAI", "4")),
     "anthropic": int(os.getenv("AI_JOB_MAX_CONCURRENT_ANTHROPIC", "4")),
 }
-# madde E — o an EŞZAMANLI ÇALIŞAN (RUNNING) işlerin taahhüt ettiği toplam token için YUMUŞAK
-# güvenlik bütçesi — gerçek hesap TPM limitinin KENDİSİ DEĞİL, ona ulaşmadan ÖNCE eşzamanlı BURST
-# yükünü kısan bir muhasebe. Yalnız RUNNING (o an gerçekten işlenen) işler sayılır — TAMAMLANMIŞ
-# bir iş kapasitesini/bütçesini ANINDA serbest bırakır (bir TPM-penceresi simülasyonu YAPILMAZ —
-# ne kadar gerçek pencerenin ne olduğu zaten bilinmiyor, madde D). env ile değiştirilebilir.
+# İŞ EMRİ — SON DAR DÜZELTME / madde 1-3: ROLLING WINDOW token bütçesi. Bir iş COMPLETED olduğunda
+# provider'ın rate-limit penceresindeki tüketimi ANINDA sıfırlanmaz — bu yüzden bütçe hesabı hem
+# o an RUNNING (rezerve edilmiş) işleri HEM DE son AI_JOB_TOKEN_WINDOW_SECONDS içinde COMPLETED
+# olmuş işlerin GERÇEK (actual, yoksa estimated) tokenlarını sayar. FAILED işler yalnız provider'a
+# GERÇEKTEN gönderildiyse (started_at dolu — yani RUNNING'e geçmişti) ve pencere içindeyse sayılır
+# (estimated ile — 429/teknik hata provider tarafında token tüketmiş OLABİLİR, güvenli tarafta
+# kal); queue/admission aşamasında hiç başlamadan FAILED olan işler SAYILMAZ. "30000 TPM" gibi
+# sabit bir mimari limit YOK — aşağıdakiler env ile değiştirilebilir güvenli varsayılanlar.
 AI_JOB_TOKEN_BUDGET = {
     "openai": int(os.getenv("AI_JOB_TOKEN_BUDGET_OPENAI", "20000")),
     "anthropic": int(os.getenv("AI_JOB_TOKEN_BUDGET_ANTHROPIC", "20000")),
 }
+AI_JOB_TOKEN_WINDOW_SECONDS = int(os.getenv("AI_JOB_TOKEN_WINDOW_SECONDS", "60"))
 AI_JOB_MAX_WAIT_SECONDS = int(os.getenv("AI_JOB_MAX_WAIT_SECONDS", "90"))
 AI_JOB_POLL_MIN_SECONDS = 0.5
 AI_JOB_POLL_MAX_SECONDS = 3.0
@@ -5531,39 +5535,64 @@ def _recover_stale_ai_jobs() -> None:
 
 
 def _try_acquire_ai_capacity(job_id: str, provider: str, est_tokens: int) -> bool:
-    """madde D/E — ATOMİK admission: RUNNING sayısı + yakın pencere token toplamı kapasiteyi
-    aşmıyorsa job'ı QUEUED->RUNNING claim eder (tek UPDATE...WHERE, DB seviyesinde — process-local
-    kilide DAYANMAZ, çoklu worker/replica güvenli). Aşıyorsa False döner — çağıran (ai_job_slot)
-    bounded poll ile bekler; bu, FIFO seri çalıştırma DEĞİL (madde B) — yalnız 'şu an provider'a
-    göndermek GÜVENLİ Mİ' sorusuna cevap verir, hiçbir iş SIRASI dayatmaz (kapasite açıldığı anda
-    HANGİ bekleyen iş önce deneyeceği rastgele/poll-zamanlamasına bağlıdır — kasıtlı olarak basit
-    tutuldu, ayrı bir öncelik kuyruğu bu turun kapsamı dışı)."""
+    """İŞ EMRİ — SON DAR DÜZELTME / madde 1-4: ROLLING-WINDOW + RACE-SAFE admission.
+    Bütçe hesabı: (o an RUNNING işlerin rezerve/actual tokenı) + (son AI_JOB_TOKEN_WINDOW_SECONDS
+    içinde COMPLETED olmuş işlerin actual-yoksa-estimated tokenı) + (aynı pencere içinde, provider'a
+    GERÇEKTEN gönderildikten SONRA — started_at dolu — FAILED olmuş işlerin estimated tokenı, çünkü
+    429/teknik hata provider tarafında token tüketmiş OLABİLİR). Queue/admission aşamasında hiç
+    başlamadan (started_at boş) FAILED olan işler SAYILMAZ. Her iş TEK bir CASE dalına düşer —
+    aynı job iki kez sayılmaz.
+    RACE GÜVENLİĞİ (madde 4): oku+karar+claim tek transaction'da, provider'a özel bir kilitle
+    SERİLEŞTİRİLİR — Postgres'te `pg_advisory_xact_lock(hashtext(provider))` (gerçek çoklu
+    worker/replica güvenli, satır kilitleme yerine transaction-scoped advisory lock — yeni tablo
+    gerekmez), SQLite'ta (dev/test) `BEGIN IMMEDIATE` ile eşdeğer serileştirme. Process-local
+    semaphore KULLANILMADI. Farklı provider'lar AYRI kilit anahtarına sahip, birbirini bloke
+    ETMEZ. Aşıyorsa False döner — çağıran (ai_job_slot) bounded poll ile bekler; bu FIFO seri
+    çalıştırma DEĞİL (madde B), yalnız 'şu an provider'a göndermek GÜVENLİ Mİ' sorusuna cevap
+    verir."""
     max_conc = AI_JOB_MAX_CONCURRENT.get(provider, 4)
     token_budget = AI_JOB_TOKEN_BUDGET.get(provider, 20000)
     db = get_db()
+    claimed = False
     try:
+        # madde 4 — provider'a özel transaction-scoped kilit: aynı provider için admission kararı
+        # (oku+karar+claim) BAŞKA hiçbir worker/transaction ile ÇAKIŞMADAN, sırayla işlenir.
+        if USE_POSTGRES:
+            db.execute("SELECT pg_advisory_xact_lock(hashtext(?)::bigint)", (provider,))
+        else:
+            db.execute("BEGIN IMMEDIATE")
+
         running = db.execute("SELECT COUNT(*) AS n FROM ai_jobs WHERE provider=? AND status='RUNNING'",
                              (provider,)).fetchone()["n"]
         if running >= max_conc:
             return False
-        # madde E — yalnız O AN GERÇEKTEN İŞLENEN (RUNNING) işlerin token taahhüdü sayılır;
-        # TAMAMLANMIŞ bir iş kapasiteyi/bütçeyi ANINDA serbest bırakır (bkz. yukarıdaki sabit
-        # tanımının yorum notu — kök neden: geçmiş bir zaman penceresi COMPLETED işleri de sayarsa,
-        # ardışık/hafif testler bile HIZLA bütçeyi tüketip sonraki işleri gereksiz yere bekletiyordu).
-        running_tokens = db.execute(
-            "SELECT COALESCE(SUM(COALESCE(actual_input_tokens, est_input_tokens, 0) "
-            "+ COALESCE(actual_output_tokens, est_output_tokens, 0)), 0) AS t "
-            "FROM ai_jobs WHERE provider=? AND status='RUNNING'",
+
+        in_window_sql = f"NOT ({_staleness_clause('created_at', AI_JOB_TOKEN_WINDOW_SECONDS)})"
+        committed = db.execute(
+            "SELECT COALESCE(SUM(CASE "
+            "  WHEN status='RUNNING' THEN COALESCE(actual_input_tokens, est_input_tokens, 0) + COALESCE(actual_output_tokens, est_output_tokens, 0) "
+            f"  WHEN status='COMPLETED' AND {in_window_sql} THEN COALESCE(actual_input_tokens, est_input_tokens, 0) + COALESCE(actual_output_tokens, est_output_tokens, 0) "
+            f"  WHEN status='FAILED' AND started_at IS NOT NULL AND {in_window_sql} THEN COALESCE(est_input_tokens, 0) + COALESCE(est_output_tokens, 0) "
+            "  ELSE 0 END), 0) AS t "
+            "FROM ai_jobs WHERE provider=?",
             (provider,)).fetchone()["t"]
-        if (running_tokens or 0) + est_tokens > token_budget:
+        if (committed or 0) + est_tokens > token_budget:
             return False
+
         cur = db.execute("""
             UPDATE ai_jobs SET status='RUNNING', started_at=CURRENT_TIMESTAMP, attempt=COALESCE(attempt,0)+1
             WHERE job_id=? AND status='QUEUED'
         """, (job_id,))
-        db.commit()
-        return (cur.rowcount or 0) > 0
+        claimed = (cur.rowcount or 0) > 0
+        return claimed
     finally:
+        # Kilit transaction sonunda (commit/rollback) otomatik serbest kalır — claim
+        # başarısız/reddedilmiş olsa BİLE mutlaka commit/rollback ile transaction KAPATILIR
+        # (aksi halde advisory lock/BEGIN IMMEDIATE sonraki denemeleri gereksiz bekletir).
+        if claimed:
+            db.commit()
+        else:
+            db.rollback()
         db.close()
 
 
@@ -8785,26 +8814,17 @@ def run_deferred_finish_job(candidate_id: int, level: int, regen: bool = False):
             print(f"[REPORT_USAGE] c={candidate_id} L{level} provider=claude model={model or 'claude-sonnet-4-6'} "
                   f"out_tokens={getattr(_u, 'output_tokens', '?')} stop_reason={getattr(response, 'stop_reason', '?')} "
                   f"max_tokens={REPORT_MAX_TOKENS} bitti={'---RAPORSON---' in reply}")
-            # GÖREV 8 — KESİLME → FALLBACK'E DÜŞMEDEN ÖNCE DEVAM ÇAĞRISI (continuation).
-            _cont_tries = 0
-            while (getattr(response, "stop_reason", None) == "max_tokens" or "---RAPORSON---" not in reply) and _cont_tries < 2:
-                _cont_tries += 1
-                print(f"[REPORT_CONTINUATION] c={candidate_id} L{level} deneme {_cont_tries}")
-                _cont = client.messages.create(
-                    model=model or "claude-sonnet-4-6", max_tokens=REPORT_MAX_TOKENS, temperature=0,
-                    system=cached_system(system) if system else anthropic.NOT_GIVEN,
-                    messages=[{"role": "user", "content": primary_payload},
-                              {"role": "assistant", "content": reply},
-                              {"role": "user", "content": "Kaldığın yerden AYNEN devam et; hiçbir şeyi tekrar etme, başa dönme. Raporu ---RAPORSON--- ile bitir."}]
-                )
-                record_anthropic_usage(candidate_id, level, model or "claude-sonnet-4-6", "report_generation_continuation", _cont)
-                reply = reply + _cont.content[0].text
-                response = _cont
+            # İŞ EMRİ — SON DAR DÜZELTME / madde 6/7: NORMAL L3'te continuation YOK — 3-pass
+            # kuralı (primary+reviewer+QG = KESİN 3 semantik çağrı). Token limitine çarpma TEKNİK
+            # olarak gözlemlenir/loglanır (mevcut deterministik tamamlama devreye girer); AYNI
+            # raporu ikinci bir semantic çağrıyla DEVAM ETTİRMEK artık NORMAL mimari DEĞİL.
             if getattr(response, "stop_reason", None) == "max_tokens" or "---RAPORSON---" not in reply:
-                print(f"[REPORT_TRUNCATED] c={candidate_id} L{level} stop_reason={getattr(response,'stop_reason',None)} (devam çağrıları yetmedi)")
+                print(f"[REPORT_TRUNCATED] c={candidate_id} L{level} stop_reason={getattr(response,'stop_reason',None)} "
+                      "(continuation NORMAL L3 akışından ÇIKARILDI — madde 7, 3-pass kuralı)")
                 record_system_decision(candidate_id, level, "rapor_kesildi",
-                                       "Rapor üretimi token sınırına takıldı; devam çağrıları da tamamlayamadı, eksik bölümler deterministik tamamlandı.",
-                                       {"stop_reason": getattr(response, "stop_reason", None), "continuation_tries": _cont_tries},
+                                       "Rapor üretimi token sınırına takıldı; NORMAL L3 akışında continuation YAPILMAZ "
+                                       "(İŞ EMRİ — 3-pass kuralı) — eksik bölümler deterministik tamamlandı.",
+                                       {"stop_reason": getattr(response, "stop_reason", None)},
                                        warnings=["Rapor üretimi token sınırına takıldı (bkz. report_tech_note)."])
             # Normal kapanış çağrısı bile [ADAY_CIKIS_TALEBI] üretebilir (mevcut senkron
             # interview_chat akışıyla aynı davranış) — öyleyse ikinci bir "gerçek bitiş" çağrısı yap.
@@ -8851,70 +8871,30 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             if _out_tok_primary <= 50 or len((reply or "").strip()) < 100:
                 print(f"[REPORT_SHORT_RESPONSE] c={candidate_id} L{level} action=primary finish={_fr} "
                       f"out={_out_tok_primary} text={repr(reply)[:500]}")
-            # İŞ 6B — ANORMAL KISA CEVAPTA FULL-CONTEXT CONTINUATION YAPMA: finish_reason=="stop" +
-            # ---RAPORSON--- yok + completion_tokens<=50 GERÇEK bir kesilme (length) DEĞİL — modelin
-            # anormal şekilde erken durması. Bu durumda ~16K bağlamı continuation olarak tekrar
-            # göndermek TPM/429'a çarpıyordu (bkz. teşhis turu). Bunun yerine AYNI parametrelerle
-            # yalnız TEK bir retry yapılır; retry de anormal kısa kalırsa continuation'a HİÇ
-            # girilmeden kontrollü failure — mevcut raw_report EZİLMEZ (bu noktadan sonra fonksiyon
-            # return ile çıkar, raw_report write'ına hiç ulaşılmaz).
+            # İŞ EMRİ — SON DAR DÜZELTME / madde 6/7: NORMAL L3'te "anormal kısa cevap" content-
+            # retry'ı VE continuation YOK (3-pass kuralı: primary+reviewer+QG = KESİN 3 semantik
+            # çağrı). finish_reason=="stop" + ---RAPORSON--- yok + tokens<=50 = modelin anormal
+            # erken durması — AI'ya AYNI işi TEKRAR YAPTIRMAK yerine doğrudan TEKNİK başarısızlık
+            # sayılır (SYSTEM STATE — mevcut regenerate/recovery altyapısı bunu ele alır).
             _is_anomalous_short = (_fr == "stop" and "---RAPORSON---" not in reply and _out_tok_primary <= 50)
             if _is_anomalous_short:
-                print(f"[REPORT_SHORT_RETRY] c={candidate_id} L{level} attempt=1")
-                resp_retry = openai_call(
-                    "POST", "https://api.openai.com/v1/chat/completions",
-                    json_body={"model": model or OPENAI_REPORT_MODEL, "messages": _msgs, "max_tokens": REPORT_MAX_TOKENS, "temperature": 0},  # GÖREV 4.4 — determinizm, primary ile AYNI parametreler
-                    timeout=150.0, step="report_generation", severity="user", retry=True,
-                    context={"candidate_id": candidate_id, "level": level},
-                )
-                result_retry = resp_retry.json()
-                record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "l2_report_generation_short_retry", result_retry)
-                reply_retry = result_retry["choices"][0]["message"]["content"]
-                _fr_retry = (result_retry.get("choices") or [{}])[0].get("finish_reason")
-                _uo_retry = (result_retry.get("usage") or {})
-                _out_tok_retry = _safe_int(_uo_retry.get('completion_tokens', 0))
-                print(f"[REPORT_USAGE] c={candidate_id} L{level} provider=openai model={model or OPENAI_REPORT_MODEL} "
-                      f"completion_tokens={_out_tok_retry} finish_reason={_fr_retry} "
-                      f"max_tokens={REPORT_MAX_TOKENS} bitti={'---RAPORSON---' in reply_retry} (short-retry)")
-                _retry_still_anomalous = (_fr_retry == "stop" and "---RAPORSON---" not in reply_retry and _out_tok_retry <= 50)
-                if _retry_still_anomalous:
-                    print(f"[REPORT_SHORT_FAILED] c={candidate_id} L{level} out1={_out_tok_primary} out2={_out_tok_retry} "
-                          f"text2={repr(reply_retry)[:500]}")
-                    _ai_job_release(_primary_job_id, False, "iki denemede de anormal kısa cevap")
-                    _mark_finish_failed(candidate_id, level,
-                                        "Rapor üretimi iki denemede de anormal derecede kısa cevap döndürdü "
-                                        "(olası model/API anomalisi) — continuation'a girilmedi, eski rapor korunuyor.")
-                    return
-                # Retry ya TAM raporu üretti (---RAPORSON--- var) ya da GERÇEKTEN uzun/kesilmiş bir
-                # cevaba döndü (ör. finish=length) — her iki durumda da madde 5 gereği NORMAL pipeline
-                # (aşağıdaki, DEĞİŞMEYEN continuation döngüsü dahil) retry sonucuyla devam eder.
-                reply, _fr, _uo = reply_retry, _fr_retry, _uo_retry
-            # GÖREV 8 — KESİLME → FALLBACK'E DÜŞMEDEN ÖNCE DEVAM ÇAĞRISI (continuation).
-            _cont_tries = 0
-            while (_fr == "length" or "---RAPORSON---" not in reply) and _cont_tries < 2:
-                _cont_tries += 1
-                print(f"[REPORT_CONTINUATION] c={candidate_id} L{level} deneme {_cont_tries}")
-                _cmsgs = _msgs + [{"role": "assistant", "content": reply},
-                                  {"role": "user", "content": "Kaldığın yerden AYNEN devam et; hiçbir şeyi tekrar etme, başa dönme. Raporu ---RAPORSON--- ile bitir."}]
-                _cr = openai_call("POST", "https://api.openai.com/v1/chat/completions",
-                                  json_body={"model": model or OPENAI_REPORT_MODEL, "messages": _cmsgs, "max_tokens": REPORT_MAX_TOKENS, "temperature": 0},  # GÖREV 4.4
-                                  timeout=150.0, step="report_continuation", severity="user", retry=True,
-                                  context={"candidate_id": candidate_id, "level": level}).json()
-                record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "l2_report_continuation", _cr)
-                _cont_text = _cr["choices"][0]["message"]["content"] or ""
-                _fr = (_cr.get("choices") or [{}])[0].get("finish_reason")
-                # İŞ 6A — TEŞHİS LOGU: continuation cevabının KENDİSİ (kümülatif değil) anormal
-                # kısaysa aynı şekilde logla.
-                _out_tok_cont = _safe_int((_cr.get('usage') or {}).get('completion_tokens', 0))
-                if _out_tok_cont <= 50 or len(_cont_text.strip()) < 100:
-                    print(f"[REPORT_SHORT_RESPONSE] c={candidate_id} L{level} action=continuation finish={_fr} "
-                          f"out={_out_tok_cont} text={repr(_cont_text)[:500]}")
-                reply = reply + _cont_text
+                print(f"[REPORT_SHORT_FAILED] c={candidate_id} L{level} out={_out_tok_primary} "
+                      f"text={repr(reply)[:500]} (short-retry NORMAL akıştan ÇIKARILDI — madde 6)")
+                _ai_job_release(_primary_job_id, False, "anormal kısa cevap")
+                _mark_finish_failed(candidate_id, level,
+                                    "Rapor üretimi anormal derecede kısa cevap döndürdü (olası model/API anomalisi) — "
+                                    "NORMAL L3 akışında content-retry YAPILMAZ (İŞ EMRİ — 3-pass kuralı), eski rapor korunuyor.")
+                return
+            # Token limitine çarpma (finish_reason=='length') TEKNİK olarak gözlemlenir/loglanır;
+            # AYNI raporu ikinci semantic çağrıyla DEVAM ETTİRMEK artık NORMAL mimari DEĞİL —
+            # mevcut deterministik tamamlama (eksik bölüm/başlık onarımı) elindeki metinle çalışır.
             if _fr == "length" or "---RAPORSON---" not in reply:
-                print(f"[REPORT_TRUNCATED] c={candidate_id} L{level} finish_reason={_fr} (devam çağrıları yetmedi)")
+                print(f"[REPORT_TRUNCATED] c={candidate_id} L{level} finish_reason={_fr} "
+                      "(continuation NORMAL L3 akışından ÇIKARILDI — madde 7, 3-pass kuralı)")
                 record_system_decision(candidate_id, level, "rapor_kesildi",
-                                       "Rapor üretimi token sınırına takıldı; devam çağrıları da tamamlayamadı, eksik bölümler deterministik tamamlandı.",
-                                       {"finish_reason": _fr, "continuation_tries": _cont_tries},
+                                       "Rapor üretimi token sınırına takıldı; NORMAL L3 akışında continuation YAPILMAZ "
+                                       "(İŞ EMRİ — 3-pass kuralı) — eksik bölümler deterministik tamamlandı.",
+                                       {"finish_reason": _fr},
                                        warnings=["Rapor üretimi token sınırına takıldı (bkz. report_tech_note)."])
         else:
             raise RuntimeError(f"Bilinmeyen pending_finish_provider: {provider!r}")
@@ -8992,13 +8972,14 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
             except Exception as e:
                 print(f"UYARI (müfettiş bölümü ekleme c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
-        # İŞ 5 — validator+reviewer+takeover TAMAMLANDIKTAN SONRA, yalnız 'Öne Çıkan Proje ve
-        # Deneyimler' hâlâ fallback'teyse TEK hedefli recovery denemesi (tüm level'larda çalışır —
-        # bu iş emrinin kapsamı DIŞINDA, DEĞİŞMEDİ).
+        # İŞ EMRİ — SON DAR DÜZELTME / madde 8: validator+reviewer TAMAMLANDIKTAN SONRA, 'Öne
+        # Çıkan Proje ve Deneyimler' hâlâ fallback'teyse artık AI recovery ÇAĞRILMIYOR (3-pass
+        # kuralı) — yalnız eksiklik loglanıyor. run_one_cikan_proje_recovery (AI'lı hali) legacy/
+        # dead code olarak main.py'de duruyor, normal akıştan ÇAĞRILMIYOR.
         try:
-            run_one_cikan_proje_recovery(candidate_id, level, _pcrit)
+            log_one_cikan_proje_gap_if_present(candidate_id, level)
         except Exception as e:
-            print(f"UYARI (one_cikan_proje recovery c={candidate_id} L{level}): {type(e).__name__}: {e}")
+            print(f"UYARI (one_cikan_proje eksik log c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
         if level == 3:
             # ═══ FINAL REPORT QUALITY GATE (pipeline'ın EN SONU, yalnız L3) ═══
@@ -11390,6 +11371,34 @@ def _accept_one_cikan_proje_recovery(text: str, transcript_view: list) -> bool:
     if _tr_upper(t) in (_tr_upper("YOK"), _tr_upper(_NO_NARRATIVE_EVIDENCE_FALLBACK), _tr_upper(_NO_TIMESTAMP_EVIDENCE_FALLBACK)):
         return False
     return _one_cikan_proje_recovery_grounded(t, transcript_view)
+
+def log_one_cikan_proje_gap_if_present(candidate_id: int, level: int) -> None:
+    """İŞ EMRİ — SON DAR DÜZELTME / madde 8: 'Öne Çıkan Proje ve Deneyimler' hâlâ fallback ise
+    NORMAL L3 akışında artık AI recovery ÇAĞRILMAZ (bu, primary+reviewer+QG dışında bir 4.
+    semantik çağrı olurdu — 3-pass kuralını bozar). Yalnız eksikliği LOGLAR; Final QG mevcut TEK
+    çağrısında rapor bütünlüğünü zaten görür. run_one_cikan_proje_recovery (AI tabanlı recovery,
+    aşağıda) SİLİNMEDİ — legacy/dead code olarak kalıyor, normal akıştan ARTIK ÇAĞRILMIYOR."""
+    db = get_db()
+    try:
+        row = db.execute("SELECT report FROM interviews WHERE candidate_id=? AND level=?",
+                         (candidate_id, level)).fetchone()
+    finally:
+        db.close()
+    final_report = (row["report"] if row else "") or ""
+    if not final_report.strip() or _ONE_CIKAN_PROJE_HEAD not in final_report:
+        return
+    m = _ONE_CIKAN_PROJE_RE.search(final_report)
+    current_text = (m.group(1).strip() if m else "")
+    if _tr_upper(current_text) != _tr_upper(_NO_NARRATIVE_EVIDENCE_FALLBACK):
+        return  # bölüm zaten dolu/geçerli — loglanacak bir eksiklik yok
+    record_system_decision(candidate_id, level, "one_cikan_proje_eksik_ai_recovery_yapilmadi",
+                           "İŞ EMRİ — SON DAR DÜZELTME madde 8: 'Öne Çıkan Proje ve Deneyimler' "
+                           "fallback'te kaldı; NORMAL L3 akışında bu TEK BAŞINA 4. bir semantik AI "
+                           "çağrısı GEREKTİRMEZ (3-pass kuralı) — bölüm deterministik olarak "
+                           "doldurulamadığı için olduğu gibi bırakıldı. Final QG rapor bütünlüğünü "
+                           "kendi tek geçişinde ayrıca görür.",
+                           {"mevcut_metin": current_text})
+
 
 def run_one_cikan_proje_recovery(candidate_id: int, level: int, position_criteria: Optional[list] = None) -> None:
     """İŞ 5/6N-1 — orkestrasyon: validator+reviewer+takeover TAMAMLANDIKTAN SONRA (run_deferred_finish_job

@@ -12,6 +12,18 @@ import sys
 import json
 import main as m
 
+# İŞ EMRİ — SON DAR DÜZELTME: rolling-window token admission'ın önceki test dosyalarından kalan
+# ai_jobs satırlarıyla YANLIŞ kapasite baskısı yaratmaması için (yalnız local dev/test hijyeni).
+# Bu dosyanın senaryoları (çok sayıda ardışık mock çağrı, TEK process içinde) scheduler'ın kapasite THROTTLE'ını test ETMİYOR (o test_ai_job_queue_scheduler.py'nin işi) — rolling-window bütçesi gerçekçi bir tek-worker/tek-rapor trafiğini varsayar, testin kendi TEK process'i içindeki hızlı ardışık senaryo sayısını değil. Bu yüzden yalnız BU dosya için bütçe pratik olarak sınırsız yapılır (main.py'nin gerçek varsayılanı DEĞİŞMEZ, yalnız bu process'in içi).
+m.AI_JOB_TOKEN_BUDGET["openai"] = 10_000_000
+m.AI_JOB_TOKEN_BUDGET["anthropic"] = 10_000_000
+_db0 = m.get_db()
+try:
+    _db0.execute("DELETE FROM ai_jobs")
+    _db0.commit()
+finally:
+    _db0.close()
+
 FAILURES = []
 
 
@@ -193,10 +205,9 @@ r5 = subprocess.run([sys.executable, "test_is5_one_cikan_proje_recovery.py"], ca
 print(r5.stdout.strip().splitlines()[-1] if r5.stdout else "(çıktı yok)")
 is5_ok = r5.returncode == 0
 
-print("=== İŞ 6B REGRESYON ===")
-r6b = subprocess.run([sys.executable, "test_is6b_short_response_retry.py"], capture_output=True, text=True)
-print(r6b.stdout.strip().splitlines()[-1] if r6b.stdout else "(çıktı yok)")
-is6b_ok = r6b.returncode == 0
+# İŞ 6B REGRESYON kaldırıldı — test_is6b_short_response_retry.py, İŞ EMRİ — SON DAR DÜZELTME ile
+# BİLİNÇLİ OLARAK KALDIRILAN davranışı (short-retry) test ettiği için EMEKLİ edildi (.py.retired) —
+# artık regresyon referansı olarak ÇALIŞTIRILMAZ.
 
-if FAILURES or not (is5_ok and is6b_ok):
+if FAILURES or not is5_ok:
     sys.exit(1)
