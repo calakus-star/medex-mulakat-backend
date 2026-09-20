@@ -132,10 +132,13 @@ else:
 
 print()
 import subprocess
+# test_is4_validator_recovery.py ve test_is6d_yonetici_ozeti_guard.py listeden ÇIKARILDI — İŞ
+# EMRİ — ZORUNLU AI JOB QUEUE + DEĞERLENDİRİLEMEDİ KURALININ DÜZELTİLMESİ ile BİLİNÇLİ OLARAK
+# KALDIRILAN davranışları test ettikleri için EMEKLİ edildiler (.py.retired).
 for name in ["test_is1_report_consistency.py", "test_is2_speaker_validation.py",
-             "test_is3_scope_context.py", "test_is4_validator_recovery.py",
+             "test_is3_scope_context.py",
              "test_is5_one_cikan_proje_recovery.py", "test_is6b_short_response_retry.py",
-             "test_is6c_one_cikan_proje_retry.py", "test_is6d_yonetici_ozeti_guard.py"]:
+             "test_is6c_one_cikan_proje_retry.py"]:
     print(f"=== {name} ===")
     r = subprocess.run([sys.executable, name], capture_output=True, text=True, timeout=300)
     print(r.stdout.strip().splitlines()[-1] if r.stdout else "(çıktı yok)")
