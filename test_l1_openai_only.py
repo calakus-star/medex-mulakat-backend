@@ -14,20 +14,6 @@ import contextlib
 from fastapi import BackgroundTasks
 import main as m
 
-# İŞ EMRİ — SON DAR DÜZELTME: rolling-window token admission gerçekçi bir tek-worker/tek-
-# rapor trafiğini varsayar, bu dosyanın TEK process içindeki hızlı ardışık senaryo sayısını
-# DEĞİL — bu yüzden yalnız BU test process'i için bütçe pratik olarak sınırsız yapılır
-# (main.py'nin gerçek varsayılanı DEĞİŞMEZ). Önceki test dosyalarından kalan ai_jobs satırları
-# da temizlenir (yalnız local dev/test hijyeni).
-m.AI_JOB_TOKEN_BUDGET["openai"] = 10_000_000
-m.AI_JOB_TOKEN_BUDGET["anthropic"] = 10_000_000
-_db0 = m.get_db()
-try:
-    _db0.execute("DELETE FROM ai_jobs")
-    _db0.commit()
-finally:
-    _db0.close()
-
 FAILURES = []
 
 

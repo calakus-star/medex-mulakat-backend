@@ -9,18 +9,6 @@ import sys
 import contextlib
 import main as m
 
-# İŞ EMRİ — SON DAR DÜZELTME: rolling-window token admission'ın önceki test dosyalarından kalan
-# ai_jobs satırlarıyla YANLIŞ kapasite baskısı yaratmaması için (yalnız local dev/test hijyeni).
-# Bu dosyanın senaryoları (çok sayıda ardışık mock çağrı, TEK process içinde) scheduler'ın kapasite THROTTLE'ını test ETMİYOR (o test_ai_job_queue_scheduler.py'nin işi) — rolling-window bütçesi gerçekçi bir tek-worker/tek-rapor trafiğini varsayar, testin kendi TEK process'i içindeki hızlı ardışık senaryo sayısını değil. Bu yüzden yalnız BU dosya için bütçe pratik olarak sınırsız yapılır (main.py'nin gerçek varsayılanı DEĞİŞMEZ, yalnız bu process'in içi).
-m.AI_JOB_TOKEN_BUDGET["openai"] = 10_000_000
-m.AI_JOB_TOKEN_BUDGET["anthropic"] = 10_000_000
-_db0 = m.get_db()
-try:
-    _db0.execute("DELETE FROM ai_jobs")
-    _db0.commit()
-finally:
-    _db0.close()
-
 FAILURES = []
 
 
@@ -144,12 +132,12 @@ else:
 
 print()
 import subprocess
-# test_is4_validator_recovery.py, test_is6d_yonetici_ozeti_guard.py ve
-# test_is6b_short_response_retry.py listeden ÇIKARILDI — kaldırılmış content-retry/short-retry
-# davranışlarını test ettikleri için EMEKLİ edildiler (.py.retired).
+# test_is4_validator_recovery.py ve test_is6d_yonetici_ozeti_guard.py listeden ÇIKARILDI — İŞ
+# EMRİ — ZORUNLU AI JOB QUEUE + DEĞERLENDİRİLEMEDİ KURALININ DÜZELTİLMESİ ile BİLİNÇLİ OLARAK
+# KALDIRILAN davranışları test ettikleri için EMEKLİ edildiler (.py.retired).
 for name in ["test_is1_report_consistency.py", "test_is2_speaker_validation.py",
              "test_is3_scope_context.py",
-             "test_is5_one_cikan_proje_recovery.py",
+             "test_is5_one_cikan_proje_recovery.py", "test_is6b_short_response_retry.py",
              "test_is6c_one_cikan_proje_retry.py"]:
     print(f"=== {name} ===")
     r = subprocess.run([sys.executable, name], capture_output=True, text=True, timeout=300)

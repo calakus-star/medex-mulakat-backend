@@ -17,18 +17,6 @@ import inspect
 import contextlib
 import main as m
 
-# İŞ EMRİ — SON DAR DÜZELTME: rolling-window token admission'ın önceki test dosyalarından kalan
-# ai_jobs satırlarıyla YANLIŞ kapasite baskısı yaratmaması için (yalnız local dev/test hijyeni).
-# Bu dosyanın senaryoları (çok sayıda ardışık mock çağrı, TEK process içinde) scheduler'ın kapasite THROTTLE'ını test ETMİYOR (o test_ai_job_queue_scheduler.py'nin işi) — rolling-window bütçesi gerçekçi bir tek-worker/tek-rapor trafiğini varsayar, testin kendi TEK process'i içindeki hızlı ardışık senaryo sayısını değil. Bu yüzden yalnız BU dosya için bütçe pratik olarak sınırsız yapılır (main.py'nin gerçek varsayılanı DEĞİŞMEZ, yalnız bu process'in içi).
-m.AI_JOB_TOKEN_BUDGET["openai"] = 10_000_000
-m.AI_JOB_TOKEN_BUDGET["anthropic"] = 10_000_000
-_db0 = m.get_db()
-try:
-    _db0.execute("DELETE FROM ai_jobs")
-    _db0.commit()
-finally:
-    _db0.close()
-
 FAILURES = []
 
 
@@ -250,10 +238,7 @@ try:
     src_job = inspect.getsource(m.run_deferred_finish_job)
     idx_finalize = src_job.find("finalize_interview(candidate_id, reply")
     idx_reviewer = src_job.find("append_reviewer_section(candidate_id, level, transcript_text, modality_block, _pcrit)")
-    # İŞ EMRİ — SON DAR DÜZELTME / madde 8: run_one_cikan_proje_recovery (AI'lı hali) normal
-    # akıştan ÇIKARILDI; yerine log_one_cikan_proje_gap_if_present (AI'sız, yalnız eksikliği
-    # loglar) çağrılıyor — kaynak sırası kontrolü GÜNCEL çağrıyı arar.
-    idx_recovery = src_job.find("log_one_cikan_proje_gap_if_present(candidate_id, level)")
+    idx_recovery = src_job.find("run_one_cikan_proje_recovery(candidate_id, level, _pcrit)")
     idx_qg = src_job.find("run_final_report_quality_gate(candidate_id, level, _pcrit, _reviewer_findings)")
     idx_integrity = src_job.find("run_final_deterministic_integrity_check(candidate_id, level)")
     check("K) Kaynak sırası bulundu (hepsi run_deferred_finish_job içinde)",

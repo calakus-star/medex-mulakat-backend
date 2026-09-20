@@ -1,13 +1,3 @@
-# EMEKLİ (RETIRED) — bu dosya artık AKTİF test paketinin parçası DEĞİLDİR (.py.retired uzantısı,
-# `test_*.py` taramasına GİRMEZ). Bu dosyanın test ettiği davranış — 'anormal kısa primary
-# cevabında AYNI semantic işi TEKRAR AI'ya yaptırma' (l2_report_generation_short_retry) —
-# İŞ EMRİ — SON DAR DÜZELTME (ROLLING TPM BÜTÇESİ + GERÇEK 3-PASS L3) ile BİLİNÇLİ OLARAK
-# KALDIRILDI — normal L3 artık KESİN 3 semantic çağrı (primary+reviewer+QG), anormal kısa
-# cevap doğrudan teknik başarısızlık sayılır, AI'ya tekrar sorulmaz. Bu artık regresyon
-# DEĞİL, istenen davranıştır. Güncel eşdeğer kapsam: test_ai_job_queue_scheduler.py / madde H-J
-# (3-pass runtime testleri, backend/main.py'de). Silinmedi (tarihsel referans için) — yalnız
-# EMEKLİ edildi.
-
 # İŞ 6B — ANORMAL KISA CEVAPTA FULL-CONTEXT CONTINUATION YAPMA — unit/regression testleri.
 # run_deferred_finish_job() GERÇEKTEN çağrılır (uçtan uca) — yalnız openai_call() monkey-patch
 # ile kontrol edilir, hiçbir gerçek ağ/API çağrısı yapılmaz. Yerel SQLite'a (medex_mulakat.db)
@@ -18,22 +8,6 @@
 import sys
 import json
 import main as m
-
-# İŞ EMRİ — SON DAR DÜZELTME: token admission artık rolling-window (RUNNING + pencere içindeki
-# COMPLETED/FAILED) — ardışık test dosyalarının BİRİKTİRDİĞİ eski ai_jobs satırları paylaşılan
-# yerel SQLite'ta GERÇEK olmayan bir kapasite baskısı yaratıp testleri gereksiz BEKLETİYORDU
-# (yalnız local dev/test hijyeni; production Postgres'e DOKUNMAZ — bu script zaten yalnız local
-# medex_mulakat.db'ye bağlanır). Bu dosyanın senaryoları scheduler'ı test ETMİYOR, temiz sayaçla
-# başlaması yeterli.
-# Bu dosyanın senaryoları (çok sayıda ardışık mock çağrı, TEK process içinde) scheduler'ın kapasite THROTTLE'ını test ETMİYOR (o test_ai_job_queue_scheduler.py'nin işi) — rolling-window bütçesi gerçekçi bir tek-worker/tek-rapor trafiğini varsayar, testin kendi TEK process'i içindeki hızlı ardışık senaryo sayısını değil. Bu yüzden yalnız BU dosya için bütçe pratik olarak sınırsız yapılır (main.py'nin gerçek varsayılanı DEĞİŞMEZ, yalnız bu process'in içi).
-m.AI_JOB_TOKEN_BUDGET["openai"] = 10_000_000
-m.AI_JOB_TOKEN_BUDGET["anthropic"] = 10_000_000
-_db0 = m.get_db()
-try:
-    _db0.execute("DELETE FROM ai_jobs")
-    _db0.commit()
-finally:
-    _db0.close()
 
 FAILURES = []
 
