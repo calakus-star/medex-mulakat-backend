@@ -1,11 +1,3 @@
-# EMEKLİ (RETIRED) — bu dosya artık AKTİF test paketinin parçası DEĞİLDİR (.py.retired uzantısı,
-# `test_*.py` taramasına GİRMEZ). Bu dosyanın test ettiği davranış — validator'ın geçemeyen
-# bir kriter için AI'yı TEKRAR TEKRAR çağırması (content-retry) — İŞ EMRİ — ÇOKLU TALENT
-# MİMARİSİ + TEK-PASS AI AKIŞI (commit 42abd9b) ve İŞ EMRİ — ZORUNLU AI JOB QUEUE +
-# DEĞERLENDİRİLEMEDİ KURALININ DÜZELTİLMESİ ile BİLİNÇLİ OLARAK KALDIRILDI — bu artık
-# regresyon DEĞİL, istenen davranıştır. Güncel eşdeğer kapsam: test_cok_talent_tek_pass.py.
-# Silinmedi (tarihsel referans/tasarım kararının izini korumak için) — yalnız EMEKLİ edildi.
-
 # İŞ 6D — YÖNETİCİ ÖZETİ ANORMAL/GEÇERSİZ CEVAP KORUMASI — unit/regression testleri.
 # finalize_interview() GERÇEKTEN çağrılır (uçtan uca) — yalnız regenerate_yonetici_ozeti()
 # monkey-patch ile kontrol edilir, hiçbir gerçek ağ/API çağrısı yapılmaz. Yerel SQLite'a

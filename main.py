@@ -25,7 +25,6 @@ import io
 import time
 import base64
 import traceback
-import contextlib
 from xml.sax.saxutils import escape as xml_escape
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -320,32 +319,6 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_realtime_events_candidate ON realtime_events (candidate_id, level);
 
-            -- İŞ EMRİ — ZORUNLU AI JOB QUEUE / RATE-AWARE SCHEDULER: rapor üretimiyle ilişkili
-            -- HER semantik AI çağrısı (Realtime HARİÇ) buradan geçer. Persistent + atomik claim
-            -- (çoklu worker/replica güvenli) — process-local asyncio.Queue/global dict/semaphore
-            -- DEĞİL. Bkz. ai_job_slot()/submit_ai_job()/_try_acquire_ai_capacity().
-            CREATE TABLE IF NOT EXISTS ai_jobs (
-                id BIGSERIAL PRIMARY KEY,
-                job_id TEXT NOT NULL UNIQUE,
-                candidate_id BIGINT,
-                level INTEGER DEFAULT 1,
-                provider TEXT NOT NULL,
-                model TEXT,
-                operation TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'QUEUED',
-                attempt INTEGER DEFAULT 0,
-                est_input_tokens INTEGER DEFAULT 0,
-                est_output_tokens INTEGER DEFAULT 0,
-                actual_input_tokens INTEGER,
-                actual_output_tokens INTEGER,
-                error_text TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                started_at TIMESTAMP,
-                finished_at TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS idx_ai_jobs_provider_status ON ai_jobs (provider, status);
-            CREATE INDEX IF NOT EXISTS idx_ai_jobs_candidate ON ai_jobs (candidate_id, level);
-
             CREATE TABLE IF NOT EXISTS organizations (
                 id BIGSERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -457,18 +430,6 @@ def init_db():
                 FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_realtime_events_candidate ON realtime_events (candidate_id, level);
-            CREATE TABLE IF NOT EXISTS ai_jobs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                job_id TEXT NOT NULL UNIQUE,
-                candidate_id INTEGER, level INTEGER DEFAULT 1,
-                provider TEXT NOT NULL, model TEXT, operation TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'QUEUED', attempt INTEGER DEFAULT 0,
-                est_input_tokens INTEGER DEFAULT 0, est_output_tokens INTEGER DEFAULT 0,
-                actual_input_tokens INTEGER, actual_output_tokens INTEGER, error_text TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP, started_at TEXT, finished_at TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_ai_jobs_provider_status ON ai_jobs (provider, status);
-            CREATE INDEX IF NOT EXISTS idx_ai_jobs_candidate ON ai_jobs (candidate_id, level);
             CREATE TABLE IF NOT EXISTS organizations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, is_active INTEGER DEFAULT 1,
@@ -5459,219 +5420,6 @@ def _staleness_clause(column: str, seconds: int) -> str:
     return f"{column} < datetime('now', '-{int(seconds)} seconds')"
 
 
-# ============ İŞ EMRİ — ZORUNLU AI JOB QUEUE / RATE-AWARE SCHEDULER ============
-# Rapor üretimiyle ilişkili HER semantik AI çağrısı (OpenAI primary, Claude reviewer, OpenAI
-# Final QG, ve tek-pass yardımcılar: continuation/short-retry/one_cikan_proje_recovery) BU
-# KATMANDAN geçer (madde A). Realtime (canlı ses, WebRTC) BU KUYRUĞA HİÇ GİRMEZ — ayrı, dokunulmadı
-# (madde K). DB'de persistent + atomik claim (madde C — process-local asyncio.Queue/global dict/
-# semaphore KULLANILMADI, çoklu worker/replica güvenli). Kapasite = eşzamanlı RUNNING iş sayısı +
-# yakın pencere token bütçesi (madde D/E) — "30000 TPM" gibi sabit bir mimari limit YOK; aşağıdaki
-# varsayılanlar yalnız GÜVENLİ birer başlangıç noktası, env ile değiştirilebilir.
-
-AI_JOB_MAX_CONCURRENT = {
-    "openai": int(os.getenv("AI_JOB_MAX_CONCURRENT_OPENAI", "4")),
-    "anthropic": int(os.getenv("AI_JOB_MAX_CONCURRENT_ANTHROPIC", "4")),
-}
-# madde E — o an EŞZAMANLI ÇALIŞAN (RUNNING) işlerin taahhüt ettiği toplam token için YUMUŞAK
-# güvenlik bütçesi — gerçek hesap TPM limitinin KENDİSİ DEĞİL, ona ulaşmadan ÖNCE eşzamanlı BURST
-# yükünü kısan bir muhasebe. Yalnız RUNNING (o an gerçekten işlenen) işler sayılır — TAMAMLANMIŞ
-# bir iş kapasitesini/bütçesini ANINDA serbest bırakır (bir TPM-penceresi simülasyonu YAPILMAZ —
-# ne kadar gerçek pencerenin ne olduğu zaten bilinmiyor, madde D). env ile değiştirilebilir.
-AI_JOB_TOKEN_BUDGET = {
-    "openai": int(os.getenv("AI_JOB_TOKEN_BUDGET_OPENAI", "20000")),
-    "anthropic": int(os.getenv("AI_JOB_TOKEN_BUDGET_ANTHROPIC", "20000")),
-}
-AI_JOB_MAX_WAIT_SECONDS = int(os.getenv("AI_JOB_MAX_WAIT_SECONDS", "90"))
-AI_JOB_POLL_MIN_SECONDS = 0.5
-AI_JOB_POLL_MAX_SECONDS = 3.0
-AI_JOB_STALE_RUNNING_SECONDS = int(os.getenv("AI_JOB_STALE_RUNNING_SECONDS", "300"))
-
-
-def _estimate_tokens_from_chars(*texts) -> int:
-    """Kaba/güvenli tahmin — ~4 karakter 1 token (yaygın kabul edilen kaba oran). Aday/pozisyon/
-    kriter sayısına özel HİÇBİR şey içermez, yalnız gönderilecek metnin uzunluğu (madde E)."""
-    total_chars = sum(len(t or "") for t in texts)
-    return max(1, total_chars // 4)
-
-
-def submit_ai_job(candidate_id: Optional[int], level: Optional[int], provider: str, model: Optional[str],
-                  operation: str, est_input_tokens: int = 0, est_output_tokens: int = 0) -> str:
-    """madde A/C — persistent job satırı QUEUED olarak oluşturulur (kuyruk boş olsa DAHİ İŞ ÖNCE
-    buraya girer). job_id döner."""
-    job_id = secrets.token_hex(12)
-    db = get_db()
-    try:
-        db.execute("""
-            INSERT INTO ai_jobs (job_id, candidate_id, level, provider, model, operation, status,
-                                 attempt, est_input_tokens, est_output_tokens, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', 0, ?, ?, CURRENT_TIMESTAMP)
-        """, (job_id, candidate_id, level, provider, model, operation, est_input_tokens, est_output_tokens))
-        db.commit()
-    finally:
-        db.close()
-    return job_id
-
-
-def _recover_stale_ai_jobs() -> None:
-    """madde C — worker/process ölürse RUNNING'de sonsuza dek kilitli KALMASIN: AI_JOB_STALE_
-    RUNNING_SECONDS'ten uzun süredir RUNNING olan işler FAILED'a çevrilir (kapasite serbest kalır).
-    recover_stale_processing_interviews ile AYNI desen (age-based, DB-only, best-effort)."""
-    db = get_db()
-    try:
-        stale_sql = _staleness_clause("started_at", AI_JOB_STALE_RUNNING_SECONDS)
-        db.execute(f"""
-            UPDATE ai_jobs SET status='FAILED', finished_at=CURRENT_TIMESTAMP, error_text='stale_running_recovered'
-            WHERE status='RUNNING' AND started_at IS NOT NULL AND {stale_sql}
-        """)
-        db.commit()
-    except Exception as e:
-        print(f"UYARI (_recover_stale_ai_jobs): {type(e).__name__}: {e}")
-    finally:
-        db.close()
-
-
-def _try_acquire_ai_capacity(job_id: str, provider: str, est_tokens: int) -> bool:
-    """madde D/E — ATOMİK admission: RUNNING sayısı + yakın pencere token toplamı kapasiteyi
-    aşmıyorsa job'ı QUEUED->RUNNING claim eder (tek UPDATE...WHERE, DB seviyesinde — process-local
-    kilide DAYANMAZ, çoklu worker/replica güvenli). Aşıyorsa False döner — çağıran (ai_job_slot)
-    bounded poll ile bekler; bu, FIFO seri çalıştırma DEĞİL (madde B) — yalnız 'şu an provider'a
-    göndermek GÜVENLİ Mİ' sorusuna cevap verir, hiçbir iş SIRASI dayatmaz (kapasite açıldığı anda
-    HANGİ bekleyen iş önce deneyeceği rastgele/poll-zamanlamasına bağlıdır — kasıtlı olarak basit
-    tutuldu, ayrı bir öncelik kuyruğu bu turun kapsamı dışı)."""
-    max_conc = AI_JOB_MAX_CONCURRENT.get(provider, 4)
-    token_budget = AI_JOB_TOKEN_BUDGET.get(provider, 20000)
-    db = get_db()
-    try:
-        running = db.execute("SELECT COUNT(*) AS n FROM ai_jobs WHERE provider=? AND status='RUNNING'",
-                             (provider,)).fetchone()["n"]
-        if running >= max_conc:
-            return False
-        # madde E — yalnız O AN GERÇEKTEN İŞLENEN (RUNNING) işlerin token taahhüdü sayılır;
-        # TAMAMLANMIŞ bir iş kapasiteyi/bütçeyi ANINDA serbest bırakır (bkz. yukarıdaki sabit
-        # tanımının yorum notu — kök neden: geçmiş bir zaman penceresi COMPLETED işleri de sayarsa,
-        # ardışık/hafif testler bile HIZLA bütçeyi tüketip sonraki işleri gereksiz yere bekletiyordu).
-        running_tokens = db.execute(
-            "SELECT COALESCE(SUM(COALESCE(actual_input_tokens, est_input_tokens, 0) "
-            "+ COALESCE(actual_output_tokens, est_output_tokens, 0)), 0) AS t "
-            "FROM ai_jobs WHERE provider=? AND status='RUNNING'",
-            (provider,)).fetchone()["t"]
-        if (running_tokens or 0) + est_tokens > token_budget:
-            return False
-        cur = db.execute("""
-            UPDATE ai_jobs SET status='RUNNING', started_at=CURRENT_TIMESTAMP, attempt=COALESCE(attempt,0)+1
-            WHERE job_id=? AND status='QUEUED'
-        """, (job_id,))
-        db.commit()
-        return (cur.rowcount or 0) > 0
-    finally:
-        db.close()
-
-
-def _finish_ai_job(job_id: str, status: str, error_text: Optional[str] = None) -> None:
-    db = get_db()
-    try:
-        db.execute("""
-            UPDATE ai_jobs SET status=?, finished_at=CURRENT_TIMESTAMP, error_text=?
-            WHERE job_id=?
-        """, (status, (error_text or "")[:500] if error_text else None, job_id))
-        db.commit()
-    finally:
-        db.close()
-
-
-def mark_ai_job_usage(job_id: Optional[str], input_tokens: Optional[int], output_tokens: Optional[int]) -> None:
-    """madde E — gerçek response usage geldikten SONRA tahminle uzlaştırma. Job DURUMUNU
-    değiştirmez (durum ai_job_slot'un normal çıkışında ayarlanır) — yalnız actual_* alanlarını
-    yazar; sonraki _try_acquire_ai_capacity çağrıları artık bu GERÇEK değeri kullanır."""
-    if not job_id:
-        return
-    try:
-        db = get_db()
-        try:
-            db.execute("UPDATE ai_jobs SET actual_input_tokens=?, actual_output_tokens=? WHERE job_id=?",
-                      (input_tokens, output_tokens, job_id))
-            db.commit()
-        finally:
-            db.close()
-    except Exception as e:
-        print(f"UYARI (mark_ai_job_usage job_id={job_id}): {type(e).__name__}: {e}")
-
-
-@contextlib.contextmanager
-def ai_job_slot(candidate_id: Optional[int], level: Optional[int], provider: str, model: Optional[str],
-                operation: str, est_input_tokens: int = 0, est_output_tokens: int = 0):
-    """madde A/B/D — rapor üretimiyle ilişkili HER semantik AI işlemi BU CONTEXT MANAGER'DAN
-    GEÇMEK ZORUNDADIR (Realtime HARİÇ — o hiç buraya girmez). İş, kuyruk boş olsa DAHİ ÖNCE QUEUED
-    olarak kaydedilir (submit_ai_job), sonra kapasite claim edilir. Kapasite yoksa bounded+jitter'lı
-    poll ile bekler (AI_JOB_MAX_WAIT_SECONDS ile TAVANLANMIŞ — sonsuz bekleme YOK); süre dolarsa
-    AIError('rate_limit_exceeded', TEKNİK — semantik DEĞİL) fırlatır, mevcut openai_call/AIError
-    hata zincirine (fail-closed, rapor akışını ÇÖKERTMEZ) AYNEN girer — bu turun kapsamı: 429
-    GELMEDEN ÖNCE aşırı eşzamanlı yükü engellemek (madde D).
-    Kullanım: `with ai_job_slot(...) as job_id: ...provider çağrısı...; mark_ai_job_usage(job_id, in_, out_)`
-    Bloktan exception'sız çıkılırsa COMPLETED, exception'la çıkılırsa FAILED işaretlenir (teknik
-    hata — job durumu SYSTEM STATE'tir, adayın puanına/statüsüne KARIŞMAZ, madde J)."""
-    est_tokens = est_input_tokens + est_output_tokens
-    job_id = submit_ai_job(candidate_id, level, provider, model, operation, est_input_tokens, est_output_tokens)
-    try:
-        _recover_stale_ai_jobs()
-    except Exception:
-        pass
-    waited = 0.0
-    acquired = _try_acquire_ai_capacity(job_id, provider, est_tokens)
-    while not acquired and waited < AI_JOB_MAX_WAIT_SECONDS:
-        delay = random.uniform(AI_JOB_POLL_MIN_SECONDS, AI_JOB_POLL_MAX_SECONDS)
-        time.sleep(delay)
-        waited += delay
-        acquired = _try_acquire_ai_capacity(job_id, provider, est_tokens)
-    if not acquired:
-        _finish_ai_job(job_id, "FAILED", error_text="queue_capacity_timeout")
-        raise AIError("rate_limit_exceeded", provider, operation,
-                      f"AI job queue kapasite bekleme süresi doldu ({AI_JOB_MAX_WAIT_SECONDS}sn) — "
-                      "provider kapasitesi doluydu (madde D — 429 öncesi proaktif engelleme).",
-                      http_status=429)
-    try:
-        yield job_id
-    except Exception as e:
-        _finish_ai_job(job_id, "FAILED", error_text=f"{type(e).__name__}: {e}")
-        raise
-    else:
-        _finish_ai_job(job_id, "COMPLETED")
-
-
-def _ai_job_acquire(candidate_id: Optional[int], level: Optional[int], provider: str, model: Optional[str],
-                    operation: str, est_input_tokens: int = 0, est_output_tokens: int = 0) -> str:
-    """ai_job_slot ile AYNI submit+admission mantığı, yalnız `with` bloğu KULLANAMAYAN — birden
-    çok iç çağrı (continuation/exit-response gibi) içeren, tek bir bloğa sığmayan uzun kod
-    parçaları için — çağıran işini bitirince `_ai_job_release` çağırmak ZORUNDADIR (genelde
-    fonksiyonun ZATEN sahip olduğu dış try/except'e tek satırlık release eklenerek)."""
-    est_tokens = est_input_tokens + est_output_tokens
-    job_id = submit_ai_job(candidate_id, level, provider, model, operation, est_input_tokens, est_output_tokens)
-    try:
-        _recover_stale_ai_jobs()
-    except Exception:
-        pass
-    waited = 0.0
-    acquired = _try_acquire_ai_capacity(job_id, provider, est_tokens)
-    while not acquired and waited < AI_JOB_MAX_WAIT_SECONDS:
-        delay = random.uniform(AI_JOB_POLL_MIN_SECONDS, AI_JOB_POLL_MAX_SECONDS)
-        time.sleep(delay)
-        waited += delay
-        acquired = _try_acquire_ai_capacity(job_id, provider, est_tokens)
-    if not acquired:
-        _finish_ai_job(job_id, "FAILED", error_text="queue_capacity_timeout")
-        raise AIError("rate_limit_exceeded", provider, operation,
-                      f"AI job queue kapasite bekleme süresi doldu ({AI_JOB_MAX_WAIT_SECONDS}sn) — "
-                      "provider kapasitesi doluydu (madde D — 429 öncesi proaktif engelleme).",
-                      http_status=429)
-    return job_id
-
-
-def _ai_job_release(job_id: Optional[str], ok: bool, error_text: Optional[str] = None) -> None:
-    if not job_id:
-        return
-    _finish_ai_job(job_id, "COMPLETED" if ok else "FAILED", error_text=error_text)
-
-
 def _mark_finish_pending(candidate_id: int, level: int, provider: str, model: Optional[str], system: Optional[str],
                           payload: str, terminated_reason: Optional[str], reason: str) -> Optional[str]:
     """İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde I: ATOMİK CLAIM. Aynı candidate+level için HÂLİHAZIRDA
@@ -6451,11 +6199,7 @@ Hiçbir kriterde sorun görmüyorsan bu bölüme HİÇBİR SATIR yazma (boş bı
 
 === BAŞVURU FORMU BEYANI ===
 {basvuru_formu_block}"""
-    # madde A/D — Claude ikinci değerlendirme provider'a gitmeden ÖNCE scheduler'dan geçer.
-    _reviewer_job_id = None
     try:
-        _reviewer_job_id = _ai_job_acquire(candidate_id, level, "anthropic", "claude-sonnet-4-6",
-                                           "report_reviewer", _estimate_tokens_from_chars(prompt), 1400)
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
         response = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=1400, temperature=0.3,
@@ -6468,12 +6212,8 @@ Hiçbir kriterde sorun görmüyorsan bu bölüme HİÇBİR SATIR yazma (boş bı
         record_system_decision(candidate_id, level, "mufettis_ham_cikti",
                                "İkinci değerlendiricinin parse ÖNCESİ ham çıktısı (teşhis için).",
                                {"raw": raw_out[:4000]})
-        _ai_job_release(_reviewer_job_id, True)
-        mark_ai_job_usage(_reviewer_job_id, _estimate_tokens_from_chars(prompt),
-                          getattr(getattr(response, "usage", None), "output_tokens", None))
         return raw_out, "ok", ""
     except Exception as e:
-        _ai_job_release(_reviewer_job_id, False, f"{type(e).__name__}: {e}")
         print(f"UYARI (run_report_reviewer c={candidate_id} L{level}): {type(e).__name__}: {e}")
         return "", "failed", f"{type(e).__name__}: {e}"
 
@@ -8252,32 +7992,12 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
         # çağrılmıyor.
 
         if violations:
-            # İŞ EMRİ — ZORUNLU AI JOB QUEUE + DEĞERLENDİRİLEMEDİ KURALININ DÜZELTİLMESİ / madde
-            # I/J: ESKİ davranış burada kriteri "Değerlendirilemedi (sistem)" yapıp payda DIŞINA
-            # ALIYORDU — bu bir FORMAT/validator başarısızlığını ADAYIN semantik sonucuna
-            # çeviriyordu (artık YASAK). PRIMARY modelin ZATEN ürettiği puan (awarded/cap — primary
-            # kendi CRITERION_SCORING_RULE'ına/canonical 4 kurala göre bunu üretti, o kurallar
-            # DEĞİŞMEDİ) KORUNUR; validator yalnız TESPİT edip LOGLAR (Final QG görür), puanı/
-            # payda'yı DEĞİŞTİRMEZ. "Değerlendirilemedi (sistem)" metni artık BURADAN HİÇ
-            # ÜRETİLMİYOR — yalnız primary'nin KENDİ canonical 'hiç sorulmadı' işaretlemesi
-            # (recompute_and_fix_score/recompute_profile_section, madde I'in 1. kuralı) bu metni
-            # üretmeye DEVAM ediyor; o AYRI ve BU TURDA DOKUNULMAYAN bir kural.
-            log.append({"kriter": cname, "kimlik": cid, "sonuc": "format_dogrulanamadi_puan_korundu",
-                       "ihlaller": violations,
-                       "not": "Validator formatı doğrulayamadı ama PRIMARY'nin puanı/gerekçesi KORUNDU "
-                              "— format/teknik sorun aday sonucuna dönüştürülmedi (İŞ EMRİ madde I/J)."})
-            if fields:
-                accepted_claims.append(fields.get("g") or "")
-                t_idx = idx - 1
-                rendered_rows.append({"line_idx": best_i, "disqualified": False, "cap": cap, "awarded": awarded,
-                                      "fields": fields, "template_idx": t_idx, "cid": cid, "cname": cname})
-                cells[1] = f"{awarded}/{cap}"
-                cells[2] = render_criterion_rationale(fields, t_idx)
-            else:
-                # Legacy serbest-metin hücre — mevcut cells[1]/cells[2] AYNEN korunur, üzerine
-                # sistem işareti YAZILMAZ.
-                rendered_rows.append({"line_idx": best_i, "disqualified": False, "cap": cap, "awarded": awarded,
-                                      "fields": None, "template_idx": idx - 1, "cid": cid, "cname": cname})
+            log.append({"kriter": cname, "kimlik": cid, "sonuc": "degerlendirilemedi_sistem", "ihlaller": violations})
+            new_score_cell = f"Değerlendirilemedi (sistem) — doğrulayıcı 3 denemede geçerli gerekçe üretemedi ({', '.join(violations)})"
+            new_evidence = "Bu kriter için doğrulanabilir bir gerekçe üretilemedi; puan sisteme göre değerlendirilemedi sayıldı."
+            cells[1] = new_score_cell
+            cells[2] = new_evidence
+            rendered_rows.append({"line_idx": best_i, "disqualified": True, "cap": cap, "awarded": awarded})
         else:
             log.append({"kriter": cname, "kimlik": cid, "sonuc": "gecti", "deneme": attempt})
             accepted_claims.append(fields["g"])
@@ -8715,11 +8435,6 @@ def run_deferred_finish_job(candidate_id: int, level: int, regen: bool = False):
     if not payload:
         _mark_finish_failed(candidate_id, level, "pending_finish_payload boş — gönderilecek kayıtlı istek yok")
         return
-    # İŞ EMRİ — ZORUNLU AI JOB QUEUE / RATE-AWARE SCHEDULER: bu try bloğu içinde birincil rapor
-    # üretimi (Claude/OpenAI) BAŞLAMADAN önce _ai_job_acquire ile scheduler'dan geçer; blok
-    # sonunda / early-return öncesinde / dıştaki except'lerde _ai_job_release ile serbest
-    # bırakılır. None ise henüz claim edilmemiş demektir (aşağıdaki except'ler no-op geçer).
-    _primary_job_id = None
     try:
         # FAZ D — MODALİTE KANITLARI: mimik + ses metrikleri + ses gözlemleri. En iyi çaba;
         # patlarsa boş döner. Birincil yazara ek kanıt bloğu olarak verilir (system'e değil,
@@ -8759,13 +8474,6 @@ def run_deferred_finish_job(candidate_id: int, level: int, regen: bool = False):
         # altında; tam rapor + iki tablo + görüş ayrılıkları rahatça sığar). NOT: bu, önceki turda
         # eklenen REALTIME_MAX_RESPONSE_TOKENS (realtime YANIT tavanı) ile İLGİSİZDİR.
         REPORT_MAX_TOKENS = 16000
-        # madde A/D — provider'a gitmeden ÖNCE scheduler'dan kapasite claim edilir (kuyruk boş
-        # olsa DAHİ önce QUEUED). est_output_tokens = REPORT_MAX_TOKENS (tavan; gerçek kullanım
-        # mark_ai_job_usage ile SONRA uzlaştırılır, madde E).
-        _primary_job_id = _ai_job_acquire(
-            candidate_id, level, "anthropic" if provider == "claude" else "openai",
-            model or ("claude-sonnet-4-6" if provider == "claude" else OPENAI_REPORT_MODEL),
-            "primary_report", _estimate_tokens_from_chars(system, primary_payload), REPORT_MAX_TOKENS)
         if provider == "claude":
             if not ANTHROPIC_API_KEY:
                 raise RuntimeError("ANTHROPIC_API_KEY tanımlı değil")
@@ -8880,7 +8588,6 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
                 if _retry_still_anomalous:
                     print(f"[REPORT_SHORT_FAILED] c={candidate_id} L{level} out1={_out_tok_primary} out2={_out_tok_retry} "
                           f"text2={repr(reply_retry)[:500]}")
-                    _ai_job_release(_primary_job_id, False, "iki denemede de anormal kısa cevap")
                     _mark_finish_failed(candidate_id, level,
                                         "Rapor üretimi iki denemede de anormal derecede kısa cevap döndürdü "
                                         "(olası model/API anomalisi) — continuation'a girilmedi, eski rapor korunuyor.")
@@ -8918,15 +8625,6 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
                                        warnings=["Rapor üretimi token sınırına takıldı (bkz. report_tech_note)."])
         else:
             raise RuntimeError(f"Bilinmeyen pending_finish_provider: {provider!r}")
-
-        # madde A/E — birincil üretim BAŞARIYLA tamamlandı: job COMPLETED, gerçek usage'la uzlaştır.
-        _ai_job_release(_primary_job_id, True)
-        try:
-            _final_out_tok = (getattr(_u, 'output_tokens', None) if provider == "claude"
-                              else _safe_int((_uo or {}).get('completion_tokens', 0)))
-            mark_ai_job_usage(_primary_job_id, _estimate_tokens_from_chars(system, primary_payload), _final_out_tok)
-        except Exception:
-            pass
 
         # item 6 — modelin İŞLENMEMİŞ çıktısını sakla (yalnız admin panel; ≤20000 kr). Denetçi /
         # bağımsız profil / puanlama doğrulaması / öneri hizalaması HİÇBİRİ uygulanmadan ÖNCEKİ hal.
@@ -9022,16 +8720,13 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         print(f"[PROCESSING_DONE] candidate_id={candidate_id} level={level} regen={regen}")
     except AIError as e:
         # openai_call zaten error_logs'a yazdı + kritik e-postayı tetikledi.
-        _ai_job_release(_primary_job_id, False, f"AIError:{e.error_class}")
         print(f"HATA (run_deferred_finish_job AIError c={candidate_id} L{level}): {e.error_class}")
         _mark_finish_failed(candidate_id, level, f"AI hatası ({e.error_class})")
     except anthropic.APIError as e:
-        _ai_job_release(_primary_job_id, False, f"{type(e).__name__}")
         ai_error_from_anthropic(e, "report_generation", {"candidate_id": candidate_id, "level": level}, severity="user")
         print(f"HATA (run_deferred_finish_job anthropic c={candidate_id} L{level}): {type(e).__name__}: {e}")
         _mark_finish_failed(candidate_id, level, f"AI (Claude) hatası: {type(e).__name__}")
     except Exception as e:
-        _ai_job_release(_primary_job_id, False, f"{type(e).__name__}")
         print(f"HATA (run_deferred_finish_job c={candidate_id} L{level}): {type(e).__name__}: {e}")
         _mark_finish_failed(candidate_id, level, f"{type(e).__name__}: {e}")
 
@@ -11325,14 +11020,10 @@ Yalnız gerçekten HİÇBİR anlamlı, adaya ait, doğrulanabilir deneyim yoksa 
 
 SADECE bölüm metnini yaz (başlık/etiket/tırnak EKLEME, açıklama yapma)."""
     raw = None
-    # madde A/D — provider'a gitmeden ÖNCE scheduler'dan geçer (Claude/OpenAI AYRI havuz).
-    _proj_job_id = None
     try:
         if provider == "claude":
             if not ANTHROPIC_API_KEY:
                 return None
-            _proj_job_id = _ai_job_acquire(candidate_id, level, "anthropic", model or "claude-sonnet-4-6",
-                                           "one_cikan_proje_recovery", _estimate_tokens_from_chars(prompt), 500)
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
             resp = client.messages.create(model=model or "claude-sonnet-4-6", max_tokens=500, temperature=0,
                                           messages=[{"role": "user", "content": prompt}])
@@ -11346,8 +11037,6 @@ SADECE bölüm metnini yaz (başlık/etiket/tırnak EKLEME, açıklama yapma).""
             # kapsamında incelendi, DEĞİŞTİRİLMEDİ). Ama 429/timeout/geçici 5xx gibi TEKNİK
             # hatalarda artık merkezi katmanın bounded teknik retry'ından (Retry-After farkında)
             # faydalanır — retry=False -> True (yalnız TEKNİK hata sınıfları tekrar dener).
-            _proj_job_id = _ai_job_acquire(candidate_id, level, "openai", model or OPENAI_REPORT_MODEL,
-                                           "one_cikan_proje_recovery", _estimate_tokens_from_chars(prompt), 500)
             resp = openai_call("POST", "https://api.openai.com/v1/chat/completions",
                                json_body={"model": model or OPENAI_REPORT_MODEL,
                                           "messages": [{"role": "user", "content": prompt}],
@@ -11360,10 +11049,8 @@ SADECE bölüm metnini yaz (başlık/etiket/tırnak EKLEME, açıklama yapma).""
         else:
             return None
     except Exception as ex:
-        _ai_job_release(_proj_job_id, False, f"{type(ex).__name__}: {ex}")
         print(f"UYARI (regenerate_one_cikan_proje c={candidate_id} L{level}): {type(ex).__name__}: {ex}")
         return None
-    _ai_job_release(_proj_job_id, True)
     return (raw or "").strip()
 
 def _one_cikan_proje_recovery_grounded(text: str, transcript_view: list) -> bool:
@@ -11773,11 +11460,7 @@ PATCH: <AYNI SECTION_KEY> = <o bölümün TAMAMININ yeni, düzeltilmiş hali>
 {"NOT: Rapor uzunluk sınırı nedeniyle KISALTILDI — görmediğin sondaki bölümler hakkında 'uydurma/yanlış/çelişkili' diye KESİN hüküm VERME." if report_partial else ""}
 {report_text_for_gate}"""
 
-    # madde A/D — Final QG provider'a gitmeden ÖNCE scheduler'dan geçer.
-    _qg_job_id = None
     try:
-        _qg_job_id = _ai_job_acquire(candidate_id, level, "openai", OPENAI_REVIEWER_MODEL,
-                                     "quality_gate", _estimate_tokens_from_chars(prompt), QUALITY_GATE_MAX_TOKENS)
         resp = openai_call(
             "POST", "https://api.openai.com/v1/chat/completions",
             json_body={"model": OPENAI_REVIEWER_MODEL, "messages": [{"role": "user", "content": prompt}],
@@ -11789,11 +11472,7 @@ PATCH: <AYNI SECTION_KEY> = <o bölümün TAMAMININ yeni, düzeltilmiş hali>
         record_openai_chat_usage(candidate_id, level, OPENAI_REVIEWER_MODEL, "quality_gate", result)
         raw_out = (result["choices"][0]["message"]["content"] or "").strip()
         print(f"[QUALITY_GATE_RAW] c={candidate_id} L{level} len={len(raw_out)}\n{raw_out[:1500]}")
-        _ai_job_release(_qg_job_id, True)
-        mark_ai_job_usage(_qg_job_id, _estimate_tokens_from_chars(prompt),
-                          _safe_int((result.get("usage") or {}).get("completion_tokens", 0)))
     except Exception as e:
-        _ai_job_release(_qg_job_id, False, f"{type(e).__name__}: {e}")
         print(f"UYARI (run_final_report_quality_gate çağrı c={candidate_id} L{level}): {type(e).__name__}: {e}")
         record_system_decision(candidate_id, level, "quality_gate_hata",
                                "Final Report Quality Gate çağrısı başarısız/zaman aşımı — rapor DEĞİŞMEDEN korundu.",

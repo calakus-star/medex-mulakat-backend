@@ -78,14 +78,8 @@ try:
         new_table, new_score, log, flagged = m.apply_structured_rationale_gate(
             table_text, criteria_list, "P", [], "", "openai", "gpt-4o", CAND_A, LEVEL)
         check("A) apply_structured_rationale_gate AI'yı HİÇ çağırmadan tamamlandı (exception yok)", True)
-        # İŞ EMRİ — DEĞERLENDİRİLEMEDİ KURALININ DÜZELTİLMESİ: format/validator başarısızlığı
-        # ARTIK "degerlendirilemedi_sistem" ÜRETMİYOR — PRIMARY'nin puanı (5/10) KORUNUYOR.
-        check("A) Format ihlali ARTIK 'degerlendirilemedi_sistem' ÜRETMİYOR (madde I/J)",
-              not any(l.get("sonuc") == "degerlendirilemedi_sistem" for l in log))
-        check("A) Format ihlali yerine 'format_dogrulanamadi_puan_korundu' loglandı",
-              any(l.get("sonuc") == "format_dogrulanamadi_puan_korundu" for l in log))
-        check("A) PRIMARY'nin puanı (5/10) tabloda KORUNDU — 'Değerlendirilemedi' metni yazılmadı",
-              "5/10" in new_table and "Değerlendirilemedi" not in new_table)
+        check("A) İhlal deterministik onarılamayınca kriter 'degerlendirilemedi_sistem' oldu (AI'sız)",
+              any(l.get("sonuc") == "degerlendirilemedi_sistem" for l in log))
     except _ContentRetryCalled as e:
         check("A) apply_structured_rationale_gate AI'yı HİÇ çağırmadan tamamlandı (exception yok)", False)
     finally:

@@ -232,10 +232,10 @@ r3 = subprocess.run([sys.executable, "test_is3_scope_context.py"], capture_outpu
 print(r3.stdout.strip().splitlines()[-1] if r3.stdout else "(çıktı yok)")
 is3_ok = r3.returncode == 0
 
-# İŞ 4 REGRESYON kaldırıldı — test_is4_validator_recovery.py, İŞ EMRİ — ZORUNLU AI JOB QUEUE +
-# DEĞERLENDİRİLEMEDİ KURALININ DÜZELTİLMESİ ile BİLİNÇLİ OLARAK KALDIRILAN davranışı (validator'ın
-# AI content-retry'sı) test ettiği için EMEKLİ edildi (.py.retired) — artık regresyon referansı
-# olarak ÇALIŞTIRILMAZ.
+print("=== İŞ 4 REGRESYON ===")
+r4 = subprocess.run([sys.executable, "test_is4_validator_recovery.py"], capture_output=True, text=True)
+print(r4.stdout.strip().splitlines()[-1] if r4.stdout else "(çıktı yok)")
+is4_ok = r4.returncode == 0
 
-if FAILURES or not (is1_ok and is2_ok and is3_ok):
+if FAILURES or not (is1_ok and is2_ok and is3_ok and is4_ok):
     sys.exit(1)
