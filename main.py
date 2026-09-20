@@ -11,6 +11,7 @@ import hashlib
 import secrets
 import string
 import os
+import random
 import jwt
 import anthropic
 import httpx
@@ -560,6 +561,19 @@ def init_db():
         # İŞ EMRİ — madde 11: AI Quality Gate'ten SONRA, DB finalization'dan ÖNCE çalışan
         # deterministik bütünlük kapısının sonucu (PASS | FAIL) — yönetici görünür, ayrı log.
         ("interviews", "final_integrity_status", "TEXT"),
+        # İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde I: aynı candidate+level için aynı anda YALNIZ
+        # TEK finish/regenerate job'ı çalışabilsin diye atomik claim alanları (bkz.
+        # _mark_finish_pending). processing_status zaten vardı (status); bunlar job_id/operation/
+        # attempt'i EKLER — process-local değil, DB seviyesinde (çoklu worker/process güvenli).
+        ("interviews", "processing_job_id", "TEXT"),
+        ("interviews", "processing_operation", "TEXT"),
+        ("interviews", "processing_attempt", "INTEGER DEFAULT 0"),
+        # İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde B: aynı candidate+level için aynı anda YALNIZ
+        # TEK aktif Realtime (canlı ses) oturumu kabul edilsin diye ownership alanları (bkz.
+        # create_realtime_session). Transcript/skor alanlarına dokunmaz, yalnız "şu an bu satırın
+        # canlı oturum sahibi kim/ne zamandan beri" bilgisini tutar.
+        ("interviews", "realtime_owner_token", "TEXT"),
+        ("interviews", "realtime_owner_at", "TIMESTAMP" if USE_POSTGRES else "TEXT"),
     ]
     for table, column, definition in migrations:
         try:
@@ -2086,7 +2100,67 @@ def send_report_email(candidate_name, position, report, score, recommendation, s
 # adaya ASLA ham kod/status/teknik metin sızmasın, admin panelinde görünsün, kritik durumda
 # anında e-posta gitsin, uygun sınıflarda otomatik retry yapılsın.
 
-_RETRY_BACKOFF = [1, 3, 7]  # saniye — 3 deneme
+_RETRY_BACKOFF = [1, 3, 7]  # saniye — 3 deneme (GERİYE UYUM: artık yalnız _technical_retry_delay'in
+# Retry-After YOKSA düştüğü bounded exponential formülünün başlangıç tabanı olarak kullanılıyor;
+# davranışı hâlâ tanımlayan TEK yer değil, bkz. aşağıdaki İŞ EMRİ — TEKNİK RETRY bloğu.
+
+# İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde G — TEKNİK RETRY ile CONTENT RETRY kesin ayrıldı.
+# Bu blok yalnız TEKNİK (429/timeout/network/geçici 5xx) retry'ı yönetir — "AI cevabını beğenmedik,
+# yeniden üret" (content retry) burada YOK, o normal akıştan tamamen çıkarıldı (bkz.
+# apply_structured_rationale_gate / finalize_interview yönetici özeti bloğu). Sonsuz retry YOK —
+# _RETRY_MAX_ATTEMPTS ile ve her denemenin beklemesi _RETRY_MAX_DELAY_SECONDS ile tavanlanır.
+_RETRY_MAX_ATTEMPTS = 4          # ilk deneme + en fazla 3 teknik retry (mevcut üst sınırla AYNI)
+_RETRY_MAX_DELAY_SECONDS = 20.0  # Retry-After bile bunu aşarsa yine bu tavanda bekler (sonsuz bekleme yok)
+
+
+def _parse_retry_after(headers) -> Optional[float]:
+    """HTTP Retry-After header'ını saniyeye çevirir (tam sayı/saniye biçimi VEYA HTTP-date).
+    Yok/parse edilemezse None — çağıran bounded exponential backoff'a düşer."""
+    if not headers:
+        return None
+    val = headers.get("retry-after") or headers.get("Retry-After")
+    if not val:
+        return None
+    try:
+        return max(0.0, float(val))
+    except (TypeError, ValueError):
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(val)
+        if dt is not None:
+            now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+            return max(0.0, (dt - now).total_seconds())
+    except Exception:
+        pass
+    return None
+
+
+def _log_rate_limit_headers(step: str, headers) -> None:
+    """GÖREV J/M — x-ratelimit-* header'ları (varsa) yalnız GÖZLEMLENEBİLİRLİK için loglanır;
+    kapasite kararı BUNLARA dayanmaz (OpenAI bu header'ları her istekte garanti etmez, provider'a
+    göre değişir) — yalnız admin/debug tanısı için Railway stdout'a basılır. Secret/token YOK."""
+    if not headers:
+        return
+    keys = ("x-ratelimit-remaining-requests", "x-ratelimit-remaining-tokens",
+            "x-ratelimit-limit-requests", "x-ratelimit-limit-tokens",
+            "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens")
+    found = {k: headers.get(k) for k in keys if headers.get(k) is not None}
+    if found:
+        print(f"[RATE_LIMIT_HEADERS] step={step} {found}")
+
+
+def _technical_retry_delay(attempt_idx: int, headers=None) -> float:
+    """GÖREV G — teknik retry gecikmesi: ÖNCE sunucunun Retry-After'ı (varsa) kullanılır; yoksa
+    bounded exponential backoff + jitter (sabit [1,3,7] yerine — art arda çok sayıda çağrı aynı
+    TPM penceresine YIĞILMASIN diye jitter var). Her durumda _RETRY_MAX_DELAY_SECONDS ile
+    tavanlanır — sonsuz/aşırı uzun bekleme yok."""
+    ra = _parse_retry_after(headers)
+    if ra is not None:
+        return min(ra, _RETRY_MAX_DELAY_SECONDS)
+    base = min(1.0 * (2 ** attempt_idx), _RETRY_MAX_DELAY_SECONDS)
+    jitter = random.uniform(0, base * 0.5)
+    return min(base + jitter, _RETRY_MAX_DELAY_SECONDS)
 
 # error_class -> adaya gösterilecek metin (İŞ EMRİ 1.4 tablosu). Backend'de "kota/bakiye/API/quota"
 # kelimeleri bu sözlüğün dışına ÇIKMAZ; frontend yalnızca buradaki 'message'ı gösterir.
@@ -2290,7 +2364,7 @@ def openai_call(method: str, url: str, *, json_body=None, files=None, data=None,
         headers["Content-Type"] = "application/json"
     if headers_extra:
         headers.update(headers_extra)
-    attempts = (len(_RETRY_BACKOFF) + 1) if retry else 1
+    attempts = _RETRY_MAX_ATTEMPTS if retry else 1
     last_err_class = "unknown"
     last_detail = ""
     for i in range(attempts):
@@ -2304,9 +2378,10 @@ def openai_call(method: str, url: str, *, json_body=None, files=None, data=None,
             last_detail = f"{type(e).__name__}: {e} | {method} {url}"
             print(f"[OPENAI_ERR] {step} network attempt={i+1}/{attempts}: {last_detail}")
             if retry and i < attempts - 1:
-                time.sleep(_RETRY_BACKOFF[i]); continue
+                time.sleep(_technical_retry_delay(i)); continue
             raise _handle_ai_failure(AIError("network", "openai", step, last_detail, retry_count=i,
                                              http_status=504), context, severity)
+        _log_rate_limit_headers(step, resp.headers)
         if resp.status_code < 400:
             print(f"[OPENAI_OK] {step} {resp.status_code} {dt}ms {method} {url}")
             return resp
@@ -2315,7 +2390,8 @@ def openai_call(method: str, url: str, *, json_body=None, files=None, data=None,
         last_detail = f"HTTP {resp.status_code} | {method} {url} | {body_text}"
         print(f"[OPENAI_ERR] {step} {last_err_class} HTTP {resp.status_code} attempt={i+1}/{attempts}: {body_text[:300]}")
         if retry and last_err_class in _RETRYABLE_CLASSES and i < attempts - 1:
-            time.sleep(_RETRY_BACKOFF[i]); continue
+            # GÖREV G/J — Retry-After (varsa) veya bounded exponential+jitter; sabit [1,3,7] artık YOK.
+            time.sleep(_technical_retry_delay(i, resp.headers)); continue
         raise _handle_ai_failure(AIError(last_err_class, "openai", step, last_detail, retry_count=i,
                                          http_status=_http_status_for_class(last_err_class)), context, severity)
     # buraya normalde ulaşılmaz
@@ -4525,9 +4601,12 @@ GÖREV:
             db.commit(); db.close()
             # İŞ EMRİ — L1 OPENAI-ONLY MİMARİSİ: L1 birincil DEĞERLENDİRME/RAPOR ve canlı sohbetin
             # tamamı artık OpenAI (RAPOR üretimi önceki fazda taşınmıştı, CANLI sohbet bu fazda taşındı).
-            _mark_finish_pending(effective_candidate_id, level, provider="openai", model=OPENAI_REPORT_MODEL,
-                                  system=system, payload=user_payload, terminated_reason=None, reason="normal")
-            background_tasks.add_task(run_deferred_finish_job, effective_candidate_id, level)
+            _job_id = _mark_finish_pending(effective_candidate_id, level, provider="openai", model=OPENAI_REPORT_MODEL,
+                                           system=system, payload=user_payload, terminated_reason=None, reason="normal")
+            # madde I — claim başarısızsa (nadiren: çift-submit vb.) zaten başka bir job aktif;
+            # ikinci run_deferred_finish_job TETİKLENMEZ, ama yanıt yine de doğru (bir iş SÜRÜYOR).
+            if _job_id:
+                background_tasks.add_task(run_deferred_finish_job, effective_candidate_id, level)
             return {
                 "message": "Mülakatınız tamamlandı, teşekkür ederiz. Raporunuz hazırlanıyor.",
                 "completed": True, "processing": True, "score": None, "recommendation": None,
@@ -4626,10 +4705,11 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
                              completion_pct=min(100, round(len(real_answers) / max(1, lvl_cfg["min_q"]) * 100)),
                              result_reason="Aday mülakatı kendi isteğiyle erken sonlandırdı.")
             # İŞ EMRİ — L1 OPENAI-ONLY MİMARİSİ: L1 birincil DEĞERLENDİRME/RAPOR OpenAI.
-            _mark_finish_pending(effective_candidate_id, level, provider="openai", model=OPENAI_REPORT_MODEL,
-                                  system=system, payload=finish_payload,
-                                  terminated_reason="Aday talebiyle erken sonlandırıldı", reason="aday_talebi")
-            background_tasks.add_task(run_deferred_finish_job, effective_candidate_id, level)
+            _job_id = _mark_finish_pending(effective_candidate_id, level, provider="openai", model=OPENAI_REPORT_MODEL,
+                                           system=system, payload=finish_payload,
+                                           terminated_reason="Aday talebiyle erken sonlandırıldı", reason="aday_talebi")
+            if _job_id:
+                background_tasks.add_task(run_deferred_finish_job, effective_candidate_id, level)
             return {
                 "message": "Anlıyorum, mülakatı burada sonlandıralım. Raporunuz hazırlanıyor.",
                 "completed": True, "processing": True, "score": None, "recommendation": None,
@@ -5327,22 +5407,56 @@ def strip_empty_report_sections(text: str) -> str:
 # taramasıyla sonradan aynı promptu birebir tekrar gönderiyoruz — mantığı yeniden kurmuyoruz,
 # sadece "gönderilecek olanı" saklayıp tekrar oynatıyoruz. Bu yüzden normal kapanış, aday-talebi
 # kapanışı, ihlal kapanışı ve L2 sesli raporu TEK bir arka plan fonksiyonundan geçer.
+_FINISH_JOB_STALE_SECONDS = 180  # recover_stale_processing_interviews ile AYNI eşik (bkz. aşağıda)
+
+
+def _staleness_clause(column: str, seconds: int) -> str:
+    """İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde I+B: 'stale mi' karşılaştırması HER ZAMAN DB
+    motorunun KENDİ saatine göre yapılır — Python'un datetime.now() (yerel saat dilimi) ile
+    SQLite/Postgres'in CURRENT_TIMESTAMP'i (UTC) arasındaki fark, claim'in YANLIŞ zamanda
+    stale sayılmasına yol açabiliyordu (regresyon testinde yakalandı — kök neden: bu fark)."""
+    if USE_POSTGRES:
+        return f"{column} < CURRENT_TIMESTAMP - INTERVAL '{int(seconds)} seconds'"
+    return f"{column} < datetime('now', '-{int(seconds)} seconds')"
+
+
 def _mark_finish_pending(candidate_id: int, level: int, provider: str, model: Optional[str], system: Optional[str],
-                          payload: str, terminated_reason: Optional[str], reason: str):
+                          payload: str, terminated_reason: Optional[str], reason: str) -> Optional[str]:
+    """İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde I: ATOMİK CLAIM. Aynı candidate+level için HÂLİHAZIRDA
+    aktif (stale OLMAYAN) bir finish/regenerate job'ı varsa bu çağrı BAŞARISIZ olur (None döner) —
+    çağıran background_tasks.add_task'i TETİKLEMEMELİDİR (aksi halde iki run_deferred_finish_job
+    aynı satırı eşzamanlı işler, klasik race). Tek atomik UPDATE...WHERE — DB seviyesinde, process-
+    local kilide DAYANMAZ (çoklu worker/replica güvenli). Başarılıysa job_id (str) döner."""
+    job_id = secrets.token_hex(12)
     db = get_db()
-    db.execute("""
-        UPDATE interviews SET processing_status='processing', processing_started_at=CURRENT_TIMESTAMP,
-               processing_error=NULL, pending_finish_reason=?, pending_finish_provider=?, pending_finish_model=?,
-               pending_finish_system=?, pending_finish_payload=?, pending_finish_terminated_reason=?
-        WHERE candidate_id=? AND level=?
-    """, (reason, provider, model, system, payload, terminated_reason, candidate_id, level))
-    # KALEM 4 — mülakatın GERÇEK bitiş anı: aday tam ŞİMDİ bitirdi. Arka plan rapor işi dakikalar/
-    # saatler sonra bitebilir; completed_at o zamanı DEĞİL bu anı yansıtmalı. Yeniden üretimde
-    # (reason='admin_regenerate') dokunma — orijinal bitiş korunur.
-    if reason != "admin_regenerate":
-        db.execute("UPDATE interviews SET interview_ended_at=COALESCE(interview_ended_at, CURRENT_TIMESTAMP) "
-                   "WHERE candidate_id=? AND level=?", (candidate_id, level))
-    db.commit(); db.close()
+    try:
+        stale_sql = _staleness_clause("processing_started_at", _FINISH_JOB_STALE_SECONDS)
+        cur = db.execute(f"""
+            UPDATE interviews SET processing_status='processing', processing_started_at=CURRENT_TIMESTAMP,
+                   processing_error=NULL, pending_finish_reason=?, pending_finish_provider=?, pending_finish_model=?,
+                   pending_finish_system=?, pending_finish_payload=?, pending_finish_terminated_reason=?,
+                   processing_job_id=?, processing_operation=?, processing_attempt=COALESCE(processing_attempt,0)+1
+            WHERE candidate_id=? AND level=?
+              AND (processing_status IS NULL OR processing_status IN ('completed','failed')
+                   OR processing_started_at IS NULL OR {stale_sql})
+        """, (reason, provider, model, system, payload, terminated_reason, job_id, reason,
+              candidate_id, level))
+        claimed = (cur.rowcount or 0) > 0
+        if not claimed:
+            db.rollback()
+            print(f"[FINISH_JOB_CLAIM_REJECTED] candidate_id={candidate_id} level={level} reason={reason} "
+                  "— zaten aktif bir işlem var, ikinci tetikleme atlandı (madde I).")
+            return None
+        # KALEM 4 — mülakatın GERÇEK bitiş anı: aday tam ŞİMDİ bitirdi. Arka plan rapor işi dakikalar/
+        # saatler sonra bitebilir; completed_at o zamanı DEĞİL bu anı yansıtmalı. Yeniden üretimde
+        # (reason='admin_regenerate') dokunma — orijinal bitiş korunur.
+        if reason != "admin_regenerate":
+            db.execute("UPDATE interviews SET interview_ended_at=COALESCE(interview_ended_at, CURRENT_TIMESTAMP) "
+                       "WHERE candidate_id=? AND level=?", (candidate_id, level))
+        db.commit()
+        return job_id
+    finally:
+        db.close()
 
 def _mark_finish_failed(candidate_id: int, level: int, error_text: str):
     db = get_db()
@@ -7833,21 +7947,17 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
             violations = validate_criterion_fields(fields, cap, awarded, transcript_view, accepted_claims)
             print(f"[CRITERION_DETERMINISTIC_REPAIR] c={candidate_id} L{level} criterion={cid} "
                   f"repaired={','.join(_repaired_codes)}")
-        # İş emri GÖREV 1.1 (VALIDATOR KALİBRASYONU) — 2 → 3 deneme: kanıtlı kriterlerin (Murat
-        # AYZİT raporunda İnisiyatif/Analitik gibi) 2 denemede düzelemeyip düşmesi kanıtlandı;
-        # 3. deneme + GÖREV 1.2'nin somut talimatı birlikte bu riski azaltır.
+        # İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde E/F/G (TEK-PASS AI AKIŞI) — ESKİ davranış: bu
+        # kriter validator'dan geçemezse regenerate_criterion_fields'a (AI content-retry) kadar
+        # 3 kez gidiliyordu, her seferinde transkriptin TAMAMI yeniden gönderiliyordu (kanıtlı kök
+        # neden — teşhis turu: tek raporun TPM limitine çarpmasının asıl nedeni buydu). Bu iş
+        # emriyle KALDIRILDI: validator artık yalnız TESPİT eder + (yukarıda) DETERMİNİSTİK onarım
+        # dener — "geçemeyen kriteri AI'ya tekrar tekrar sor" NORMAL AKIŞTAN çıkarıldı. Deterministik
+        # onarım sonrası hâlâ ihlal varsa kriter doğrudan aşağıdaki 'değerlendirilemedi (sistem)'
+        # dalına düşer — scoring/denominator/ROUND_HALF_UP kuralları DEĞİŞMEDİ, yalnız bu kararın
+        # ÖNÜNDEKİ gizli AI çağrıları kaldırıldı. regenerate_criterion_fields fonksiyonu (aşağıda)
+        # SİLİNMEDİ — normal akıştan çağrılmıyor, davranışı koruma amaçlı yerinde bırakıldı.
         attempt = 0
-        while violations and attempt < 3:
-            attempt += 1
-            new_fields = regenerate_criterion_fields(candidate_id, level, provider, model, cname, cap,
-                                                      transcript_text, fields or {"g": "", "k": "", "e": "", "s": ""},
-                                                      violations, transcript_view=transcript_view, accepted_claims=accepted_claims,
-                                                      criterion_id=cid, attempt=attempt, source="normal_validator_retry",
-                                                      crit_desc=cdesc)
-            if new_fields is None:
-                break
-            fields = new_fields
-            violations = validate_criterion_fields(fields, cap, awarded, transcript_view, accepted_claims)
 
         # GÖREV 5.2 — out_of_scope_high_score DETERMİNİSTİK kelepçe (retry sonrası da kalabilir;
         # bu tavan LLM'e bırakılmaz — 5. iş emrinin bizzat kanıtladığı gibi model bunu kendiliğinden
@@ -7875,33 +7985,11 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
             if not _k_ts_scope or _timestamp_field_grounded(fields.get("k") or "", transcript_view, role="aday"):
                 flagged_scope.append({"kriter": cname, "kanit": (fields.get("k") or "")[:200]})
 
-        # İŞ 4 — VALIDATOR FAILURE RECOVERY: normal 3 retry TÜKENDİ, kriter TAM OLARAK diskalifiye
-        # edilmeden HEMEN ÖNCE (aşağıdaki 'if violations:' — mevcut disqualifikasyon kararı
-        # DEĞİŞMEDİ). Tetikleyici pozitifse VAR OLAN regenerate_criterion_fields ile TEK bir ek
-        # deneme yapılır; çıktı YİNE AYNI validate_criterion_fields'tan geçirilir — recovery
-        # validator'ı BYPASS ETMEZ, yalnız bir şans daha tanır. Temiz çıkarsa mevcut 'else' dalı
-        # (aşağıda, DEĞİŞMEDİ) onu normal 'geçti' gibi işler; temiz çıkmazsa mevcut disqualifikasyon
-        # aynen devam eder.
-        if violations and _has_candidate_signal_for_recovery(cname, transcript_view):
-            recovery_fields = regenerate_criterion_fields(candidate_id, level, provider, model, cname, cap,
-                                                           transcript_text, fields or {"g": "", "k": "", "e": "", "s": ""},
-                                                           violations, transcript_view=transcript_view, accepted_claims=accepted_claims,
-                                                           criterion_id=cid, attempt=attempt + 1, source="criterion_recovery",
-                                                           crit_desc=cdesc)
-            if recovery_fields is not None:
-                recovery_violations = validate_criterion_fields(recovery_fields, cap, awarded, transcript_view, accepted_claims)
-                if not recovery_violations:
-                    log.append({"kriter": cname, "kimlik": cid, "sonuc": "criterion_recovery_success",
-                               "not": "3 normal deneme tükendikten sonra 1 ek recovery denemesi validator'ı TEMİZ geçti"})
-                    fields = recovery_fields
-                    violations = recovery_violations  # boş liste
-                else:
-                    log.append({"kriter": cname, "kimlik": cid, "sonuc": "criterion_recovery_failed",
-                               "ihlaller": recovery_violations,
-                               "not": "recovery denemesi de validator'ı geçemedi — mevcut Değerlendirilemedi (sistem) davranışı korunuyor"})
-            else:
-                log.append({"kriter": cname, "kimlik": cid, "sonuc": "criterion_recovery_failed",
-                           "not": "recovery çağrısı (regenerate_criterion_fields) None döndü — mevcut Değerlendirilemedi (sistem) davranışı korunuyor"})
+        # İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde E/F/G: eski "İŞ 4 — VALIDATOR FAILURE RECOVERY"
+        # (3 normal retry tükenince 1 ek AI content-retry) KALDIRILDI — aynı gerekçeyle yukarıdaki
+        # 3-retry döngüsü kaldırıldı: bu da bir content-retry'ydi (criterion_recovery action'ı),
+        # normal akışta artık YOK. _has_candidate_signal_for_recovery fonksiyonu SİLİNMEDİ, burada
+        # çağrılmıyor.
 
         if violations:
             log.append({"kriter": cname, "kimlik": cid, "sonuc": "degerlendirilemedi_sistem", "ihlaller": violations})
@@ -8642,7 +8730,7 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         print(f"HATA (run_deferred_finish_job c={candidate_id} L{level}): {type(e).__name__}: {e}")
         _mark_finish_failed(candidate_id, level, f"{type(e).__name__}: {e}")
 
-def recover_stale_processing_interviews(stale_after_seconds: int = 180):
+def recover_stale_processing_interviews(stale_after_seconds: int = _FINISH_JOB_STALE_SECONDS):
     """DAYANIKLILIK: konteyner yeniden başlarsa ya da bir arka plan görevi sessizce ölürse,
     'processing' durumunda takılı kalan kayıtları bulup run_deferred_finish_job ile yeniden
     dener. run_deferred_finish_job idempotent olduğu için güvenle tekrar tekrar çağrılabilir."""
@@ -8968,54 +9056,23 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
             _yo_violations_before = detect_future_expectation(yo_text)
             _yo_bad = yo_text and (not (150 <= _wc <= 250) or _yo_violations_before)
             if _yo_bad:
-                _new_yo = None
-                try:
-                    # GÖREV 2.1 — retry'a kriter tablosundan GERÇEK, somut malzeme verilir (bkz.
-                    # regenerate_yonetici_ozeti docstring'i — olası kök neden: model UYDURMADAN
-                    # genişletecek malzemeye sahip değildi).
-                    _yo_extra_ctx = strip_markdown(pos_table_display)[:3000] if pos_table_display else ""
-                    _new_yo = regenerate_yonetici_ozeti(candidate_id, level, _gate_provider, _gate_model, yo_text, _wc, _ftx, extra_context=_yo_extra_ctx)
-                except Exception as e:
-                    print(f"UYARI (finalize_interview yönetici özeti yeniden üretim c={candidate_id}): {type(e).__name__}: {e}")
-                    _new_yo = None
-                # İŞ 6D — USABLE RESPONSE KAPISI: kabul etmeden önce minimum kullanılabilirlik testi
-                # (bkz. _yonetici_ozeti_usable). Geçemezse AYNI parametrelerle TEK bir semantic retry;
-                # o da geçemezse MEVCUT özet KORUNUR (_new_yo=None -> aşağıdaki 'if _new_yo:' bloğu
-                # çalışmaz, yo_text değişmeden kalır) — rapor bu yüzden ASLA failed olmaz.
-                if not _yonetici_ozeti_usable(_new_yo):
-                    print(f"[YONETICI_OZETI_RETRY] c={candidate_id} L{level}")
-                    try:
-                        _new_yo = regenerate_yonetici_ozeti(candidate_id, level, _gate_provider, _gate_model, yo_text, _wc, _ftx, extra_context=_yo_extra_ctx)
-                    except Exception as e:
-                        print(f"UYARI (finalize_interview yönetici özeti retry c={candidate_id}): {type(e).__name__}: {e}")
-                        _new_yo = None
-                    if not _yonetici_ozeti_usable(_new_yo):
-                        print(f"[YONETICI_OZETI_RETRY_FAILED] c={candidate_id} L{level}")
-                        record_system_decision(candidate_id, level, "yonetici_ozeti_retry_basarisiz",
-                                               f"İŞ 6D — regenerate_yonetici_ozeti() iki denemede de kullanılabilir "
-                                               f"(>={YONETICI_OZETI_USABLE_MIN_WORDS} kelime) bir özet üretemedi; "
-                                               "MEVCUT özet KORUNDU, üzerine yazılmadı.",
-                                               {"onceki_kelime": _wc})
-                        _new_yo = None
-                if _new_yo:
-                    _wc2 = len(_new_yo.split())
-                    record_system_decision(candidate_id, level, "yonetici_ozeti_yeniden_uretildi",
-                                           f"Yönetici Özeti {_wc} kelimeydi ve/veya klişe/beklenti cümlesi içeriyordu; TEK deneme ile yeniden ürettirildi ({_wc2} kelime).",
-                                           {"onceki_kelime": _wc, "yeni_kelime": _wc2, "onceki_ihlaller": _yo_violations_before})
-                    yo_text = _new_yo
-                    _wc = _wc2
+                # İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde E/G (TEK-PASS AI AKIŞI): ESKİ davranış
+                # burada regenerate_yonetici_ozeti'i (AI content-retry) 2 kez çağırıyordu — bu
+                # iş emriyle KALDIRILDI. Uzunluk/klişe sorunu artık AI'ya tekrar sorulmadan
+                # DOĞRUDAN loglanır; yo_text OLDUĞU GİBİ kalır — mevcut TEK geçişlik Final QG
+                # (run_final_report_quality_gate) raporun TAMAMINI zaten görüyor, bu sorunu da
+                # kendi tek AI geçişinde değerlendirebilir. regenerate_yonetici_ozeti fonksiyonu
+                # SİLİNMEDİ — normal akıştan çağrılmıyor, davranışı koruma amaçlı yerinde bırakıldı.
                 if not (150 <= _wc <= 250):
                     record_system_decision(candidate_id, level, "yonetici_ozeti_uzunluk_disi",
-                                           f"Yönetici Özeti {_wc} kelime — hedef aralık (150-250) dışında (yeniden deneme sonrası da; OTOMATİK kısaltma/uzatma YAPILMADI, olduğu gibi basıldı).",
+                                           f"Yönetici Özeti {_wc} kelime — hedef aralık (150-250) dışında "
+                                           "(AI content-retry YAPILMADI — İŞ EMRİ madde E; olduğu gibi basıldı, Final QG denetleyecek).",
                                            {"kelime_sayisi": _wc})
-                # İş emri GÖREV 3.3 (VALIDATOR KALİBRASYONU) — ikinci denemede de klişe/beklenti
-                # cümlesi VARSA: kriter tablosundaki gibi DÜŞÜRÜLMEZ (özet TEK bloktur, düşerse
-                # rapor başsız kalır) — olduğu gibi basılır, yalnız loglanır.
-                _yo_hits_after = detect_future_expectation(yo_text)
-                if _yo_hits_after:
-                    record_system_decision(candidate_id, level, "yonetici_ozeti_klise_kaldi",
-                                           "Yönetici Özeti'nde yeniden deneme sonrası da yasaklı klişe/geleceğe-dönük-beklenti kalıbı tespit edildi; özet TEK BLOK olduğu için düşürülmedi, olduğu gibi basıldı.",
-                                           {"kalip_eslesmeleri": _yo_hits_after})
+                if _yo_violations_before:
+                    record_system_decision(candidate_id, level, "yonetici_ozeti_klise_tespit",
+                                           "Yönetici Özeti'nde yasaklı klişe/geleceğe-dönük-beklenti kalıbı tespit edildi; "
+                                           "AI content-retry YAPILMADI (İŞ EMRİ madde E) — olduğu gibi basıldı, Final QG denetleyecek.",
+                                           {"kalip_eslesmeleri": _yo_violations_before})
         except Exception as e:
             print(f"UYARI (finalize_interview yönetici özeti uzunluk kontrolü c={candidate_id}): {type(e).__name__}: {e}")
 
@@ -9423,9 +9480,10 @@ def report_violation(data: ViolationReport, background_tasks: BackgroundTasks, p
         )
         # İŞ EMRİ — FINAL EVALUATION ARCHITECTURE: L1 birincil DEĞERLENDİRME/RAPOR artık OpenAI.
         log_ai_provider(candidate_level, "openai", "analysis")
-        _mark_finish_pending(data.candidate_id, candidate_level, provider="openai", model=OPENAI_REPORT_MODEL,
-                              system=system, payload=force_msg, terminated_reason=terminated_reason, reason="violation")
-        background_tasks.add_task(run_deferred_finish_job, data.candidate_id, candidate_level)
+        _job_id = _mark_finish_pending(data.candidate_id, candidate_level, provider="openai", model=OPENAI_REPORT_MODEL,
+                                       system=system, payload=force_msg, terminated_reason=terminated_reason, reason="violation")
+        if _job_id:
+            background_tasks.add_task(run_deferred_finish_job, data.candidate_id, candidate_level)
         return {
             "violation_count": new_count, "terminated": True,
             "message": "Mülakat kuralları ihlal edildiği için süreç sonlandırılmıştır. Raporunuz hazırlanıyor.",
@@ -9623,6 +9681,83 @@ def realtime_safe_limit_seconds(target_seconds: int) -> int:
     zorla bitiş devreye girer — mevcut L3 mekanizmasının aynısı, artık L2'de de aktif."""
     return int(min(55 * 60, max(12 * 60, round((target_seconds or 0) * 1.5))))
 
+# İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde B: aynı candidate+level için aktif Realtime "sahiplik"
+# eşiği. Frontend heartbeat'i (/api/realtime/sync) ~25sn'de bir gelir; bu eşik bir heartbeat'in
+# kaçmasına (ağ gecikmesi vb.) tolerans tanıyacak kadar geniş, ama gerçekten terk edilmiş bir
+# sekmeyi makul sürede "stale" sayacak kadar dar tutuldu.
+REALTIME_OWNER_STALE_SECONDS = 45
+
+
+def _prepare_realtime_session_sync(candidate_id: int) -> dict:
+    """İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde C+B: /api/realtime/session'ın TÜM senkron DB işini
+    TEK blokta toplar — async route handler bunu `asyncio.to_thread` ile çağırır, event loop'u DB
+    round-trip'i kadar BLOKE ETMEZ. Bağlantı bu fonksiyon İÇİNDE açılıp kapanır (thread'ler arası
+    paylaşılan bağlantı YOK — hem SQLite hem Postgres için güvenli; DB abstraction/transaction
+    davranışı DEĞİŞMEDİ, yalnız senkron kod artık worker thread'de çalışıyor).
+    Ayrıca (madde B) aynı candidate+level'a aynı anda İKİNCİ bir Realtime oturumunun bağlanmasını
+    engelleyen atomik ownership claim'i de burada yapılır (transcript/skor SİLİNMEZ; yalnız ikinci
+    bağlantı reddedilir — bkz. çağıran route'taki 409 dalı)."""
+    db = get_db()
+    try:
+        candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+        if not candidate:
+            return {"found": False}
+        candidate = dict(candidate)
+        candidate_level = candidate.get("level") or 1
+        result = {"found": True, "candidate": candidate, "level": candidate_level}
+        if candidate_level not in (2, 3):
+            result["level_invalid"] = True
+            return result
+        if not (candidate.get("cv_text") and len((candidate.get("cv_text") or "").strip()) > 20):
+            result["cv_missing"] = True
+            return result
+
+        depth_tier = candidate.get("depth_tier") or "standart"
+        # BUG FIX (started_at): interviews satırı önceden sadece ilk heartbeat (/api/realtime/sync,
+        # 25sn'de bir) ya da hiç heartbeat gelmezse finalize (/api/realtime/report) anında oluşuyordu.
+        # started_at kolonu DEFAULT CURRENT_TIMESTAMP olduğu için satır geç oluşursa gerçek mülakat
+        # süresi (dakikalar) kayboluyor, DB'de birkaç saniyeymiş gibi görünüyordu. Artık oturum
+        # (WebRTC bağlantısı) kurulur kurulmaz satır burada, gerçek başlangıç anında oluşturuluyor.
+        existing_interview = db.execute(
+            "SELECT completed_at FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, candidate_level)
+        ).fetchone()
+        if not existing_interview:
+            db.execute(
+                "INSERT INTO interviews (candidate_id, level, messages, depth_tier) VALUES (?, ?, '[]', ?)",
+                (candidate_id, candidate_level, depth_tier)
+            )
+            # Teşebbüs sayacı: yeni oturum = bir başlatma denemesi (Mülakat Denemeleri ekranı).
+            db.execute(
+                "UPDATE candidates SET interview_start_count = COALESCE(interview_start_count, 0) + 1, last_start_at = ? WHERE id = ?",
+                (_now_ts(), candidate_id)
+            )
+            db.commit()
+        elif not existing_interview["completed_at"]:
+            # Satır zaten var ama tamamlanmamış (örn. sayfa yenilendi, yeniden bağlanıldı) —
+            # started_at'i EZME; ilk gerçek başlangıç zaten kayıtlı kalsın.
+            # Yine de yeniden bağlanma denemesinin zamanını izle.
+            db.execute("UPDATE candidates SET last_start_at = ? WHERE id = ?", (_now_ts(), candidate_id))
+            db.commit()
+
+        # madde B — RACE'E DAYANIKLI OWNERSHIP CLAIM: tek atomik UPDATE...WHERE (DB seviyesinde,
+        # process-local kilide DAYANMAZ — çoklu worker/replica güvenli). rowcount>0 ise BU çağrı
+        # sahipliği aldı; 0 ise başka (yakın zamanda aktif) bir sahip var — reddedilmeli.
+        owner_token = secrets.token_hex(16)
+        stale_sql = _staleness_clause("realtime_owner_at", REALTIME_OWNER_STALE_SECONDS)
+        claim_cur = db.execute(
+            "UPDATE interviews SET realtime_owner_token=?, realtime_owner_at=CURRENT_TIMESTAMP "
+            "WHERE candidate_id=? AND level=? AND completed_at IS NULL AND ("
+            f"  realtime_owner_token IS NULL OR realtime_owner_at IS NULL OR {stale_sql}"
+            ")",
+            (owner_token, candidate_id, candidate_level)
+        )
+        db.commit()
+        result["owner_claimed"] = (claim_cur.rowcount or 0) > 0
+        return result
+    finally:
+        db.close()
+
+
 @app.post("/api/realtime/session")
 async def create_realtime_session(payload=Depends(verify_token)):
     if payload.get("role") != "candidate":
@@ -9631,47 +9766,27 @@ async def create_realtime_session(payload=Depends(verify_token)):
         raise HTTPException(status_code=503, detail="Sesli mülakat (OpenAI Realtime) için OPENAI_API_KEY tanımlı değil.")
 
     candidate_id = payload["candidate_id"]
-    db = get_db()
-    candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-    db.close()
-    if not candidate:
+    prep = await asyncio.to_thread(_prepare_realtime_session_sync, candidate_id)
+    if not prep.get("found"):
         raise HTTPException(status_code=404, detail="Aday kaydı bulunamadı")
-    candidate_level = candidate["level"] or 1
-    if candidate_level not in (2, 3):
+    candidate = prep["candidate"]
+    candidate_level = prep["level"]
+    if prep.get("level_invalid"):
         raise HTTPException(status_code=400, detail="Bu uç nokta Level 2 ve Level 3 adaylar için geçerlidir.")
-    if not (candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20):
+    if prep.get("cv_missing"):
         raise HTTPException(status_code=400, detail="Bu seviyedeki mülakata başlamadan önce CV yüklemeniz gerekiyor.")
+    if not prep.get("owner_claimed"):
+        # İŞ EMRİ madde B — aynı candidate+level için zaten (yakın zamanda aktif) bir canlı oturum
+        # var: transcript SİLİNMEDİ, mevcut sahip ETKİLENMEDİ, yalnız bu İKİNCİ bağlantı reddedildi.
+        # detail şekli mevcut AIError şekliyle AYNI ({message, error_class, retryable}) — frontend
+        # mapConnectError bunu zaten tanıyor (retryable:false -> otomatik retry döngüsüne GİRMEZ).
+        raise HTTPException(status_code=409, detail={
+            "message": "Bu mülakat için zaten aktif bir canlı oturum var. Lütfen diğer sekmeyi/pencereyi kapatıp birkaç saniye sonra tekrar deneyin.",
+            "error_class": "session_already_active", "retryable": False,
+        })
 
-    depth_tier = (candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart") or "standart"
+    depth_tier = candidate.get("depth_tier") or "standart"
     depth_cfg = get_effective_level_config(candidate_level, depth_tier)
-
-    # BUG FIX (started_at): interviews satırı önceden sadece ilk heartbeat (/api/realtime/sync,
-    # 25sn'de bir) ya da hiç heartbeat gelmezse finalize (/api/realtime/report) anında oluşuyordu.
-    # started_at kolonu DEFAULT CURRENT_TIMESTAMP olduğu için satır geç oluşursa gerçek mülakat
-    # süresi (dakikalar) kayboluyor, DB'de birkaç saniyeymiş gibi görünüyordu. Artık oturum
-    # (WebRTC bağlantısı) kurulur kurulmaz satır burada, gerçek başlangıç anında oluşturuluyor.
-    db2 = get_db()
-    existing_interview = db2.execute(
-        "SELECT completed_at FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, candidate_level)
-    ).fetchone()
-    if not existing_interview:
-        db2.execute(
-            "INSERT INTO interviews (candidate_id, level, messages, depth_tier) VALUES (?, ?, '[]', ?)",
-            (candidate_id, candidate_level, depth_tier)
-        )
-        # Teşebbüs sayacı: yeni oturum = bir başlatma denemesi (Mülakat Denemeleri ekranı).
-        db2.execute(
-            "UPDATE candidates SET interview_start_count = COALESCE(interview_start_count, 0) + 1, last_start_at = ? WHERE id = ?",
-            (_now_ts(), candidate_id)
-        )
-        db2.commit()
-    elif not existing_interview["completed_at"]:
-        # Satır zaten var ama tamamlanmamış (örn. sayfa yenilendi, yeniden bağlanıldı) —
-        # started_at'i EZME; ilk gerçek başlangıç zaten kayıtlı kalsın.
-        # Yine de yeniden bağlanma denemesinin zamanını izle.
-        db2.execute("UPDATE candidates SET last_start_at = ? WHERE id = ?", (_now_ts(), candidate_id))
-        db2.commit()
-    db2.close()
 
     pos_for_criteria = get_position(candidate["position"]) or {"criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
     criteria_names_list = [c["name"] for c in pos_for_criteria["criteria"]]
@@ -9823,6 +9938,44 @@ YOK
 ===BÖLÜM SONU===
 ---RAPORSON---"""
 
+def _sync_realtime_progress_sync(effective_candidate_id: int, transcript: Optional[str]) -> dict:
+    """İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde C+B: /api/realtime/sync'in TÜM senkron DB işini
+    (candidate/interview kontrolü + gerekirse satır oluşturma + ownership heartbeat tazeleme +
+    transcript yazımı) TEK bağlantı/TEK thread bloğunda toplar — async route handler bunu
+    `asyncio.to_thread` ile çağırır, event loop'u BLOKE ETMEZ. DB abstraction/transaction
+    davranışı DEĞİŞMEDİ (aynı sorgular, aynı sıra); yalnız artık worker thread'de çalışıyor ve
+    (verimlilik için, davranış değişmeden) TEK bağlantı üzerinden art arda commit ediyor."""
+    db = get_db()
+    try:
+        candidate = db.execute("SELECT * FROM candidates WHERE id=?", (effective_candidate_id,)).fetchone()
+        candidate_level = (candidate["level"] or 1) if candidate else None
+        if not candidate or candidate_level not in (2, 3):
+            return {"ok": False}
+        interview = db.execute("SELECT completed_at FROM interviews WHERE candidate_id=? AND level=?",
+                               (effective_candidate_id, candidate_level)).fetchone()
+        if interview and interview["completed_at"]:
+            # Zaten finalize edilmiş bir görüşmeye geç kalan bir heartbeat gelmiş olabilir; sessizce yoksay.
+            return {"ok": True, "already_completed": True}
+        if not interview:
+            db.execute("INSERT INTO interviews (candidate_id, level, messages) VALUES (?, ?, '[]')",
+                       (effective_candidate_id, candidate_level))
+            db.commit()
+        # İŞ EMRİ madde B — bu heartbeat'in geldiği satırın GERÇEK/aktif canlı sahibi olduğumuzu
+        # yansıt: realtime_owner_at'i tazeler ki create_realtime_session'daki stale-eşiği doğru
+        # çalışsın (yalnız YENİ bir /session çağrısı kendi owner_token'ını yazar — burada token
+        # DEĞİŞTİRİLMEZ, yalnız "son görülme" zamanı ilerletilir).
+        db.execute("UPDATE interviews SET realtime_owner_at=CURRENT_TIMESTAMP "
+                   "WHERE candidate_id=? AND level=? AND completed_at IS NULL",
+                   (effective_candidate_id, candidate_level))
+        db.commit()
+        if transcript:
+            save_interview_state(db, effective_candidate_id, [{"role": "user", "content": transcript}], candidate_level)
+            db.commit()
+        return {"ok": True, "level": candidate_level}
+    finally:
+        db.close()
+
+
 @app.post("/api/realtime/sync")
 async def sync_realtime_progress(data: RealtimeSyncRequest, request: Request):
     """Görüşme sürerken periyodik (frontend'de ~25sn'de bir) ve sekme kapanırken
@@ -9848,31 +10001,18 @@ async def sync_realtime_progress(data: RealtimeSyncRequest, request: Request):
 
     effective_candidate_id = int(payload.get("candidate_id") or data.candidate_id)
 
-    db = get_db()
-    candidate = db.execute("SELECT * FROM candidates WHERE id=?", (effective_candidate_id,)).fetchone()
-    candidate_level = (candidate["level"] or 1) if candidate else None
-    if not candidate or candidate_level not in (2, 3):
-        db.close()
+    result = await asyncio.to_thread(_sync_realtime_progress_sync, effective_candidate_id, data.transcript)
+    if not result.get("ok"):
         return {"ok": False}
-    interview = db.execute("SELECT completed_at FROM interviews WHERE candidate_id=? AND level=?", (effective_candidate_id, candidate_level)).fetchone()
-    if interview and interview["completed_at"]:
-        # Zaten finalize edilmiş bir görüşmeye geç kalan bir heartbeat gelmiş olabilir; sessizce yoksay.
-        db.close()
+    if result.get("already_completed"):
         return {"ok": True, "already_completed": True}
-    if not interview:
-        db.execute("INSERT INTO interviews (candidate_id, level, messages) VALUES (?, ?, '[]')", (effective_candidate_id, candidate_level))
-        db.commit()
-    db.close()
-
-    if data.transcript:
-        db2 = get_db()
-        save_interview_state(db2, effective_candidate_id, [{"role": "user", "content": data.transcript}], candidate_level)
-        db2.commit(); db2.close()
+    candidate_level = result["level"]
 
     if data.usage_delta:
-        record_realtime_usage_summary(effective_candidate_id, candidate_level, get_realtime_model(candidate_level), data.usage_delta, action="realtime_heartbeat")
+        await asyncio.to_thread(record_realtime_usage_summary, effective_candidate_id, candidate_level,
+                                get_realtime_model(candidate_level), data.usage_delta, action="realtime_heartbeat")
 
-    record_realtime_events(effective_candidate_id, candidate_level, data.events)
+    await asyncio.to_thread(record_realtime_events, effective_candidate_id, candidate_level, data.events)
 
     return {"ok": True}
 
@@ -10892,11 +11032,16 @@ SADECE bölüm metnini yaz (başlık/etiket/tırnak EKLEME, açıklama yapma).""
         elif provider == "openai":
             if not OPENAI_API_KEY:
                 return None
+            # İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde G: bu ÇAĞRININ KENDİSİ content-retry DEĞİL
+            # (validator+reviewer'dan sonra, eksik bir bölüm için TEK seferlik üretim — madde E
+            # kapsamında incelendi, DEĞİŞTİRİLMEDİ). Ama 429/timeout/geçici 5xx gibi TEKNİK
+            # hatalarda artık merkezi katmanın bounded teknik retry'ından (Retry-After farkında)
+            # faydalanır — retry=False -> True (yalnız TEKNİK hata sınıfları tekrar dener).
             resp = openai_call("POST", "https://api.openai.com/v1/chat/completions",
                                json_body={"model": model or OPENAI_REPORT_MODEL,
                                           "messages": [{"role": "user", "content": prompt}],
                                           "max_tokens": 500, "temperature": 0},
-                               timeout=45.0, step="one_cikan_proje_recovery", severity="background", retry=False,
+                               timeout=45.0, step="one_cikan_proje_recovery", severity="background", retry=True,
                                context={"candidate_id": candidate_id, "level": level})
             result = resp.json()
             record_openai_chat_usage(candidate_id, level, model or OPENAI_REPORT_MODEL, "one_cikan_proje_recovery", result)
@@ -12674,9 +12819,10 @@ async def create_l2_report(data: RealtimeReportRequest, background_tasks: Backgr
                            "Veri yeterli (assess_data_sufficiency); normal rapor yolu.",
                            {**suff, "end_reason": effective_end_reason, "raw_end_reason": data.end_reason,
                             "downgraded": downgraded, "completion_pct": _completion_pct})
-    _mark_finish_pending(effective_candidate_id, candidate_level, provider="openai", model=OPENAI_REPORT_MODEL,
-                          system=None, payload=report_prompt, terminated_reason=None, reason="l2_normal")
-    background_tasks.add_task(run_deferred_finish_job, effective_candidate_id, candidate_level)
+    _job_id = _mark_finish_pending(effective_candidate_id, candidate_level, provider="openai", model=OPENAI_REPORT_MODEL,
+                                   system=None, payload=report_prompt, terminated_reason=None, reason="l2_normal")
+    if _job_id:
+        background_tasks.add_task(run_deferred_finish_job, effective_candidate_id, candidate_level)
     return {
         "message": "Mülakatınız tamamlandı, teşekkür ederiz. Raporunuz hazırlanıyor.",
         "completed": True, "processing": True, "score": None, "recommendation": None,
@@ -13470,8 +13616,16 @@ def regenerate_report(candidate_id: int, background_tasks: BackgroundTasks, leve
     # EK — completed_at (orijinal bitiş saati) EZİLMEZ. run_deferred_finish_job regen=True ile
     # guard'ı atlar; finalize_interview regen=True completed_at'e dokunmaz, report_regenerated_at yazar.
     _term = None if corrected_end_reason else (cand["terminated_reason"] if "terminated_reason" in cand.keys() else None)
-    _mark_finish_pending(candidate_id, level, provider=prov, model=mdl, system=system, payload=prompt,
-                         terminated_reason=_term, reason="admin_regenerate")
+    _job_id = _mark_finish_pending(candidate_id, level, provider=prov, model=mdl, system=system, payload=prompt,
+                                   terminated_reason=_term, reason="admin_regenerate")
+    # İŞ EMRİ madde I — bu, ÇİFT admin-tetikli regenerate'in klasik race'idir (ör. iki kez tıklama):
+    # zaten aktif bir işlem varsa açıkça 409 döner — sessizce hiçbir şey yapıp "başladı" YALANI
+    # söylenmez, mevcut işlem de bozulmaz/tekrarlanmaz.
+    if not _job_id:
+        raise HTTPException(status_code=409, detail={
+            "message": "Bu aday/seviye için zaten devam eden bir rapor işlemi var. Lütfen tamamlanmasını bekleyin.",
+            "error_class": "report_job_already_active", "retryable": False,
+        })
     record_system_decision(candidate_id, level, "rapor_yeniden_uretiliyor",
                            f"Yönetici ({payload.get('email') or 'admin'}) kayıtlı transkriptten yeniden üretim başlattı.",
                            {"level": level, "hallucination_filtered": hall_n, "end_reason_corrected": corrected_end_reason},
