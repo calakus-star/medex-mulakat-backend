@@ -12975,10 +12975,40 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     rec_display = "Değerlendir" if recommendation == "Değerlendirmeye Al" else (recommendation or "")
 
     _iv_date = format_pdf_datetime(interview.get("started_at")) if interview.get("started_at") else ""
+    # ACİL — DÜZELTME: "Rapor Oluşturulma Tarihi" PDF'in indirildiği/üretildiği an DEĞİL, AI
+    # raporunun GERÇEKTEN başarıyla üretildiği an olmalı — bu yüzden DB'deki mevcut alanlar
+    # kullanılır (yeni kolon YOK): report_regenerated_at (regenerate_report → finalize_interview
+    # regen dalı, main.py ~9327) varsa O; yoksa report_generated_at (ilk üretim, finalize_interview
+    # normal dalı, main.py ~9355). İkisi de CURRENT_TIMESTAMP (DB motoru, UTC) ile yazılıyor —
+    # görüntüde Türkiye saatine (sabit UTC+3, 2016'dan beri DST yok) çevrilir. PDF'in KENDİSİ her
+    # indirmede yeniden üretilse de bu iki DB alanı yalnız GERÇEK (yeniden) rapor üretiminde
+    # değiştiği için aynı rapor tekrar indirildiğinde tarih AYNI kalır.
+    def _format_pdf_datetime_istanbul(value):
+        if not value:
+            return None
+        if hasattr(value, "strftime"):
+            dt = value
+        else:
+            s = str(value).strip().split(".")[0].replace("T", " ")
+            dt = None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    break
+                except ValueError:
+                    continue
+            if dt is None:
+                return None
+        return (dt + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
+
+    _report_created_raw = interview.get("report_regenerated_at") or interview.get("report_generated_at")
+    _report_created_at = _format_pdf_datetime_istanbul(_report_created_raw)
     left_lines = [f"<b>Aday:</b> {ptxt(candidate.get('name') or '')}",
                   f"<b>Pozisyon:</b> {ptxt(candidate.get('position') or '')}"]
     if _iv_date:
         left_lines.append(f"<b>Mülakat Tarihi:</b> {ptxt(_iv_date)}")
+    if _report_created_at:
+        left_lines.append(f"<b>Rapor Oluşturulma Tarihi:</b> {ptxt(_report_created_at)}")
     left_para = Paragraph("<br/>".join(left_lines), styles["BodyWrap"])
 
     right_lines = []
