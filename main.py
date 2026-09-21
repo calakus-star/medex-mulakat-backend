@@ -8717,6 +8717,20 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         except Exception as e:
             print(f"UYARI (final integrity check c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
+        # TEK DÜZELTME — L3 processing_status ZAMANLAMASI: finalize_interview L3'te bilerek
+        # processing_status'u 'processing' bırakmıştı (bkz. finalize_interview) — second evaluator
+        # + Quality Gate + final integrity check dahil TÜM L3 pipeline'ı burada bittiğine göre
+        # EN SON 'completed' burada yazılır. L1/L2'de finalize_interview zaten yazdı, dokunulmaz.
+        if level == 3:
+            db_done = get_db()
+            try:
+                db_done.execute(
+                    "UPDATE interviews SET processing_status='completed' WHERE candidate_id=? AND level=?",
+                    (candidate_id, level))
+                db_done.commit()
+            finally:
+                db_done.close()
+
         print(f"[PROCESSING_DONE] candidate_id={candidate_id} level={level} regen={regen}")
     except AIError as e:
         # openai_call zaten error_logs'a yazdı + kritik e-postayı tetikledi.
@@ -9319,16 +9333,23 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         # durumları=NULL) SIFIRLAR — yalnız BU TURUN reviewer'ı (varsa, L3) GERÇEKTEN başarıyla
         # tamamlanırsa (append_reviewer_section → recompute_overall_decision) final_score_*
         # blended değerle YENİDEN yazılır. Eski değere fallback YOK.
+        # TEK DÜZELTME — L3 processing_status ZAMANLAMASI: L3'te second evaluator (Claude) + Quality
+        # Gate finalize_interview'DAN SONRA (run_deferred_finish_job içinde) çalışır — 'completed'
+        # burada yazılırsa frontend pipeline bitmeden "Tamamlandı" + ara (primary-only) skor gösterir.
+        # L3'te bilerek 'processing' bırakılır; run_deferred_finish_job pipeline'ın GERÇEK sonunda
+        # (Quality Gate + final integrity check'ten sonra) 'completed' yazar. L1/L2'de ek aşama
+        # olmadığı için davranış DEĞİŞMEDİ.
+        _proc_status = 'processing' if level == 3 else 'completed'
         db.execute("""
             UPDATE interviews SET report=?, standard_cv=?, score=?, score_position=?, score_profile=?, recommendation=?,
                    final_score_position=?, final_score_profile=?,
                    reviewer_score_position=NULL, reviewer_score_profile=NULL,
                    quality_gate_status=NULL, final_integrity_status=NULL,
                    report_regenerated_at=CURRENT_TIMESTAMP, technical_annex=?,
-                   report_tech_note=?, processing_status='completed', processing_error=NULL
+                   report_tech_note=?, processing_status=?, processing_error=NULL
             WHERE candidate_id=? AND level=?
         """, (report, standard_cv, score, score_position, score_profile, recommendation,
-              score_position, score_profile, _technical_annex, _tech_note, candidate_id, level))
+              score_position, score_profile, _technical_annex, _tech_note, _proc_status, candidate_id, level))
         db.commit()
         db.close()
         record_system_decision(candidate_id, level, "rapor_yeniden_uretildi",
@@ -9347,16 +9368,20 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     # İŞ EMRİ — madde 3/6: ilk üretimde de final_score_position/profile BASELINE olarak
     # primary'ye eşitlenir (L1/L2 için bu NİHAİ değerdir — second evaluator hiç çalışmaz);
     # reviewer'a bağlı alanlar taze satırda zaten NULL, açıkça da sıfırlanır (tutarlılık).
+    # TEK DÜZELTME — L3 processing_status ZAMANLAMASI (bkz. regen dalındaki aynı not): completed_at
+    # semantiği (mülakatın GERÇEK bitiş anı) DEĞİŞMEDİ — yalnız processing_status L3'te pipeline
+    # tam bitene kadar 'processing' kalır.
+    _proc_status = 'processing' if level == 3 else 'completed'
     cur = db.execute("""
         UPDATE interviews SET report=?, standard_cv=?, score=?, score_position=?, score_profile=?, recommendation=?,
                final_score_position=?, final_score_profile=?,
                reviewer_score_position=NULL, reviewer_score_profile=NULL,
                quality_gate_status=NULL, final_integrity_status=NULL,
                completed_at=COALESCE(interview_ended_at, CURRENT_TIMESTAMP), report_generated_at=CURRENT_TIMESTAMP,
-               technical_annex=?, report_tech_note=?, processing_status='completed', processing_error=NULL
+               technical_annex=?, report_tech_note=?, processing_status=?, processing_error=NULL
         WHERE candidate_id=? AND level=? AND completed_at IS NULL
     """, (report, standard_cv, score, score_position, score_profile, recommendation,
-          score_position, score_profile, _technical_annex, _tech_note, candidate_id, level))
+          score_position, score_profile, _technical_annex, _tech_note, _proc_status, candidate_id, level))
     already_finalized = cur.rowcount == 0
     # candidates.status sadece adayın O AN İÇİN AKTİF OLDUĞU level tamamlandığında güncellenir
     # (adayın current level'ı değiştiyse, bu eski bir çağrı olabilir — dokunma).
