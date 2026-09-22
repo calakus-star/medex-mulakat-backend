@@ -6875,32 +6875,34 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     # denetim metni) artık müşteri raporuna/PDF'ye YAZILMIYOR. has_view (free_raw var mı) hâlâ
     # HESAPLANIR ve system_decision (yönetici) kaydına düşer — yalnız CUSTOMER-FACING "Ek Görüş"
     # bölümüne eklenmiyor. Claude'un 12 KRITER_PUAN/KRITER_GEREKCE'si (diff_block/"İkinci
-    # Değerlendirici Görüşü") ve semantik/özgüven notları bu değişiklikten ETKİLENMEDİ.
-    if not diff_block and not confidence_text and not semantic_block:
+    # Değerlendirici Görüşü") ve özgüven notları bu değişiklikten ETKİLENMEDİ.
+    # İŞ EMRİ (2. tur) — SEMANTİK İÇ DENETİM NOTLARI DA MÜŞTERİ RAPORUNDAN KALDIRILDI: semantic_block
+    # (rv_semantic'ten üretilir) artık "Ek Görüş"e YAZILMIYOR — aynı sebep: "kanıt-kriter uyumsuzluğu
+    # tespit edildi" tarzı modeller-arası bulgu, düzeltilmiş olsa bile müşteriye "rapordaki hata"
+    # gibi görünüyordu. rv_semantic ÜRETİMİ/PARSE'I/return değeri DEĞİŞMEDİ — yalnız bu customer-
+    # facing render noktasına eklenmesi durduruldu.
+    if not diff_block and not confidence_text:
         record_system_decision(candidate_id, level, "ikinci_degerlendirici_atlandi",
-                               "İkinci değerlendirici somut bir görüş/özgüven izlenimi/semantik not bildirmedi ve kriter puanları birincille örtüşüyor — bölüm rapora eklenmedi.",
-                               {"reviewer_status": status, "free_len": len(free_raw or ""), "has_view": has_view})
+                               "İkinci değerlendirici somut bir görüş/özgüven izlenimi bildirmedi ve kriter puanları birincille örtüşüyor — bölüm rapora eklenmedi.",
+                               {"reviewer_status": status, "free_len": len(free_raw or ""), "has_view": has_view, "semantic_issue_count": len(rv_semantic or {})})
         final_report = final_report.replace(_REVIEWER_SLOT_MARK, "").strip()
         _save(final_report)
     else:
         block = _REVIEWER_HEAD + "\n\n"
         if diff_block:
             block += diff_block + "\n\n"
-        # "Ek Görüş" — ARTIK YALNIZ özgüven izlenimi VE/VEYA semantik tutarlılık notları (free_raw
-        # serbest iç eleştiri DAHİL DEĞİL — bkz. yukarıdaki not).
+        # "Ek Görüş" — ARTIK YALNIZ özgüven izlenimi (free_raw serbest iç eleştiri VE semantic_block
+        # iç denetim notları DAHİL DEĞİL — bkz. yukarıdaki notlar).
         ek_gorus_parts = []
         if confidence_text:
             ek_gorus_parts.append(confidence_text.strip())
-        if semantic_block:
-            # İŞ 6T — yalnız GÖRÜNTÜLEME alt bölümü; G/K/E/S/puan/karar hiçbirine dokunmaz.
-            ek_gorus_parts.append("*Semantik tutarlılık notları (ikinci değerlendiricinin kanıt-kriter/kanıt-iddia/kanıt-yön gözlemi):*\n" + semantic_block)
         if ek_gorus_parts:
             block += "**Ek Görüş:**\n" + "\n\n".join(ek_gorus_parts) + "\n"
         block = scrub_forbidden_phrases(block.strip())
         final_report = final_report.replace(_REVIEWER_SLOT_MARK, block)
         if semantic_block:
-            record_system_decision(candidate_id, level, "reviewer_semantik_not_eklendi",
-                                   "İŞ 6T — ikinci değerlendirici bir veya daha fazla kriterde semantik tutarlılık sorunu bildirdi; yalnız Ek Görüş'e görüntüleme amaçlı eklendi (G/K/E/S, evaluability, puan, karar DEĞİŞMEDİ).",
+            record_system_decision(candidate_id, level, "reviewer_semantik_not_tespit_edildi",
+                                   "İkinci değerlendirici bir veya daha fazla kriterde semantik tutarlılık sorunu bildirdi (G/K/E/S, evaluability, puan, karar DEĞİŞMEDİ) — YALNIZ yönetici kaydı, müşteri raporuna/PDF'ye artık YAZILMIYOR.",
                                    {"semantic_issues": rv_semantic})
         _save(final_report)
         record_system_decision(candidate_id, level, "ikinci_degerlendirici_eklendi",

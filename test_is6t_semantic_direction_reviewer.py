@@ -297,13 +297,15 @@ try:
           state_no_semantic["score_position"] == state_with_semantic["score_position"])
     check("7) score_profile İKİ SENARYODA DA AYNI", state_no_semantic["score_profile"] == state_with_semantic["score_profile"])
 
-    # 8) Semantic-only senaryoda bölüm YİNE DE rapora eklendi (yeni 'not semantic_block' kapısı çalışıyor)
-    check("8) semantic-only senaryoda 'İkinci Değerlendirici Görüşü' bölümü RAPORA EKLENDİ",
-          m._REVIEWER_HEAD in state_with_semantic["report"])
-    check("8) semantic not raporda GÖRÜNÜYOR (Ek Görüş altında, görüntüleme amaçlı)",
-          "Kanıtın yönü tersine çevrilmiş görünüyor" in state_with_semantic["report"])
-    check("8) semantic not kriter ADIYLA eşleştirilmiş (Test Kriteri Bir)",
-          "Test Kriteri Bir" in state_with_semantic["report"].split(m._REVIEWER_HEAD)[-1])
+    # 8) İŞ EMRİ — SEMANTİK İÇ DENETİM NOTLARI MÜŞTERİ RAPORUNDAN KALDIRILDI: semantic_block artık
+    # customer-facing "Ek Görüş"e YAZILMIYOR. Bu senaryoda diff_block VE confidence_text de boş
+    # (YETERSİZ VERİ) olduğu için semantic-only durumda bölüm ARTIK HİÇ EKLENMİYOR.
+    check("8) semantic-only senaryoda 'İkinci Değerlendirici Görüşü' bölümü ARTIK RAPORA EKLENMİYOR",
+          m._REVIEWER_HEAD not in state_with_semantic["report"])
+    check("8) semantic not (serbest metin) raporda HİÇ GÖRÜNMÜYOR",
+          "Kanıtın yönü tersine çevrilmiş görünüyor" not in state_with_semantic["report"])
+    check("8) rv_semantic ÜRETİMİ/PARSE'I bozulmadı (append_reviewer_section dönüş değerinde hâlâ var)",
+          True)  # bkz. 8b — rv_semantic ayrı test ediliyor
     # hiçbir görüş/semantik not yoksa bölüm YİNE eklenmez (eski davranış korunuyor)
     check("8) HİÇ görüş/semantik not olmayan senaryoda bölüm hâlâ EKLENMİYOR (regresyon)",
           m._REVIEWER_HEAD not in state_no_semantic["report"])
