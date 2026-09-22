@@ -6164,6 +6164,7 @@ Bunun DIŞINDA, yukarıdaki görüşün olup olmamasından TAMAMEN BAĞIMSIZ ola
 Mülakatın TAMAMINA (akış baskısı olmadan, dışarıdan) bakarak adayın özgüvenine dair gözlemini yaz: kendinden emin mi/tereddütlü mü, kararlarını savunabiliyor mu/geri adım atıyor mu, belirsizlik veya zorlayıcı bir soru karşısındaki tutumu, bilmediğini açıkça kabul edebiliyor mu, görüşünü gerekçelendirerek mi savunuyor yoksa sadece tekrarlıyor mu, mülakatçı zorladığında pozisyonunu koruyor mu. Bu bir KONTROL LİSTESİ DEĞİLDİR — yalnız transkriptte GERÇEKTEN karşılığı olan yönleri yaz, karşılığı olmayan madde için cümle KURMA. KESİN KİŞİLİK HÜKMÜ YASAK (ör. "özgüveni düşük bir kişi" YAZMA) — somut davranış + [dk] damgası yaz, ör: "zorlayıcı sorularda pozisyonunu değiştirmeden savundu [12:36], ancak gerekçesini yeni bir örnekle desteklemek yerine aynı ifadeyi tekrarladı [13:47]". EN AZ BİR [dk] damgası ZORUNLU — damgasız genel yorum YAZMA. 1-2 paragraf, doldurma yok. SADECE transkript bu izlenimi kurmaya gerçekten yetmiyorsa (aday neredeyse hiç konuşmadı / mülakat çok kısa kesildi) bu bloğa SADECE "YETERSİZ VERİ" yaz — zorla üretme.
 
 === KRİTER PUANLARI ===
+Bağımsız değerlendirmeni dikkatli ve kanıta dayalı yap. Her kriteri yalnızca o kriterle doğrudan ilişkili mülakat kanıtlarıyla değerlendir. İlgisiz kanıtları kriterler arasında taşıma ve kanıtın desteklemediği çıkarımlar yapma. Teknik bilgi veya mevcut yazılım kullanımını tek başına analitik düşünme, öğrenme/adaptasyon, inisiyatif veya başka bir davranışsal yetkinliğin kanıtı sayma. Aynı kanıtı birden fazla kriterde ancak her kriteri bağımsız ve doğrudan destekliyorsa kullan. Olumlu ve olumsuz kanıtları birlikte değerlendir. Puan, gerekçe ve kanıt birbiriyle tutarlı olsun.
 AŞAĞIDAKİ (P1.. ve K1..) KRİTER LİSTESİNDEKİ HER KRİTER İÇİN, birincil değerlendirmeden BAĞIMSIZ olarak KENDİ puanını üret — birincilinkiyle AYNI sonuca varsan BİLE bu satırları atlama, yine de yaz:
 KRITER_PUAN: <KİMLİK, ör. P1 veya K3 — AŞAĞIDAKİ LİSTEDEN, kriter ADINI YAZMA> = <senin puanın>/<maksimum>
 KRITER_GEREKCE: <AYNI KİMLİK> = <2-3 cümle gerekçe, en az bir [dk] damgalı somut kanıt>
@@ -6869,22 +6870,25 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     # semantic_block değişkeni üzerinden Ek Görüş'e (varsa) eklenir.
     semantic_block = build_semantic_issue_block(rv_semantic, position_criteria or [], PROFILE_CRITERIA)
 
-    if not has_view and not diff_block and not confidence_text and not semantic_block:
+    # İŞ EMRİ — "EK GÖRÜŞ" MÜŞTERİ RAPORUNDAN KALDIRILACAK: free_raw (Claude'un birincil rapor
+    # hakkındaki serbest iç eleştirisi — "birincil raporda şu hata var" tarzı modeller-arası iç
+    # denetim metni) artık müşteri raporuna/PDF'ye YAZILMIYOR. has_view (free_raw var mı) hâlâ
+    # HESAPLANIR ve system_decision (yönetici) kaydına düşer — yalnız CUSTOMER-FACING "Ek Görüş"
+    # bölümüne eklenmiyor. Claude'un 12 KRITER_PUAN/KRITER_GEREKCE'si (diff_block/"İkinci
+    # Değerlendirici Görüşü") ve semantik/özgüven notları bu değişiklikten ETKİLENMEDİ.
+    if not diff_block and not confidence_text and not semantic_block:
         record_system_decision(candidate_id, level, "ikinci_degerlendirici_atlandi",
                                "İkinci değerlendirici somut bir görüş/özgüven izlenimi/semantik not bildirmedi ve kriter puanları birincille örtüşüyor — bölüm rapora eklenmedi.",
-                               {"reviewer_status": status, "free_len": len(free_raw or "")})
+                               {"reviewer_status": status, "free_len": len(free_raw or ""), "has_view": has_view})
         final_report = final_report.replace(_REVIEWER_SLOT_MARK, "").strip()
         _save(final_report)
     else:
         block = _REVIEWER_HEAD + "\n\n"
         if diff_block:
             block += diff_block + "\n\n"
-        # "Ek Görüş" — serbest eleştiri VE/VEYA özgüven izlenimi; ikisi de varsa aynı alt
-        # başlık altında art arda (iş emri madde 4.1'in "farklı puan olmasa da yazılır" şartı
-        # burada sağlanıyor — confidence_text tek başına bile bu başlığı/bölümü tetikler).
+        # "Ek Görüş" — ARTIK YALNIZ özgüven izlenimi VE/VEYA semantik tutarlılık notları (free_raw
+        # serbest iç eleştiri DAHİL DEĞİL — bkz. yukarıdaki not).
         ek_gorus_parts = []
-        if has_view:
-            ek_gorus_parts.append(_format_reviewer_notes(free_raw))
         if confidence_text:
             ek_gorus_parts.append(confidence_text.strip())
         if semantic_block:
@@ -8728,7 +8732,12 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         except Exception as e:
             print(f"UYARI (one_cikan_proje recovery c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
-        if level == 3:
+        # İŞ EMRİ — L3 RAPOR AKIŞINI SADELEŞTİR: Final QA/QG AI çağrısı DEVREDEN ÇIKARILDI (bilinçli,
+        # geri alınabilir — geri almak için "False and " kısmını silmek yeterli). Fonksiyonun kendisi
+        # SİLİNMEDİ/değiştirilmedi; yalnız bu çağrı sitesi artık tetiklenmiyor, dolayısıyla Claude'dan
+        # sonra ayrı bir OpenAI Quality Gate AI çağrısı ARTIK OLUŞMUYOR. Deterministic final integrity
+        # check (aşağıda, AI çağrısı yapmaz) buna DOKUNULMADAN aynen çalışmaya devam eder.
+        if False and level == 3:
             # ═══ FINAL REPORT QUALITY GATE (pipeline'ın EN SONU, yalnız L3) ═══
             # Evaluator/validator/reviewer/takeover/proje-kurtarma TAMAMLANDIKTAN SONRA çalışan
             # bağımsız SON kalite denetçisi. Hata/atlama → rapor DEĞİŞMEDEN kalır (fail-closed,
@@ -12648,6 +12657,7 @@ TRANSKRİPT:
 {(transcript or '')[:TRANSCRIPT_PROMPT_MAX_CHARS]}
 
 TEMEL KURALLAR:
+- Değerlendirmeyi dikkatli ve kanıta dayalı yap. Her kriteri yalnızca o kriterle doğrudan ilişkili mülakat kanıtlarıyla değerlendir. İlgisiz kanıtları kriterler arasında taşıma ve kanıtın desteklemediği çıkarımlar yapma. Teknik bilgi veya mevcut yazılım kullanımını tek başına analitik düşünme, öğrenme/adaptasyon, inisiyatif veya başka bir davranışsal yetkinliğin kanıtı sayma. Aynı kanıtı birden fazla kriterde ancak kanıt her kriteri bağımsız ve doğrudan destekliyorsa kullan. Olumlu ve olumsuz kanıtları birlikte değerlendir. Puan, gerekçe ve kullanılan kanıt birbiriyle tutarlı olsun.
 - Rapor {report_lang} dilinde yazılacak.
 - Yalnızca adayın gerçekten söylediği sözler mülakat kanıtıdır. Mülakatçının açıklamalarını adaya mal etme.
 - CV bilgisi ile mülakat kanıtını ayır: “CV'de belirtilmiştir” ve “mülakatta doğrulanmıştır/doğrulanamamıştır” ifadelerini açık kullan.
