@@ -73,13 +73,24 @@ try:
     try:
         # Kasıtlı olarak BOŞ kanıt hücresi -> 'structure_invalid' (deterministik onarılamaz) ->
         # ESKİ kodda bu, regenerate_criterion_fields'a kadar 3(+1) kez giderdi.
+        # TEK DÜZELTME — DEĞERLENDİRİLEMEDİ KRİTERLERİ (sonraki iş emri, DÜZELTİLMİŞ): kriter zaten
+        # puanlanmış (5/10 award_m eşleşti) — bu bir TEKNİK VALİDATOR/PARSER sorunu, ne "Değerlendiri-
+        # lemedi (sistem)" (payda dışı) OLUR NE DE %25 taban puana düşürülür (o kural yalnız adayın
+        # GERÇEKTEN yetersiz cevap verdiği durumlar içindir — burası o durum DEĞİL). Adayın mevcut
+        # puanı (5/10) AYNEN KORUNUR.
         table_text = "| Proje Yönetimi | 5/10 |  |"
         criteria_list = [{"name": "Proje Yönetimi", "weight": 10, "desc": "Proje yürütme becerisi"}]
         new_table, new_score, log, flagged = m.apply_structured_rationale_gate(
             table_text, criteria_list, "P", [], "", "openai", "gpt-4o", CAND_A, LEVEL)
         check("A) apply_structured_rationale_gate AI'yı HİÇ çağırmadan tamamlandı (exception yok)", True)
-        check("A) İhlal deterministik onarılamayınca kriter 'degerlendirilemedi_sistem' oldu (AI'sız)",
-              any(l.get("sonuc") == "degerlendirilemedi_sistem" for l in log))
+        check("A) İhlal deterministik onarılamayınca kriter 'teknik_validator_hatasi_puan_korundu' oldu (AI'sız, PAYDA İÇİNDE, puan DEĞİŞMEDİ)",
+              any(l.get("sonuc") == "teknik_validator_hatasi_puan_korundu" for l in log))
+        check("A) 'degerlendirilemedi_sistem' (payda dışı) ARTIK ÜRETİLMİYOR — teknik validator sorunu diskalifiye ETMEZ",
+              not any(l.get("sonuc") == "degerlendirilemedi_sistem" for l in log))
+        check("A) tablo Değerlendirilemedi (sistem) METNİ İÇERMİYOR, ADAYIN ORİJİNAL PUANI (5/10) AYNEN KORUNDU (taban puana DÜŞÜRÜLMEDİ)",
+              "Değerlendirilemedi" not in new_table and "5/10" in new_table)
+        check("A) new_score None (bu satır TOPLAM PUAN'ı yeniden normalize ETMEDİ — puan zaten değişmedi)",
+              new_score is None)
     except _ContentRetryCalled as e:
         check("A) apply_structured_rationale_gate AI'yı HİÇ çağırmadan tamamlandı (exception yok)", False)
     finally:

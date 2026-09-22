@@ -6424,16 +6424,19 @@ def _format_reviewer_notes(free_text: str) -> str:
 
 # 2026-09 rapor yeniden tasarımı — eski _reviewer_score_tables ('Kriter | GPT | Müfettiş | Fark'
 # KARŞILAŞTIRMA TABLOSU) KALDIRILDI: iş emri madde 9 "Karşılaştırma tablosu oluşturma" diyor.
-# Yerine build_reviewer_diff_block (aşağıda) — YALNIZ gerçek farkı olan kriterler, "Kriter adı —
-# ikinci puan (birincil: X)" satır formatında + kısa gerekçe.
+# TEK DÜZELTME — İKİNCİ DEĞERLENDİRİCİ KRİTER PUANLARI: build_reviewer_diff_block artık İKİNCİ
+# değerlendiricinin PUANLADIĞI TÜM kriterleri listeler (yalnız birincilden farklı olanları DEĞİL —
+# bu kısıtlama kaldırıldı, admin artık her kriterde ikinci değerlendiricinin GERÇEK puanını görmek
+# istiyor). Format: "Kriter adı — X / maksimum puan" + "Açıklama: <mevcut gerekçe>". Birincilin
+# puanı buraya KOPYALANMAZ/karşılaştırılmaz — yalnız rv_scores'taki (ikinci değerlendiricinin KENDİ
+# ürettiği) puan kullanılır; reviewer bir kriteri hiç puanlamadıysa (rv_scores'ta yok) o kriter
+# HİÇ listelenmez (uydurma yok).
 def build_reviewer_diff_block(rv_scores: dict, rv_gerekce: dict, position_criteria: list, profile_criteria: list,
                               pos_table_text: str, prof_table_text: str) -> str:
-    """İş emri madde 9 — yalnızca İKİ değerlendirici arasında GERÇEK puan farkı olan kriterler
-    için satır üretir: 'Kriter adı — ikinci puan (birincil: X)' + varsa 2-3 cümlelik gerekçe.
-    Aynı puan verilen kriterlerden HİÇ bahsetmez. Fark yoksa boş döner (çağıran atlar).
-    GÖREV 6.1+6.2 — eşleştirme KİMLİK (P#/K#) üzerinden, ADA göre DEĞİL (benzer isimli pozisyon/
-    profil kriterleri artık karışamaz); tavan HER ZAMAN kriter listesinden (modelin kendi
-    yazdığı 'maksimum' asla güvenilmez — GÖREV 6.2)."""
+    """İkinci değerlendiricinin PUANLADIĞI her kriter için satır üretir: 'Kriter adı — X/maksimum'
+    + (varsa) 'Açıklama: <ikinci değerlendiricinin kendi gerekçesi>'. GÖREV 6.1+6.2 — eşleştirme
+    KİMLİK (P#/K#) üzerinden, ADA göre DEĞİL; tavan HER ZAMAN kriter listesinden (modelin kendi
+    yazdığı 'maksimum' asla güvenilmez — GÖREV 6.2). Birincilin puanına hiç bakmaz/kıyaslamaz."""
     lines = []
     for criteria_list, table_text, prefix in ((position_criteria or [], pos_table_text, "P"),
                                               (profile_criteria or [], prof_table_text, "K")):
@@ -6441,20 +6444,17 @@ def build_reviewer_diff_block(rv_scores: dict, rv_gerekce: dict, position_criter
             cid = f"{prefix}{i}"
             rv = rv_scores.get(cid)
             if rv is None:
-                continue
+                continue  # ikinci değerlendirici bu kriteri hiç puanlamadı — uydurma yok, atla
             name = c["name"] if isinstance(c, dict) else c
             real_cap = _safe_int(c.get("weight")) if isinstance(c, dict) else None
-            prim = _criterion_award(name, table_text)
-            if prim is None:
-                continue  # birincil bu kriteri hiç puanlamadı — kıyaslanamaz
-            eff_cap = real_cap or prim[1]
+            eff_cap = real_cap or rv[1]
+            if not eff_cap:
+                continue
             rv_awarded = max(0, min(rv[0], eff_cap))
-            if rv_awarded == prim[0]:
-                continue  # gerçek fark yok
-            lines.append(f"**{name}** — {rv_awarded}/{eff_cap} (birincil: {prim[0]}/{prim[1]})")
+            lines.append(f"**{name}** — {rv_awarded}/{eff_cap}")
             gerekce = rv_gerekce.get(cid)
             if gerekce:
-                lines.append(str(gerekce).strip())
+                lines.append(f"Açıklama: {str(gerekce).strip()}")
     return "\n\n".join(lines)
 
 # İş emri madde 3 — İkinci Değerlendirici Görüşü, Kişisel ve Bilişsel Profil'den HEMEN sonra
@@ -7992,12 +7992,24 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
         # çağrılmıyor.
 
         if violations:
-            log.append({"kriter": cname, "kimlik": cid, "sonuc": "degerlendirilemedi_sistem", "ihlaller": violations})
-            new_score_cell = f"Değerlendirilemedi (sistem) — doğrulayıcı 3 denemede geçerli gerekçe üretemedi ({', '.join(violations)})"
-            new_evidence = "Bu kriter için doğrulanabilir bir gerekçe üretilemedi; puan sisteme göre değerlendirilemedi sayıldı."
-            cells[1] = new_score_cell
+            # TEK DÜZELTME — DEĞERLENDİRİLEMEDİ KRİTERLERİ: kriter aslında SORULMUŞ/CEVAPLANMIŞ
+            # (aksi halde award_m hiç eşleşmezdi, bkz. yukarıdaki 'zaten sistem/aday kaynaklı eksik'
+            # erken çıkışı) — burada başarısız olan yalnızca doğrulayıcının YAPISAL gerekçe formatı
+            # (grounding/timestamp/vb.). Bu bir TEKNİK VALİDATOR/PARSER sorunudur — ne "Değerlendiri-
+            # lemedi (sistem)" (payda dışı) YAZILIR, NE DE %25 taban puana düşürülür (bu taban puan
+            # kuralı YALNIZ adayın gerçekten yetersiz cevap verdiği — bilmiyorum/deneyimim yok/anlamlı
+            # cevap yok — durumlar içindir, bkz. CRITERION_SCORING_RULE madde 2; bu SATIR o durum
+            # DEĞİL, adayın cevabı zaten var ve puanlanmış). Model tarafından zaten verilmiş `awarded`
+            # puan AYNEN KORUNUR — teknik doğrulama sorunu adayın puanını DEĞİŞTİRMEZ, yalnızca
+            # gerekçe metni doğrulanamadığı için jenerik bir notla değiştirilir.
+            log.append({"kriter": cname, "kimlik": cid, "sonuc": "teknik_validator_hatasi_puan_korundu",
+                       "ihlaller": violations, "puan": f"{awarded}/{cap}"})
+            new_evidence = (f"(Teknik not: bu kriterin ayrıntılı gerekçesi doğrulayıcıdan geçemedi "
+                            f"({', '.join(violations)}); bu TEKNİK bir doğrulama sorunudur, adayın puanı "
+                            f"ETKİLENMEDİ.)")
+            cells[1] = f"{awarded}/{cap}"
             cells[2] = new_evidence
-            rendered_rows.append({"line_idx": best_i, "disqualified": True, "cap": cap, "awarded": awarded})
+            rendered_rows.append({"line_idx": best_i, "disqualified": False, "cap": cap, "awarded": awarded})
         else:
             log.append({"kriter": cname, "kimlik": cid, "sonuc": "gecti", "deneme": attempt})
             accepted_claims.append(fields["g"])
@@ -8037,6 +8049,8 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
                        "detay": f"{len(hit_idx)}/{n} kriterde geçiş bağlacı vardı (izin: {limit}); {fixed} kriter farklı şablonla yeniden render edildi"})
 
     # Diskalifiye edilen / kelepçelenen kriterler varsa: TOPLAM/PROFİL PUANI yeniden normalize edilir.
+    # (TEK DÜZELTME — teknik validator hatası artık ne disqualify EDER ne de puanı DEĞİŞTİRİR; awarded
+    # aynen korunduğu için bu satır TOPLAM PUAN'ı etkilemez, yeniden normalize tetiklemesine gerek yok.)
     new_score = None
     if any(r["disqualified"] for r in rendered_rows) or any(g.get("sonuc") == "alan_disi_puan_kelepceledi" for g in log):
         awarded_sum = sum(r["awarded"] for r in rendered_rows if not r["disqualified"])
