@@ -6210,7 +6210,7 @@ Hiçbir kriterde sorun görmüyorsan bu bölüme HİÇBİR SATIR yazma (boş bı
         # bütçesi (yalnız 1-2 farklı kriter için yeterliydi) 12+ kriterlik tam listeyi kesebilirdi.
         # Aynı TEK çağrı, yalnızca çıktı bütçesi büyütüldü — yeni bir AI çağrısı/pass EKLENMEDİ.
         response = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=3000, temperature=0.3,
+            model="claude-sonnet-4-6", max_tokens=5000, temperature=0.3,
             messages=[{"role": "user", "content": prompt}],
         )
         record_anthropic_usage(candidate_id, level, "claude-sonnet-4-6", "report_reviewer", response)
