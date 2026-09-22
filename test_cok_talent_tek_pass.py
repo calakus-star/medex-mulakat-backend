@@ -91,6 +91,10 @@ try:
               "Değerlendirilemedi" not in new_table and "5/10" in new_table)
         check("A) new_score None (bu satır TOPLAM PUAN'ı yeniden normalize ETMEDİ — puan zaten değişmedi)",
               new_score is None)
+        check("A) MÜŞTERİ tablosunda 'Teknik' / 'doğrulayıcı' gibi validator jargonu YOK",
+              "Teknik" not in new_table and "doğrulayıcı" not in new_table and "duplicate_claim" not in new_table)
+        check("A) boş kanıt hücresinde nötr, jargonsuz bir gerekçe satırı yazıldı",
+              "Bu kriter için ayrıntılı kanıt/gerekçe metni bulunamadı." in new_table)
     except _ContentRetryCalled as e:
         check("A) apply_structured_rationale_gate AI'yı HİÇ çağırmadan tamamlandı (exception yok)", False)
     finally:

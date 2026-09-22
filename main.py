@@ -6164,12 +6164,12 @@ Bunun DIŞINDA, yukarıdaki görüşün olup olmamasından TAMAMEN BAĞIMSIZ ola
 Mülakatın TAMAMINA (akış baskısı olmadan, dışarıdan) bakarak adayın özgüvenine dair gözlemini yaz: kendinden emin mi/tereddütlü mü, kararlarını savunabiliyor mu/geri adım atıyor mu, belirsizlik veya zorlayıcı bir soru karşısındaki tutumu, bilmediğini açıkça kabul edebiliyor mu, görüşünü gerekçelendirerek mi savunuyor yoksa sadece tekrarlıyor mu, mülakatçı zorladığında pozisyonunu koruyor mu. Bu bir KONTROL LİSTESİ DEĞİLDİR — yalnız transkriptte GERÇEKTEN karşılığı olan yönleri yaz, karşılığı olmayan madde için cümle KURMA. KESİN KİŞİLİK HÜKMÜ YASAK (ör. "özgüveni düşük bir kişi" YAZMA) — somut davranış + [dk] damgası yaz, ör: "zorlayıcı sorularda pozisyonunu değiştirmeden savundu [12:36], ancak gerekçesini yeni bir örnekle desteklemek yerine aynı ifadeyi tekrarladı [13:47]". EN AZ BİR [dk] damgası ZORUNLU — damgasız genel yorum YAZMA. 1-2 paragraf, doldurma yok. SADECE transkript bu izlenimi kurmaya gerçekten yetmiyorsa (aday neredeyse hiç konuşmadı / mülakat çok kısa kesildi) bu bloğa SADECE "YETERSİZ VERİ" yaz — zorla üretme.
 
 === KRİTER PUANLARI ===
+AŞAĞIDAKİ (P1.. ve K1..) KRİTER LİSTESİNDEKİ HER KRİTER İÇİN, birincil değerlendirmeden BAĞIMSIZ olarak KENDİ puanını üret — birincilinkiyle AYNI sonuca varsan BİLE bu satırları atlama, yine de yaz:
 KRITER_PUAN: <KİMLİK, ör. P1 veya K3 — AŞAĞIDAKİ LİSTEDEN, kriter ADINI YAZMA> = <senin puanın>/<maksimum>
 KRITER_GEREKCE: <AYNI KİMLİK> = <2-3 cümle gerekçe, en az bir [dk] damgalı somut kanıt>
-(YALNIZCA birincil değerlendirmeden GERÇEKTEN FARKLI puan verdiğin kriterler için — aynı puanı veriyorsan o kriter için HİÇBİR satır yazma, atla; rapordaki puanları KOPYALAMA, transkripte göre KENDİ değerlendirmeni yap. KRITER_PUAN yazıp KRITER_GEREKCE YAZMAMAK KABUL EDİLMEZ — her KRITER_PUAN satırının hemen altında AYNI kimlikle bir KRITER_GEREKCE satırı OLMALI.)
-YAPISAL TUTARLILIK ZORUNLULUĞU (KESİN — SERBEST METİN/SEMANTİK TUTARLILIK bölümleri burasıyla ÇELİŞEMEZ): Yukarıdaki SERBEST METİN'de veya aşağıdaki SEMANTİK TUTARLILIK bölümünde bir kriterin puanına AÇIKÇA itiraz ediyorsan — "bu puan fazla yüksek/düşük", "bu kanıt bu kritere ait değil ve değerlendirmeyi etkiliyor" gibi puanı GERÇEKTEN etkileyen bir tespit yapıyorsan — bunu YALNIZ yorum olarak bırakman KABUL EDİLMEZ: o kriter için BURADA kendi KRITER_PUAN/KRITER_GEREKCE'ni de ZORUNLU olarak üretmelisin. "İtiraz var ama sayı yok" durumu KABUL EDİLMEZ. Kanıt yanlış kritere atanmış diyorsan: o kriter için GERÇEKTEN GEÇERLİ bir kanıt transkriptte var mı diye ayrıca bak — VARSA o kanıtla kendi puanını üret; net biçimde YOKSA aşağıdaki TEK KURAL'a göre karar ver (YENİ bir değerlendirilebilirlik kategorisi UYDURMA, bu dört durumun DIŞINA ÇIKMA):
+(Listedeki HER kimlik için bir KRITER_PUAN/KRITER_GEREKCE çifti OLMALI — rapordaki puanları KOPYALAMA, transkripte göre KENDİ bağımsız değerlendirmeni yap. KRITER_PUAN yazıp KRITER_GEREKCE YAZMAMAK KABUL EDİLMEZ.)
+Bir kriterin puanına AÇIKÇA itiraz ediyorsan — "bu puan fazla yüksek/düşük", "bu kanıt bu kritere ait değil ve değerlendirmeyi etkiliyor" gibi puanı GERÇEKTEN etkileyen bir tespit yapıyorsan — bu itirazın o kriterin KRITER_PUAN/KRITER_GEREKCE'sine YANSIMASI ZORUNLU (yukarıdaki "her kriter için yaz" kuralı zaten bunu garanti eder). Kanıt yanlış kritere atanmış diyorsan: o kriter için GERÇEKTEN GEÇERLİ bir kanıt transkriptte var mı diye ayrıca bak — VARSA o kanıtla kendi puanını üret; net biçimde YOKSA aşağıdaki TEK KURAL'a göre karar ver (YENİ bir değerlendirilebilirlik kategorisi UYDURMA, bu dört durumun DIŞINA ÇIKMA):
 {CRITERION_SCORING_RULE}
-Yalnızca puana AÇIKÇA itiraz ETMEDEN küçük bir üslup/vurgu gözlemi paylaşıyorsan (puanı GERÇEKTEN değiştirmeni gerektirmeyen bir gözlem) bunu yalnız SEMANTIC_ISSUE'de veya serbest metinde bırakabilirsin — KRITER_PUAN ZORUNLU DEĞİL. Aynı puana KATILIYORSAN mevcut davranış aynen geçerli: KRITER_PUAN yazma, atla.
 GUVEN_DUZEYI: <yüksek|orta|düşük> — <kendi değerlendirmene duyduğun güven düşükse KISA neden; yüksekse yalnızca 'yüksek' yaz> (bu satır ADAYIN değil SENİN kendi değerlendirmene duyduğun güvendir — rapora BASILMAZ, yalnız yönetici kaydı için)
 
 === SEMANTİK TUTARLILIK ===
@@ -6201,8 +6201,12 @@ Hiçbir kriterde sorun görmüyorsan bu bölüme HİÇBİR SATIR yazma (boş bı
 {basvuru_formu_block}"""
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
+        # TEK DÜZELTME — İKİNCİ DEĞERLENDİRİCİ TÜM KRİTER PUANLARI: prompt artık HER kriter için
+        # (yalnız farklı olanlar değil) bir KRITER_PUAN/KRITER_GEREKCE çifti istiyor — eski 1400
+        # bütçesi (yalnız 1-2 farklı kriter için yeterliydi) 12+ kriterlik tam listeyi kesebilirdi.
+        # Aynı TEK çağrı, yalnızca çıktı bütçesi büyütüldü — yeni bir AI çağrısı/pass EKLENMEDİ.
         response = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=1400, temperature=0.3,
+            model="claude-sonnet-4-6", max_tokens=3000, temperature=0.3,
             messages=[{"role": "user", "content": prompt}],
         )
         record_anthropic_usage(candidate_id, level, "claude-sonnet-4-6", "report_reviewer", response)
@@ -8000,15 +8004,23 @@ def apply_structured_rationale_gate(table_text: str, criteria_list: list, id_pre
             # kuralı YALNIZ adayın gerçekten yetersiz cevap verdiği — bilmiyorum/deneyimim yok/anlamlı
             # cevap yok — durumlar içindir, bkz. CRITERION_SCORING_RULE madde 2; bu SATIR o durum
             # DEĞİL, adayın cevabı zaten var ve puanlanmış). Model tarafından zaten verilmiş `awarded`
-            # puan AYNEN KORUNUR — teknik doğrulama sorunu adayın puanını DEĞİŞTİRMEZ, yalnızca
-            # gerekçe metni doğrulanamadığı için jenerik bir notla değiştirilir.
+            # puan AYNEN KORUNUR.
+            # TEK DÜZELTME (2. tur) — MÜŞTERİ RAPORUNDA TEKNİK NOT GÖSTERİLMEZ: violation kodları
+            # (duplicate_claim, evidence_timestamp_invalid, vb.) yalnız `log`'a (admin/system_decision
+            # kaydı) yazılır — MÜŞTERİ hücresine ASLA. Gerekçe hücresi MÜMKÜN OLDUĞUNCA modelin
+            # KENDİ mevcut G/K/E/S içeriğiyle (fields varsa, "gecti" dalıyla AYNI render fonksiyonu —
+            # yeni içerik UYDURULMAZ) doldurulur; yapısal alanlar hiç parse edilemediyse (fields=None)
+            # modelin ORİJİNAL serbest-metin gerekçesi AYNEN korunur; o da yoksa nötr, jargonsuz tek
+            # cümlelik bir not yazılır. Yeni AI çağrısı YOK.
             log.append({"kriter": cname, "kimlik": cid, "sonuc": "teknik_validator_hatasi_puan_korundu",
                        "ihlaller": violations, "puan": f"{awarded}/{cap}"})
-            new_evidence = (f"(Teknik not: bu kriterin ayrıntılı gerekçesi doğrulayıcıdan geçemedi "
-                            f"({', '.join(violations)}); bu TEKNİK bir doğrulama sorunudur, adayın puanı "
-                            f"ETKİLENMEDİ.)")
+            if fields:
+                cells[2] = render_criterion_rationale(fields, idx - 1)
+            elif evidence_cell.strip():
+                cells[2] = evidence_cell.strip()
+            else:
+                cells[2] = "Bu kriter için ayrıntılı kanıt/gerekçe metni bulunamadı."
             cells[1] = f"{awarded}/{cap}"
-            cells[2] = new_evidence
             rendered_rows.append({"line_idx": best_i, "disqualified": False, "cap": cap, "awarded": awarded})
         else:
             log.append({"kriter": cname, "kimlik": cid, "sonuc": "gecti", "deneme": attempt})
