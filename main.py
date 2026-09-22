@@ -6200,7 +6200,11 @@ Hiçbir kriterde sorun görmüyorsan bu bölüme HİÇBİR SATIR yazma (boş bı
 === BAŞVURU FORMU BEYANI ===
 {basvuru_formu_block}"""
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
+        # TEK DÜZELTME — TIMEOUT: 60.0 -> 120.0. Prompt artık TÜM kriterler için KRITER_PUAN/
+        # KRITER_GEREKCE istediğinden üretim süresi uzadı (bkz. Kader EMECEN teşhisi — Claude'un
+        # bu çağrısı 60s x SDK varsayılan retry ile ~186s'de APITimeoutError verdi, hiç yanıt
+        # dönmedi). max_tokens/prompt/retry ayarları DEĞİŞMEDİ — yalnız istemci zaman aşımı.
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=120.0)
         # TEK DÜZELTME — İKİNCİ DEĞERLENDİRİCİ TÜM KRİTER PUANLARI: prompt artık HER kriter için
         # (yalnız farklı olanlar değil) bir KRITER_PUAN/KRITER_GEREKCE çifti istiyor — eski 1400
         # bütçesi (yalnız 1-2 farklı kriter için yeterliydi) 12+ kriterlik tam listeyi kesebilirdi.
