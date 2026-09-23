@@ -6720,72 +6720,82 @@ def append_reviewer_section(candidate_id: int, level: int, transcript_text: str,
     pos_table_text = _pos_m.group(1) if _pos_m else ""
     prof_table_text = _prof_m.group(1) if _prof_m else ""
 
-    # İş emri GÖREV 1.3 (VALIDATOR KALİBRASYONU) — DEVRALMA: birincilde 3 denemede düşen ama
-    # ikinci değerlendiricide GEÇERLİ (puan+gerekçe) bir değerlendirmesi olan kriterler artık
-    # "Değerlendirilemedi" KALMIYOR (bkz. apply_criterion_takeover). Sessizce olmaz — loglanır.
-    try:
-        _new_pos_tbl, _new_score_pos_tk, _log_pos_tk = apply_criterion_takeover(
-            pos_table_text, position_criteria or [], rv_scores, rv_gerekce, "P", transcript_view)
-        _new_prof_tbl, _new_score_prof_tk, _log_prof_tk = apply_criterion_takeover(
-            prof_table_text, PROFILE_CRITERIA, rv_scores, rv_gerekce, "K", transcript_view)
-        _takeover_log = _log_pos_tk + _log_prof_tk
-        if _takeover_log:
-            if _new_pos_tbl != pos_table_text:
-                final_report = final_report.replace(pos_table_text, _new_pos_tbl, 1)
-                pos_table_text = _new_pos_tbl
-            if _new_prof_tbl != prof_table_text:
-                final_report = final_report.replace(prof_table_text, _new_prof_tbl, 1)
-                prof_table_text = _new_prof_tbl
-            _db_tk = get_db()
-            try:
-                if _new_score_pos_tk is not None:
-                    _db_tk.execute("UPDATE interviews SET score_position=? WHERE candidate_id=? AND level=?",
-                                  (_new_score_pos_tk, candidate_id, level))
-                if _new_score_prof_tk is not None:
-                    _db_tk.execute("UPDATE interviews SET score_profile=? WHERE candidate_id=? AND level=?",
-                                  (_new_score_prof_tk, candidate_id, level))
-                _db_tk.commit()
-            finally:
-                _db_tk.close()
-            record_system_decision(candidate_id, level, "kriter_devralindi",
-                                   "GÖREV 1.3 — birincil doğrulayıcıda düşen bazı kriterler için ikinci değerlendiricinin GEÇERLİ puan+gerekçesi kullanıldı; kriter 'Değerlendirilemedi' olarak KALMADI.",
-                                   {"devralinan": _takeover_log})
-    except Exception as e:
-        print(f"UYARI (append_reviewer_section devralma c={candidate_id} L{level}): {type(e).__name__}: {e}")
+    # İŞ EMRİ — CLAUDE PRIMARY KRİTER TABLOSUNU DEĞİŞTİRMESİN: OpenAI (1. değerlendirici) ve Claude
+    # (2. değerlendirici) sonuçları AYRI kalmalı — Claude'un puanı/gerekçesi artık primary'nin
+    # kriter tablosunun (score_position/score_profile dahil) ÜZERİNE YAZILMIYOR. Bilinçli, geri
+    # alınabilir devre dışı bırakma (geri almak için "if False:" satırını silip içeriği bir seviye
+    # sola kaydırmak yeterli) — fonksiyonların (apply_criterion_takeover/apply_reviewer_criterion_
+    # correction) kendisi SİLİNMEDİ/değiştirilmedi, yalnız bu çağrı noktaları artık tetiklenmiyor.
+    # Claude'un KENDİ 12 kriter puanı/gerekçesi ("İkinci Değerlendirici Görüşü") ve Genel Puan'a
+    # katkısı (compute_reviewer_overall/recompute_overall_decision, rv_scores/rv_gerekce üzerinden
+    # çalışır, primary tablo metnine YAZMAZ) bu değişiklikten ETKİLENMEDİ.
+    if False:
+        # İş emri GÖREV 1.3 (VALIDATOR KALİBRASYONU) — DEVRALMA: birincilde 3 denemede düşen ama
+        # ikinci değerlendiricide GEÇERLİ (puan+gerekçe) bir değerlendirmesi olan kriterler artık
+        # "Değerlendirilemedi" KALMIYOR (bkz. apply_criterion_takeover). Sessizce olmaz — loglanır.
+        try:
+            _new_pos_tbl, _new_score_pos_tk, _log_pos_tk = apply_criterion_takeover(
+                pos_table_text, position_criteria or [], rv_scores, rv_gerekce, "P", transcript_view)
+            _new_prof_tbl, _new_score_prof_tk, _log_prof_tk = apply_criterion_takeover(
+                prof_table_text, PROFILE_CRITERIA, rv_scores, rv_gerekce, "K", transcript_view)
+            _takeover_log = _log_pos_tk + _log_prof_tk
+            if _takeover_log:
+                if _new_pos_tbl != pos_table_text:
+                    final_report = final_report.replace(pos_table_text, _new_pos_tbl, 1)
+                    pos_table_text = _new_pos_tbl
+                if _new_prof_tbl != prof_table_text:
+                    final_report = final_report.replace(prof_table_text, _new_prof_tbl, 1)
+                    prof_table_text = _new_prof_tbl
+                _db_tk = get_db()
+                try:
+                    if _new_score_pos_tk is not None:
+                        _db_tk.execute("UPDATE interviews SET score_position=? WHERE candidate_id=? AND level=?",
+                                      (_new_score_pos_tk, candidate_id, level))
+                    if _new_score_prof_tk is not None:
+                        _db_tk.execute("UPDATE interviews SET score_profile=? WHERE candidate_id=? AND level=?",
+                                      (_new_score_prof_tk, candidate_id, level))
+                    _db_tk.commit()
+                finally:
+                    _db_tk.close()
+                record_system_decision(candidate_id, level, "kriter_devralindi",
+                                       "GÖREV 1.3 — birincil doğrulayıcıda düşen bazı kriterler için ikinci değerlendiricinin GEÇERLİ puan+gerekçesi kullanıldı; kriter 'Değerlendirilemedi' olarak KALMADI.",
+                                       {"devralinan": _takeover_log})
+        except Exception as e:
+            print(f"UYARI (append_reviewer_section devralma c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
-    # İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / madde 2 — devralmanın (yukarıda, YALNIZ diskalifiye
-    # satırlar) HEMEN SONRASI: L3 Claude reviewer'ın ZATEN PUANLI bir kriterde bulduğu, GROUNDED
-    # (kanıtlanabilir) düzeltmesi de final duruma GİREBİLİR — apply_criterion_takeover'ın
-    # sorumluluk alanına (diskalifiye) HİÇ dokunmaz, yalnız onun DIŞINDA kalan satırlarda çalışır.
-    try:
-        _new_pos_tbl2, _new_score_pos_corr, _log_pos_corr = apply_reviewer_criterion_correction(
-            pos_table_text, position_criteria or [], rv_scores, rv_gerekce, "P", transcript_view)
-        _new_prof_tbl2, _new_score_prof_corr, _log_prof_corr = apply_reviewer_criterion_correction(
-            prof_table_text, PROFILE_CRITERIA, rv_scores, rv_gerekce, "K", transcript_view)
-        _correction_log = _log_pos_corr + _log_prof_corr
-        if _correction_log:
-            if _new_pos_tbl2 != pos_table_text:
-                final_report = final_report.replace(pos_table_text, _new_pos_tbl2, 1)
-                pos_table_text = _new_pos_tbl2
-            if _new_prof_tbl2 != prof_table_text:
-                final_report = final_report.replace(prof_table_text, _new_prof_tbl2, 1)
-                prof_table_text = _new_prof_tbl2
-            _db_corr = get_db()
-            try:
-                if _new_score_pos_corr is not None:
-                    _db_corr.execute("UPDATE interviews SET score_position=? WHERE candidate_id=? AND level=?",
-                                     (_new_score_pos_corr, candidate_id, level))
-                if _new_score_prof_corr is not None:
-                    _db_corr.execute("UPDATE interviews SET score_profile=? WHERE candidate_id=? AND level=?",
-                                     (_new_score_prof_corr, candidate_id, level))
-                _db_corr.commit()
-            finally:
-                _db_corr.close()
-            record_system_decision(candidate_id, level, "reviewer_kriter_duzeltmesi",
-                                   "İŞ EMRİ — L3 Claude second evaluator, ZATEN PUANLI bir kriterde kanıtlanabilir/grounded bir düzeltme buldu; deterministik doğrulamadan geçtiği için final duruma UYGULANDI (grounding geçemeyenler reddedildi, log'da ayrıca görünür).",
-                                   {"duzeltmeler": _correction_log})
-    except Exception as e:
-        print(f"UYARI (append_reviewer_section reviewer düzeltmesi c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        # İş emri — FINAL EVALUATION ARCHITECTURE / madde 2 — devralmanın (yukarıda, YALNIZ diskalifiye
+        # satırlar) HEMEN SONRASI: L3 Claude reviewer'ın ZATEN PUANLI bir kriterde bulduğu, GROUNDED
+        # (kanıtlanabilir) düzeltmesi de final duruma GİREBİLİR — apply_criterion_takeover'ın
+        # sorumluluk alanına (diskalifiye) HİÇ dokunmaz, yalnız onun DIŞINDA kalan satırlarda çalışır.
+        try:
+            _new_pos_tbl2, _new_score_pos_corr, _log_pos_corr = apply_reviewer_criterion_correction(
+                pos_table_text, position_criteria or [], rv_scores, rv_gerekce, "P", transcript_view)
+            _new_prof_tbl2, _new_score_prof_corr, _log_prof_corr = apply_reviewer_criterion_correction(
+                prof_table_text, PROFILE_CRITERIA, rv_scores, rv_gerekce, "K", transcript_view)
+            _correction_log = _log_pos_corr + _log_prof_corr
+            if _correction_log:
+                if _new_pos_tbl2 != pos_table_text:
+                    final_report = final_report.replace(pos_table_text, _new_pos_tbl2, 1)
+                    pos_table_text = _new_pos_tbl2
+                if _new_prof_tbl2 != prof_table_text:
+                    final_report = final_report.replace(prof_table_text, _new_prof_tbl2, 1)
+                    prof_table_text = _new_prof_tbl2
+                _db_corr = get_db()
+                try:
+                    if _new_score_pos_corr is not None:
+                        _db_corr.execute("UPDATE interviews SET score_position=? WHERE candidate_id=? AND level=?",
+                                         (_new_score_pos_corr, candidate_id, level))
+                    if _new_score_prof_corr is not None:
+                        _db_corr.execute("UPDATE interviews SET score_profile=? WHERE candidate_id=? AND level=?",
+                                         (_new_score_prof_corr, candidate_id, level))
+                    _db_corr.commit()
+                finally:
+                    _db_corr.close()
+                record_system_decision(candidate_id, level, "reviewer_kriter_duzeltmesi",
+                                       "İŞ EMRİ — L3 Claude second evaluator, ZATEN PUANLI bir kriterde kanıtlanabilir/grounded bir düzeltme buldu; deterministik doğrulamadan geçtiği için final duruma UYGULANDI (grounding geçemeyenler reddedildi, log'da ayrıca görünür).",
+                                       {"duzeltmeler": _correction_log})
+        except Exception as e:
+            print(f"UYARI (append_reviewer_section reviewer düzeltmesi c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
     # İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 1.4 (devam, sonraki tur) — devralma SONRASI
     # "Puanlama Kapsamı" bölümü (HER ZAMAN vardır — bkz. render_puanlama_kapsami) YENİDEN

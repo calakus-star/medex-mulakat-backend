@@ -321,14 +321,11 @@ finally:
 # ============================================================
 # 8b) Reviewer-score mekanizması — semantic bloktan BAĞIMSIZ çalışıyor. Aynı anda hem KRITER_PUAN
 # farkı hem SEMANTIC_ISSUE varsa ikisi de doğru işlenmeli.
-# İŞ EMRİ — FINAL EVALUATION ARCHITECTURE / madde 2 GÜNCELLEMESİ (Section 14 — davranış BİLİNÇLİ
-# DEĞİŞTİ, test buna göre güncellendi): KRITER_GEREKCE burada GROUNDED bir [2:10] damgası taşıyor
-# (TRANSCRIPT_VIEW'da gerçek bir aday satırına karşılık geliyor) — ESKİ mimaride (yalnız diskalifiye
-# satırlar devralınabilirdi) bu satır PASS olduğu için asla değişmezdi, farkı yalnız diff_block
-# gösterirdi. YENİ mimaride (apply_reviewer_criterion_correction, İş emri madde 2) GROUNDED bir
-# düzeltme artık PASS etmiş bir satırı da GERÇEKTEN düzeltir — bu KASITLI, istenen yeni davranış.
-# Düzeltme uygulandığı için tablo ARTIK 22/25 gösterir (15/25 DEĞİL) ve diff_block'ta bu kriter
-# için ayrıca satır YOKTUR (birincil ile "reviewer" artık AYNI sayı — gösterilecek fark kalmadı).
+# İŞ EMRİ — CLAUDE PRIMARY KRİTER TABLOSUNU DEĞİŞTİRMESİN (davranış BİLİNÇLİ DEĞİŞTİ, test buna
+# göre güncellendi): apply_reviewer_criterion_correction ARTIK ÇAĞRILMIYOR — Claude'un GROUNDED
+# [2:10] damgalı düzeltmesi olsa BİLE PRIMARY'nin kriter tablosu (score_position dahil) ARTIK
+# DEĞİŞTİRİLMEZ; birincil satır (15/25) AYNEN kalır. Claude'un KENDİ puanı (22/25) yalnız
+# "İkinci Değerlendirici Görüşü" bölümünde, kendi gerekçesiyle ayrı görünür.
 # ============================================================
 REVIEWER_RAW_SCORE_DIFF_PLUS_SEMANTIC = """GÖRÜŞ YOK
 
@@ -344,11 +341,12 @@ GUVEN_DUZEYI: yüksek
 
 try:
     state_diff = run_append_with_mock(REVIEWER_RAW_SCORE_DIFF_PLUS_SEMANTIC)
-    check("8b) GROUNDED reviewer düzeltmesi kriter tablosuna GERÇEKTEN UYGULANDI (22/25)",
+    check("8b) Claude'un KENDİ puanı (22/25) 'İkinci Değerlendirici Görüşü' altında GÖRÜNÜYOR",
           "22/25" in state_diff["report"])
-    check("8b) semantic not da AYNI ANDA rapora yansıdı", "Kanıtın yönü tersine çevrilmiş görünüyor" in state_diff["report"])
-    check("8b) eski (15/25) primary değeri artık tabloda YOK (düzeltme sonrası)",
-          POS_ROW not in state_diff["report"])
+    check("8b) PRIMARY kriter tablosu (15/25) DEĞİŞMEDİ — Claude artık primary'nin üzerine YAZAMIYOR",
+          POS_ROW in state_diff["report"])
+    check("8b) score_position DB'de PRIMARY'nin kendi değeri (takeover/correction tetiklenmedi)",
+          state_diff["score_position"] == 60.0)
 finally:
     db = m.get_db()
     try:
