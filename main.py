@@ -2582,11 +2582,18 @@ def build_criteria_text(criteria: list) -> str:
         lines.append(f"- {c['name']} ({c['weight']} puan): {c.get('desc', '')}")
     return "\n".join(lines)
 
-# Kriter hücresi: sayı  |  sistem-kaynaklı eksik (PAYDA DIŞI)  |  yeterli cevap alınamadı (TABAN PUAN,
-# PAYDADA)  |  yalnız açık ret/alakasız cevapta 0 (PAYDADA)
-_CRIT_CELL_HINT = ("__/{w}  |  VEYA  |  Değerlendirilemedi (sistem) — <gerekçe>  "
-                   "|  VEYA  |  Yetersiz Cevap (taban puan) — <gerekçe>  "
-                   "|  VEYA  |  0/{w} — aday açıkça reddetti / tamamen alakasız cevap verdi")
+# İŞ EMRİ — PRIMARY PUAN FORMATI DÜZELTMESİ: Kriter hücresi (PUAN sütunu) kriter PAYDA
+# İÇİNDEYSE (sorulmuş — taban puan/düşük puan/açık ret dahil) HER ZAMAN sayısal X/Y'dir;
+# "Düşük"/"Yetersiz Cevap (taban puan)" gibi serbest metin ARTIK PUAN sütununa YAZILMAZ —
+# gerekçe/açıklama KANIT VE ANALİZ (3. hücre) içine yazılır. Yalnız kriter PAYDA DIŞIYSA
+# (hiç sorulmadı) "Değerlendirilemedi (sistem)" metni PUAN sütununda kalır (sayı YOKTUR,
+# çünkü payda dışı kriterin puanı da yoktur). Bu, YALNIZCA promptun GPT'ye ne İSTEDİĞİNİ
+# değiştirir — recompute_and_fix_score/recompute_profile_section'ın GPT sayı yazMAdığında
+# uyguladığı mevcut taban puan/ayrıştırma mantığı DEĞİŞMEDİ (bkz. o fonksiyonlardaki notlar).
+_CRIT_CELL_HINT = ("__/{w}  (kriter sorulmuş ve payda İÇİNDEYSE HER ZAMAN bu sayısal biçim — "
+                   "taban puan/düşük puan/açık ret durumlarında DA sayı yaz, açıklamayı PUAN "
+                   "sütununa DEĞİL KANIT VE ANALİZ sütununa yaz)  |  VEYA (yalnızca kriter HİÇ "
+                   "SORULMADIYSA, payda DIŞI) — Değerlendirilemedi (sistem) — <gerekçe>")
 
 # İŞ EMRİ — KRİTER KAPSAMA + YETERSİZ CEVAP PUANLAMA: TEK KURAL (eksik veri) — hem PUAN 1 hem PUAN 2
 # için; prompt'larda birebir kullanılır. ÜÇ AYRI DURUM birbirine KARIŞTIRILMAZ: (1) kriter HİÇ
@@ -2603,12 +2610,15 @@ CRITERION_SCORING_RULE = (
     "yeniden de soruldu) ama aday cevap VERMEDİ, 'bilmiyorum' / 'bu konuda deneyimim/tecrübem yok' dedi, "
     "cevabı boş / '[SİSTEM: … halüsinasyon]' işaretli kaldı, veya 'anlamadım / tekrar eder misiniz' gibi "
     "bir anlamlı cevap oluşmadı: BU 'DEĞERLENDİRİLEMEDİ' DEĞİLDİR — kriter SORULMUŞ ve DEĞERLENDİRİLMİŞ "
-    "sayılır. **Yetersiz Cevap (taban puan) — <gerekçe>** yaz; bu kriter kendi tavanının %25'i ile PUANA "
-    "ve PAYDAYA GİRER — kesin rakamı SEN hesaplama/yazma, sistem otomatik uygular.\n"
+    "sayılır; PUANA ve PAYDAYA GİRER. PUAN sütununa YİNE SAYISAL bir X/Y yaz (tavanın yaklaşık %25'i — "
+    "kesin rakamı sistem ayrıca deterministik doğrular/düzeltir) — PUAN sütununa 'Yetersiz Cevap (taban "
+    "puan)' gibi SERBEST METİN YAZMA, açıklamayı ('sorgulandı, yeterli cevap alınamadı: <gerekçe>') "
+    "KANIT VE ANALİZ sütununa yaz.\n"
     "3) Kriter DÜZGÜN soruldu ve aday DEĞERLENDİRİLEBİLİR bir cevap verdi ama cevap yüzeysel/kısa/eksik "
     "kaldıysa (2. maddedeki 'anlamlı cevap YOK' durumuyla KARIŞTIRMA — burada gerçek bir cevap İÇERİĞİ "
     "VAR): **DÜŞÜK PUAN ver (kanıt düzeyine göre, SCORING_RUBRIC'e göre)** — otomatik %25'e veya 0'a "
-    "ZORLAMA, cevabın kendi kalitesine göre puanla.\n"
+    "ZORLAMA, cevabın kendi kalitesine göre PUAN sütununa SAYISAL bir X/Y yaz (metin YAZMA); adayın "
+    "cevabının TAMAMINI (yalnız ilk/kısa cümleyi değil) dikkate alarak puanla.\n"
     "- **0/<tavan>** yalnızca şu iki durumda: aday cevap vermeyi AÇIKÇA reddetti VEYA tamamen alakasız/konu "
     "dışı cevap verdi. Bu durumda 0 paydaya girer (2. maddedeki taban puan İLE KARIŞTIRMA — bu daha "
     "adversarial/dar bir durumdur).\n"
@@ -11972,6 +11982,37 @@ def _split_report_sections(lines: list) -> dict:
         sections.setdefault(cur_key, []).extend(cur_lines)
     return sections
 
+# İŞ EMRİ — PRIMARY PUAN FORMATI + 3 SÜTUN REGRESYON DÜZELTMESİ (FAZ 1): recompute_and_fix_score/
+# recompute_profile_section'ın taban-puan satırlarını düzeltirken kullandığı ESKİ desen
+# (`lines[li].replace(f"| {puan_cell} |", f"| {puan}/{cap} | Taban puan (...): {gerekce} |", 1)`)
+# GPT'nin ZATEN 3 sütun yazdığı (Kriter | Puan | Kanıt ve Analiz) satırlarda YENİ bir 4. sütun
+# üretiyordu (commit 41d26b8'de fark edilmeyen regresyon — bkz. teşhis) — kendi içinde bir "|"
+# taşıyan değiştirme metni, mevcut 3. hücreyi (gerçek kanıt) itip 4. hücreye dönüştürüyordu; PDF
+# renderer da (_emit_report_block, row[:3]) bu 4. hücreyi sessizce atıyordu. Bu fonksiyon satırı
+# HÜCRE BAZINDA (isim/puan/kanıt) yeniden kurar: PUAN hücresi DEĞİŞİR, açıklama (note) VARSA 3.
+# hücrenin (Kanıt ve Analiz) BAŞINA eklenir, var olan kanıt METNİ KORUNUR — satır HER ZAMAN 3
+# mantıksal sütun olarak kalır (2 sütunlu eski girdilerde 3. hücre bu note'tan yeni oluşturulur).
+# Floor/insufficient-answer KARAR mantığı (bu fonksiyonu ÇAĞIRAN kod) DEĞİŞMEDİ — bu yalnız
+# SEÇİLEN puan/not'un satıra NASIL YAZILDIĞINI (biçim) düzeltir.
+def _rewrite_criterion_cell(line: str, old_cell: str, new_score: str, note: str = "") -> str:
+    idx = line.find(f"| {old_cell} |")
+    if idx == -1:
+        # beklenmeyen biçim — davranış ESKİSİNDEN kötü olmasın diye eski basit değiştirme
+        return line.replace(f"| {old_cell} |", f"| {new_score} |", 1)
+    prefix = line[:idx]
+    rest = line[idx + len(f"| {old_cell} |"):]
+    if not note:
+        return f"{prefix}| {new_score} |{rest}"
+    # rest, üçüncü VE varsa sonraki TÜM hücreleri (| ile ayrılmış, legacy/bozuk girdi) içerebilir —
+    # hepsi TEK Kanıt ve Analiz hücresinde birleştirilir (_emit_report_block render düzeltmesiyle
+    # AYNI ilke) — hiçbir trailing hücre kaybolmaz/ayrı sütun olarak KALMAZ.
+    rest_stripped = rest.strip()
+    if rest_stripped.endswith("|"):
+        rest_stripped = rest_stripped[:-1].strip()
+    trailing_cells = [c.strip() for c in rest_stripped.split("|") if c.strip()]
+    merged = " ".join([note] + trailing_cells) if trailing_cells else note
+    return f"{prefix}| {new_score} | {merged} |"
+
 def recompute_and_fix_score(report_body: str, position_criteria: list, model_score, criteria_coverage=None, transcript: str = None,
                             candidate_id: int = None, level: int = None):
     """Sunucu tarafı puanlama doğrulaması:
@@ -12092,7 +12133,8 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
                     warnings.append(f"'{cname}' kriteri rapor tablosunda bulunamadı ama sorulduğuna dair kanıt var — taban puan ({floor_awarded}/{cap}) uygulandı, payda içinde sayıldı.")
                 elif puan_cell:
                     li = best["line_idx"]
-                    lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} | Taban puan (sorgulandı, yeterli cevap alınamadı): {_gk} |", 1)
+                    lines[li] = _rewrite_criterion_cell(lines[li], puan_cell, f"{floor_awarded}/{cap}",
+                                                        f"Taban puan (sorgulandı, yeterli cevap alınamadı): {_gk}")
             continue
 
         awarded = _safe_int(mm.group(1))
@@ -12121,7 +12163,8 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
                 warnings.append(f"'{cname}' modelce 0/{cap} verilmiş, kriter sorulmuş ama geçerli cevap yok → taban puan {floor_awarded}/{cap} uygulandı (payda içinde, 'Değerlendirilemedi' DEĞİL).")
                 cand_missing.append({"kriter": cname, "gerekce": _sr0, "puan_turu": "taban_puan_25"})
                 li = best["line_idx"]
-                lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} | Taban puan (sorgulandı, yeterli cevap alınamadı): {_sr0} |", 1)
+                lines[li] = _rewrite_criterion_cell(lines[li], puan_cell, f"{floor_awarded}/{cap}",
+                                                    f"Taban puan (sorgulandı, yeterli cevap alınamadı): {_sr0}")
                 awarded_sum += floor_awarded
                 denom_cap += cap
                 continue
@@ -12336,7 +12379,8 @@ def recompute_profile_section(profile_region: str, transcript: str = None, crite
                     warnings.append(f"[PROFİL] '{cname}' profil tablosunda bulunamadı ama sorulduğuna dair kanıt var — taban puan ({floor_awarded}/{cap}) uygulandı, payda içinde sayıldı.")
                 elif puan_cell:
                     li = best["line_idx"]
-                    lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} | Taban puan (sorgulandı, yeterli cevap alınamadı): {_gk} |", 1)
+                    lines[li] = _rewrite_criterion_cell(lines[li], puan_cell, f"{floor_awarded}/{cap}",
+                                                        f"Taban puan (sorgulandı, yeterli cevap alınamadı): {_gk}")
             continue
 
         awarded = _safe_int(mm.group(1))
@@ -12361,7 +12405,8 @@ def recompute_profile_section(profile_region: str, transcript: str = None, crite
                 _sr0 = "kriter sorulmuş, sorgulama/takip fırsatına rağmen değerlendirilebilir bir aday cevabı alınamadı"
                 warnings.append(f"[PROFİL] '{cname}' modelce 0/{cap} verilmiş, kriter sorulmuş ama geçerli cevap yok → taban puan {floor_awarded}/{cap} uygulandı (payda içinde, 'Değerlendirilemedi' DEĞİL).")
                 cand_missing.append({"kriter": cname, "gerekce": _sr0, "puan_turu": "taban_puan_25"})
-                lines[best["line_idx"]] = lines[best["line_idx"]].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} | Taban puan (sorgulandı, yeterli cevap alınamadı): {_sr0} |", 1)
+                lines[best["line_idx"]] = _rewrite_criterion_cell(lines[best["line_idx"]], puan_cell, f"{floor_awarded}/{cap}",
+                                                                  f"Taban puan (sorgulandı, yeterli cevap alınamadı): {_sr0}")
                 awarded_sum += floor_awarded
                 denom_cap += cap
                 continue
@@ -13266,7 +13311,13 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
             clean_rows = []
             for row in tr:
                 if any("Kriter" in c for c in row) or len(row) >= 3:
-                    clean_rows.append(row[:3])
+                    # İŞ EMRİ — PDF/REPORT RENDER KANIT KAYBI DÜZELTMESİ: 4+ mantıksal hücre
+                    # gelirse (ör. bozuk/legacy format) 3. ve sonraki hücreler Kanıt ve Analiz
+                    # olarak BİRLEŞTİRİLİR — row[:3] gibi sessizce ATILMAZ (trailing kanıt kaybı).
+                    if len(row) > 3:
+                        clean_rows.append([row[0], row[1], " ".join(c for c in row[2:] if c)])
+                    else:
+                        clean_rows.append(row)
             if len(clean_rows) >= 2:
                 story.append(Spacer(1, 6))
                 rt = Table([[Paragraph(ptxt(c), styles["BodyWrap"]) for c in row] for row in clean_rows], colWidths=[5.0*cm, 2.1*cm, 9.0*cm])
