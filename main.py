@@ -2687,6 +2687,30 @@ _SCOPE_PRIORITY_RULE = (
     "SESSİZCE GEÇİLEMEZ — işe alım kararını belirleyen en önemli sinyaldir."
 )
 
+# İŞ EMRİ — OPENAI PRIMARY KRİTER DEĞERLENDİRME DÜZELTMESİ: (1) adayın kriterle ilgili cevabının
+# TAMAMININ değerlendirilmesi (ilk/kısa cümle seçilip devamındaki daha güçlü içeriğin gözden
+# kaçırılmaması), (2) kanıtın atandığı kriterin TANIMINI gerçekten desteklemesi (teknik bilgi/araç
+# kullanımının TEK BAŞINA alakasız bir davranışsal profil kriterine kanıt yapılmaması). Bu kural
+# önceden yalnızca L2/L3 sesli rapor promptunda (build_l2_report_prompt TEMEL KURALLAR) vardı, L1
+# metin promptunda (get_system_prompt) HİÇ yoktu, POZİSYON/PROFİL tablo üretiminde de yoktu — TEK
+# yerden (build_report_content_prompt, L1/L2/L3 ORTAK) eklenir. Mevcut anti-misattribution
+# kuralları (build_l2_report_prompt TEMEL KURALLAR, run_report_reviewer promptu) SİLİNMEDİ/
+# değiştirilmedi, bu yalnız aynı ilkeyi POZİSYON+PROFİL tablo üretiminin kendisine de taşır.
+_EVIDENCE_COMPLETENESS_AND_MATCH_RULE = (
+    "CEVABIN TAMAMINI DEĞERLENDİR VE KANITI DOĞRU KRİTERLE EŞLEŞTİR (KESİN — hem POZİSYON hem "
+    "PROFİL tablosu için geçerli):\n"
+    "- Bir kriteri puanlarken adayın o kriterle ilgili verdiği cevabın TAMAMINI dikkate al. Cevabın "
+    "İLK CÜMLESİNİ veya kısa bir bölümünü seçip, aynı cevabın DEVAMINDAKİ daha ayrıntılı/daha güçlü "
+    "içeriği GÖZ ARDI ETME — puanı ve kanıtı cevabın BÜTÜNÜNE göre belirle.\n"
+    "- Kanıt olarak kullandığın ifade, puanladığın kriterin TANIMINI (yukarıdaki KRİTER TANIMLARI) "
+    "GERÇEKTEN desteklemelidir. Teknik bilgi veya bir yazılım/aracın kullanılması TEK BAŞINA "
+    "davranışsal bir profil kriterinin (ör. tutum/işbirliği, öğrenme/adaptasyon, inisiyatif, baskı "
+    "altında davranış) kanıtı DEĞİLDİR — bir teknik cevap yalnızca GERÇEKTEN desteklediği kriterde "
+    "kanıt olarak kullanılmalıdır.\n"
+    "- İlgili kritere gerçek bir davranışsal kanıt bulunmuyorsa başka bir kriterin cevabından veya "
+    "mülakatçının yönlendirme/geçiş cümlesinden alakasız bir ifade taşıyarak yapay kanıt OLUŞTURMA."
+)
+
 # GÖREV 5.5 — alan dışı / devretme beyanının LEKSİK imzaları (transkriptte GERÇEKTEN söylenen
 # cümleler; KANIT alanındaki alıntı/özet bu kalıplardan birini içeriyorsa kriter "ALAN DIŞI/
 # DEVRETME" sayılır — bkz. validate_criterion_fields: out_of_scope_high_score).
@@ -2856,8 +2880,22 @@ def build_criteria_table_filled(criteria: list, evidence_header: str = "Kanıt v
     """DETERMİNİSTİK kriter tablosu: satırlar pozisyondan gelir, model AYNEN doldurur.
     Model satır ekleyemez/çıkaramaz/yeniden adlandıramaz. Payda (tavan) sabit.
     Eksik veri kuralı: bkz. CRITERION_SCORING_RULE (payda dışı 'Değerlendirilemedi (sistem)' varsayılan).
-    Kanıt ve Analiz hücresi artık YAPISAL (bkz. _CRIT_EVIDENCE_HINT + _STRUCTURED_EVIDENCE_FORMAT_INSTRUCTIONS)."""
-    lines = [f"| Kriter | Puan | {evidence_header} |", "|--------|------|-----------------|"]
+    Kanıt ve Analiz hücresi artık YAPISAL (bkz. _CRIT_EVIDENCE_HINT + _STRUCTURED_EVIDENCE_FORMAT_INSTRUCTIONS).
+    İŞ EMRİ — OPENAI PRIMARY KRİTER DEĞERLENDİRME DÜZELTMESİ: tablodan ÖNCE, varsa her kriterin
+    'desc' tanımı ayrı bir blok olarak eklenir — bu, Claude reviewer'ın zaten aldığı bilgiyle
+    (bkz. _reviewer_criteria_block) OpenAI primary arasındaki asimetriyi kapatır. Tanım tablo
+    HÜCRESİNE değil, tablodan önceki düz metne yazılır — kriter adı hücresi (cells[0]) saf kalır,
+    aşağı akıştaki isim eşleştirme (_name_score, recompute_and_fix_score/recompute_profile_section)
+    ETKİLENMEZ."""
+    lines = []
+    _defs = [(c.get("name"), (c.get("desc") or "").strip()) for c in criteria if (c.get("desc") or "").strip()]
+    if _defs:
+        lines.append("KRİTER TANIMLARI (kanıt seçerken ve kanıtın kriteri GERÇEKTEN desteklediğini kontrol ederken bu tanımları kullan):")
+        for _name, _desc in _defs:
+            lines.append(f"- {_name}: {_desc}")
+        lines.append("")
+    lines.append(f"| Kriter | Puan | {evidence_header} |")
+    lines.append("|--------|------|-----------------|")
     for c in criteria:
         lines.append(f"| {c['name']} | {_CRIT_CELL_HINT.format(w=c['weight'])} | {_CRIT_EVIDENCE_HINT} |")
     return "\n".join(lines)
@@ -2990,12 +3028,13 @@ Adayın dil tercihine/hakimiyetine dair GERÇEKTEN somut bir gözlem varsa (hang
 {_SCOPE_PRIORITY_RULE}
 {CRITERION_SCORING_RULE}
 {SCORING_RUBRIC}
+{_EVIDENCE_COMPLETENESS_AND_MATCH_RULE}
 {_STRUCTURED_EVIDENCE_FORMAT_INSTRUCTIONS}
 
 ===KİŞİSEL VE BİLİŞSEL PROFİL===
 (Pozisyon yetkinliklerinden AYRI, pozisyondan bağımsız, her aday için SABİT kriter seti — işe alım kararını TEK BAŞINA belirlemez, yalnızca destekleyici bir puandır.)
 {profile_table_filled}
-(YUKARIDAKİ TABLOYU AYNEN KULLAN.) Aynı kanıt standardı, ÖNCEL KURAL ve GEREKÇE YAZIM KURALLARI (yukarıda) burada da geçerlidir: yüksek puanda ≥2 bağımsız kanıt, düşük puanda somut gerekçe, tahmin YOK, klişe kalıp YOK, damga yalnız kritik kanıtta. Dayanaksız çıkarım, kişilik teşhisi, IQ/zekâ yorumu YASAK.
+(YUKARIDAKİ TABLOYU AYNEN KULLAN.) Aynı kanıt standardı, ÖNCEL KURAL, GEREKÇE YAZIM KURALLARI ve CEVABIN TAMAMINI DEĞERLENDİR VE KANITI DOĞRU KRİTERLE EŞLEŞTİR kuralı (yukarıda) burada da geçerlidir: yüksek puanda ≥2 bağımsız kanıt, düşük puanda somut gerekçe, tahmin YOK, klişe kalıp YOK, damga yalnız kritik kanıtta. Dayanaksız çıkarım, kişilik teşhisi, IQ/zekâ yorumu YASAK.
 {_STRUCTURED_EVIDENCE_FORMAT_INSTRUCTIONS}
 
 ===GÜÇLÜ YÖNLER===
