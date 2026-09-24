@@ -12053,7 +12053,7 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
                     warnings.append(f"'{cname}' kriteri rapor tablosunda bulunamadı ama sorulduğuna dair kanıt var — taban puan ({floor_awarded}/{cap}) uygulandı, payda içinde sayıldı.")
                 elif puan_cell:
                     li = best["line_idx"]
-                    lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} — Taban puan (sorgulandı, yeterli cevap alınamadı): {_gk} |", 1)
+                    lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} | Taban puan (sorgulandı, yeterli cevap alınamadı): {_gk} |", 1)
             continue
 
         awarded = _safe_int(mm.group(1))
@@ -12082,7 +12082,7 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
                 warnings.append(f"'{cname}' modelce 0/{cap} verilmiş, kriter sorulmuş ama geçerli cevap yok → taban puan {floor_awarded}/{cap} uygulandı (payda içinde, 'Değerlendirilemedi' DEĞİL).")
                 cand_missing.append({"kriter": cname, "gerekce": _sr0, "puan_turu": "taban_puan_25"})
                 li = best["line_idx"]
-                lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} — Taban puan (sorgulandı, yeterli cevap alınamadı): {_sr0} |", 1)
+                lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} | Taban puan (sorgulandı, yeterli cevap alınamadı): {_sr0} |", 1)
                 awarded_sum += floor_awarded
                 denom_cap += cap
                 continue
@@ -12297,7 +12297,7 @@ def recompute_profile_section(profile_region: str, transcript: str = None, crite
                     warnings.append(f"[PROFİL] '{cname}' profil tablosunda bulunamadı ama sorulduğuna dair kanıt var — taban puan ({floor_awarded}/{cap}) uygulandı, payda içinde sayıldı.")
                 elif puan_cell:
                     li = best["line_idx"]
-                    lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} — Taban puan (sorgulandı, yeterli cevap alınamadı): {_gk} |", 1)
+                    lines[li] = lines[li].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} | Taban puan (sorgulandı, yeterli cevap alınamadı): {_gk} |", 1)
             continue
 
         awarded = _safe_int(mm.group(1))
@@ -12322,7 +12322,7 @@ def recompute_profile_section(profile_region: str, transcript: str = None, crite
                 _sr0 = "kriter sorulmuş, sorgulama/takip fırsatına rağmen değerlendirilebilir bir aday cevabı alınamadı"
                 warnings.append(f"[PROFİL] '{cname}' modelce 0/{cap} verilmiş, kriter sorulmuş ama geçerli cevap yok → taban puan {floor_awarded}/{cap} uygulandı (payda içinde, 'Değerlendirilemedi' DEĞİL).")
                 cand_missing.append({"kriter": cname, "gerekce": _sr0, "puan_turu": "taban_puan_25"})
-                lines[best["line_idx"]] = lines[best["line_idx"]].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} — Taban puan (sorgulandı, yeterli cevap alınamadı): {_sr0} |", 1)
+                lines[best["line_idx"]] = lines[best["line_idx"]].replace(f"| {puan_cell} |", f"| {floor_awarded}/{cap} | Taban puan (sorgulandı, yeterli cevap alınamadı): {_sr0} |", 1)
                 awarded_sum += floor_awarded
                 denom_cap += cap
                 continue
