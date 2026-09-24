@@ -1467,6 +1467,33 @@ def _now_ts() -> str:
 
 _VOICE_LINE_RE = re.compile(r'^\s*\[(\d{1,3}):(\d{2})\]\s*(Aday|Mülakatçı|Adam)\s*:\s*(.*)$')
 
+# İş emri — PRIMARY DEĞERLENDİRME VE KANIT SEÇİMİ GÜVENİLİRLİĞİ / TIMESTAMP GROUNDING (FAZ 3):
+# kaynak transkriptte GERÇEK [mm:ss] konuşmacı-damgası var mı — deterministik kontrol. Prompt
+# builder'lar (build_l2_report_prompt/get_system_prompt) bu bayrağı, modelden kanıt havuzu/kanıt
+# hücresi formatında [mm:ss] BEKLEYİP BEKLEMEYECEĞİNE karar vermek için kullanır — kaynakta hiç
+# timestamp yoksa model damga UYDURMAYA zorlanmaz. _VOICE_LINE_RE'nin AYNISI (yeni bir desen YOK).
+def _transcript_has_real_timestamps(transcript_text: str) -> bool:
+    if not transcript_text:
+        return False
+    return bool(_VOICE_LINE_RE.search(transcript_text))
+
+_ANY_TS_RE = re.compile(r"\[(\d{1,3}:[0-5]\d)\]")
+
+def _strip_unsourced_timestamps_for_display(report_text: str, transcript_text: str) -> str:
+    """İş emri — TIMESTAMP GROUNDING / madde 22: YALNIZ kullanıcıya gösterilen final report
+    metninden, kaynak transkriptte GERÇEKTEN bulunmayan [mm:ss] damgalarını kaldırır. raw_report
+    ve final_integrity_status/grounding_fail kayıtları bu fonksiyondan ETKİLENMEZ — çağrı sırası
+    (run_deferred_finish_job) bu fonksiyonun run_final_deterministic_integrity_check'ten SONRA
+    çalışmasını garanti eder (bkz. çağrı sitesi notu). Yalnız RENDER/GÖRÜNÜM temizliği — kanıt
+    METNİ (tırnak içindeki alıntı) DEĞİŞMEZ, yalnız önündeki kaynaksız [mm:ss] etiketi (+ hemen
+    ardındaki tek boşluk) silinir; kaynaklı damgalar AYNEN korunur."""
+    if not report_text:
+        return report_text or ""
+    real_ts = set(_ANY_TS_RE.findall(transcript_text or ""))
+    def _repl(m):
+        return m.group(0) if m.group(1) in real_ts else ""
+    return re.sub(r"\[(\d{1,3}:[0-5]\d)\][ \t]?", _repl, report_text)
+
 # TUR 4 / GÖREV 1.3 — konumu (zaman damgası) bilinmeyen transkript satırlarının toplandığı
 # başlık. build_transcript_view / transcript_to_text / PDF transkript render'ı bu TAM METNİ
 # tanır ve bir konuşmacı satırı DEĞİL, bağımsız bir bölüm başlığı olarak işler (role="baslik").
@@ -2886,6 +2913,61 @@ YÖN KONTROLÜ (KESİN — G/E'yi yazmadan önce ayrıca uygula): Kanıtı G'ye 
 ÖRNEK (eksik YOK): G: Enflasyon muhasebesi düzeltmelerini iki farklı senaryo üzerinden karşılaştırdı ~~ K: [14:03] "sabit kıymetlerde endeksleme farkını ayrı hesaplarım" ~~ E: ~~ S:
 Bu format DIŞINDA hiçbir cümle/açıklama YAZMA — sistem bu 4 alanı ayrıştırıp NİHAİ cümleyi kendisi kurar; format bozuksa veya damga uydurmaysa bu kriter YENİDEN ÜRETTİRİLİR."""
 
+# İş emri — PRIMARY DEĞERLENDİRME VE KANIT SEÇİMİ GÜVENİLİRLİĞİ (FAZ 1): "önce kanıt, sonra puan"
+# sırası mevcut KRİTER|PUAN|KANIT tablosunun kendi içinde sağlanamaz (model metni soldan sağa
+# üretir — puan hücresi kanıt hücresinden ÖNCE yazılır). Bunun yerine AYNI primary çağrıda, tablo
+# üretilmeden ÖNCE ayrı, deterministik marker'lı bir KANIT HAVUZU bloğu istenir — model önce
+# kriter başına TÜM ilgili aday sözlerini toplar, tabloyu (puanı) bundan SONRA üretir. Bu yeni bir
+# evaluator/API çağrısı DEĞİLDİR — aynı çağrının ÇIKTI SIRASINI değiştiren bir prompt sözleşmesidir.
+_KANIT_HAVUZU_POZISYON_START = "<<<KANIT_HAVUZU_POZISYON>>>"
+_KANIT_HAVUZU_POZISYON_SON = "<<<KANIT_HAVUZU_POZISYON_SON>>>"
+_KANIT_HAVUZU_PROFIL_START = "<<<KANIT_HAVUZU_PROFIL>>>"
+_KANIT_HAVUZU_PROFIL_SON = "<<<KANIT_HAVUZU_PROFIL_SON>>>"
+
+# İş emri madde 15 — davranışsal/teknik ayrımı önceki turda yalnız kriter TANIMLARINDA örtük
+# olarak vardı, AÇIK bir GENEL kural olarak request'te doğrulanamamıştı. Şimdi açık kural.
+_BEHAVIORAL_EVIDENCE_RULE = (
+    "DAVRANIŞSAL KANIT KURALI (KESİN, AÇIK): Salt teknik araç/framework/API/test tekniği/güvenlik/"
+    "veritabanı/kodlama BİLGİSİ TEK BAŞINA davranışsal/profil kanıtı DEĞİLDİR. Davranışsal bir "
+    "kriterin kanıtı adayın DAVRANIŞINI, YAKLAŞIMINI, KARAR BİÇİMİNİ, İLETİŞİM BİÇİMİNİ, problem "
+    "karşısındaki TUTUMUNU, öğrenme/adaptasyon, inisiyatif veya işbirliği DAVRANIŞINI GÖSTEREN "
+    "içerikten gelmelidir — kriterin TANIMIYLA doğrudan ilişkili olmalıdır. Teknik bir örnek "
+    "GERÇEKTEN davranışsal bir sinyal taşıyorsa kullanılabilir (teknik içerik OTOMATİK yasak "
+    "DEĞİLDİR) ama salt teknik bilgi TEK BAŞINA yeterli değildir."
+)
+
+def _evidence_pool_instructions(start_marker: str, son_marker: str, label: str, has_real_timestamps: bool) -> str:
+    """İş emri madde 1-5, 12-14, 16-18: kanıt havuzu talimatı. Yalnız candidate/aday etiketli
+    sözlerden, transkriptin TAMAMI taranarak (tek komşu soru-cevap çifti değil), kriter TANIMIYLA
+    gerçekten eşleşen kanıt toplanır. Timestamp-awareness: kaynakta gerçek [mm:ss] yoksa model
+    damga üretmeye ZORLANMAZ (madde 17) — yalnız alıntı/metin istenir."""
+    ts_note = (
+        "Kaynak transkriptte GERÇEK [mm:ss] zaman damgaları VAR — GERÇEKTEN o anda geçen bir sözü "
+        "alıntılıyorsan kaynaktaki damgayı da yazabilirsin; damga UYDURMA/tahmin ETME, emin "
+        "değilsen damgasız yaz."
+        if has_real_timestamps else
+        "Kaynak transkriptte GERÇEK [mm:ss] zaman damgası YOK — alıntılarında [mm:ss] formatı "
+        "KULLANMA (uydurma damga KESİNLİKLE YASAK), yalnız metin/alıntı yaz."
+    )
+    return f"""{start_marker}
+Aşağıdaki tabloyu üretmeden ÖNCE, {label} kriterlerinin HER BİRİ için, adayın bu kriterle
+GERÇEKTEN ilgili TÜM sözlerini transkriptin TAMAMINI tarayarak (yalnız en yakın tek soru-cevap
+çiftini değil — aday ilk soruda kısa, sonraki bir turda ayrıntılı cevap vermiş olabilir, ikisini
+de topla) burada listele:
+
+KRİTER: <kriter adı — aşağıdaki tablodaki adla BİREBİR AYNI yaz, kısaltma/parafraz YAPMA>
+E1: "<adayın gerçek sözü/alıntısı>"
+E2: "<varsa ikinci ilgili söz>"
+...
+
+Yalnız ADAY/CANDIDATE etiketli sözleri kullan — mülakatçı/sistem sözünü ASLA E olarak yazma.
+{_BEHAVIORAL_EVIDENCE_RULE if label == "PROFİL" else ""}
+Evidence ilgili kriterin TANIMIYLA gerçekten eşleşmeli — salt ortak kelime YETERLİ DEĞİLDİR; başka
+bir kriter için anlamlı olan bir sözü yalnız kelime benzerliği yüzünden BURAYA taşıma.
+İlgili gerçek aday sözü YOKSA: E: YOK yaz — ilgili söz VARKEN kolaylık olsun diye YOK yazma.
+{ts_note}
+{son_marker}"""
+
 def build_criteria_table_filled(criteria: list, evidence_header: str = "Kanıt ve Analiz") -> str:
     """DETERMİNİSTİK kriter tablosu: satırlar pozisyondan gelir, model AYNEN doldurur.
     Model satır ekleyemez/çıkaramaz/yeniden adlandıramaz. Payda (tavan) sabit.
@@ -2997,7 +3079,7 @@ def parse_llm_report_sections(text: str) -> dict:
         out[key] = content
     return out
 
-def build_report_content_prompt(criteria_table_filled: str, profile_table_filled: str) -> str:
+def build_report_content_prompt(criteria_table_filled: str, profile_table_filled: str, has_real_timestamps: bool = False) -> str:
     """Modelden istenen TEK gövde: 13 bölüm, ===BAŞLIK=== ayraçlı. L1/L2/L3 ORTAK — seviyeler
     arası içerik farkı yoktur; CV yoksa/kamera-ses yoksa ilgili içerik zaten deterministik
     katmanda atlanır, modele ayrı bir 'seviye talimatı' verilmesine gerek yok.
@@ -3007,7 +3089,12 @@ def build_report_content_prompt(criteria_table_filled: str, profile_table_filled
     eklendi — eski (2026-09-08 öncesi) formatta vardı, yeniden tasarımda kayboldu; kararı
     GEREKÇELENDİREN katmandı. Puanlama Kapsamı/Öneri Gerekçesi/Profil Veto Kontrolü modelden
     İSTENMEZ — TAMAMEN deterministik (bkz. render_puanlama_kapsami/render_oneri_gerekcesi/
-    render_profile_veto_control, finalize_interview/append_reviewer_section içinde eklenir)."""
+    render_profile_veto_control, finalize_interview/append_reviewer_section içinde eklenir).
+    İş emri — PRIMARY DEĞERLENDİRME VE KANIT SEÇİMİ GÜVENİLİRLİĞİ (FAZ 1): POZİSYON/PROFİL
+    tablolarından HEMEN ÖNCE ayrı, marker'lı bir KANIT HAVUZU bloğu istenir (_evidence_pool_
+    instructions) — fiziksel çıktı sırası KANIT HAVUZU → TABLO'dur, model puanı kanıtı yazdıktan
+    SONRA üretir. has_real_timestamps, kaynak transkriptte gerçek [mm:ss] olup olmadığına göre
+    havuz talimatının timestamp beklentisini ayarlar (bkz. _transcript_has_real_timestamps)."""
     return f"""Aşağıdaki bölümleri, TAM OLARAK bu sırayla ve TAM OLARAK bu ayraçlarla üret. Ayraç satırlarını (===...===) AYNEN kopyala; başka hiçbir başlık/ayraç EKLEME. Bir bölümde yazacak GERÇEKTEN somut bir şey yoksa o bölümün içeriğine SADECE "YOK" yaz (sistem o bölümü rapordan çıkarır) — asla "belirtilecek bir şey yok" gibi dolgu cümle kurma, asla "-", "—" veya "bulunmamaktadır" yazma. Aşağıdaki HİÇBİR bölümde yasak kalıp (banned_phrase_hits — "daha fazla/somut/derin ... gerekmektedir/beklenmektedir/gerektiği" ailesi, "beklenmiştir" ailesi) KULLANMA; sistem bunu tespit edip o CÜMLEYİ siler. Hiçbir bölümde bir kriterin KANIT alanındaki veya Pozisyon/Profil tablolarındaki cümleyi AYNEN tekrar ETME. Sorulmamış bir konuda eksiklik/olumsuz yargı YAZMA.
 
 ===YÖNETİCİ ÖZETİ===
@@ -3033,8 +3120,10 @@ Transkriptte anlatılan GERÇEKTEN somut bir proje/deneyim varsa (adayın kişis
 Adayın dil tercihine/hakimiyetine dair GERÇEKTEN somut bir gözlem varsa (hangi konuda dil değiştirdiği, pozisyonun dil gereksinimiyle ilişkisi) yaz. Gözlem YOKSA "YOK" yaz (sistem bölümü hiç basmaz) — "Belirtilecek bir dil gözlemi yok" gibi kendini çürüten dolgu cümle YASAK.
 
 ===POZİSYON YETKİNLİKLERİ===
+{_evidence_pool_instructions(_KANIT_HAVUZU_POZISYON_START, _KANIT_HAVUZU_POZISYON_SON, "POZİSYON", has_real_timestamps)}
+
 {criteria_table_filled}
-(YUKARIDAKİ TABLOYU AYNEN KULLAN: satır ekleme/çıkarma/yeniden adlandırma YOK, tavanı AŞMA.)
+(YUKARIDAKİ TABLOYU AYNEN KULLAN: satır ekleme/çıkarma/yeniden adlandırma YOK, tavanı AŞMA. Puanı, yukarıda az önce kendi ürettiğin kanıt havuzundaki İLGİLİ kriterin TÜM evidence'larına göre ver — yalnız ilk/kısa bir cevaba bakıp havuzdaki devamındaki güçlü kanıtları yok sayma.)
 {_SCOPE_PRIORITY_RULE}
 {CRITERION_SCORING_RULE}
 {SCORING_RUBRIC}
@@ -3043,8 +3132,10 @@ Adayın dil tercihine/hakimiyetine dair GERÇEKTEN somut bir gözlem varsa (hang
 
 ===KİŞİSEL VE BİLİŞSEL PROFİL===
 (Pozisyon yetkinliklerinden AYRI, pozisyondan bağımsız, her aday için SABİT kriter seti — işe alım kararını TEK BAŞINA belirlemez, yalnızca destekleyici bir puandır.)
+{_evidence_pool_instructions(_KANIT_HAVUZU_PROFIL_START, _KANIT_HAVUZU_PROFIL_SON, "PROFİL", has_real_timestamps)}
+
 {profile_table_filled}
-(YUKARIDAKİ TABLOYU AYNEN KULLAN.) Aynı kanıt standardı, ÖNCEL KURAL, GEREKÇE YAZIM KURALLARI ve CEVABIN TAMAMINI DEĞERLENDİR VE KANITI DOĞRU KRİTERLE EŞLEŞTİR kuralı (yukarıda) burada da geçerlidir: yüksek puanda ≥2 bağımsız kanıt, düşük puanda somut gerekçe, tahmin YOK, klişe kalıp YOK, damga yalnız kritik kanıtta. Dayanaksız çıkarım, kişilik teşhisi, IQ/zekâ yorumu YASAK.
+(YUKARIDAKİ TABLOYU AYNEN KULLAN.) Aynı kanıt standardı, ÖNCEL KURAL, GEREKÇE YAZIM KURALLARI ve CEVABIN TAMAMINI DEĞERLENDİR VE KANITI DOĞRU KRİTERLE EŞLEŞTİR kuralı (yukarıda) burada da geçerlidir: yüksek puanda ≥2 bağımsız kanıt, düşük puanda somut gerekçe, tahmin YOK, klişe kalıp YOK, damga yalnız kritik kanıtta. Dayanaksız çıkarım, kişilik teşhisi, IQ/zekâ yorumu YASAK. Puanı, yukarıda az önce ürettiğin profil kanıt havuzundaki İLGİLİ kriterin TÜM evidence'larına göre ver.
 {_STRUCTURED_EVIDENCE_FORMAT_INSTRUCTIONS}
 
 ===GÜÇLÜ YÖNLER===
@@ -8817,6 +8908,35 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         except Exception as e:
             print(f"UYARI (final integrity check c={candidate_id} L{level}): {type(e).__name__}: {e}")
 
+        # İŞ EMRİ — PRIMARY DEĞERLENDİRME VE KANIT SEÇİMİ GÜVENİLİRLİĞİ / FAZ 4 madde 19-22:
+        # kaynaksız [mm:ss] damgalarının KULLANICIYA GÖSTERİLEN final report'tan kaldırılması —
+        # BİLEREK run_final_deterministic_integrity_check'TEN SONRA çalışır (grounding kontrolü
+        # HAM/temizlenmemiş final report üzerinde çalışmış, final_integrity_status/grounding_fail
+        # ZATEN persist edilmiş olmalı — bu adım onları HİÇ okumaz/değiştirmez). raw_report bu
+        # noktada çoktan (madde 19, ~line 8724) değişmeden persist edilmişti, BURADAN ETKİLENMEZ.
+        # NORMAL FINISH ve REGENERATE bu fonksiyonu (run_deferred_finish_job) PAYLAŞTIĞI için tek
+        # bir çağrı noktası HER İKİ yol için de AYNI sırayı garanti eder.
+        try:
+            _db_ts = get_db()
+            try:
+                _iv_ts = _db_ts.execute(
+                    "SELECT report, transcript_raw FROM interviews WHERE candidate_id=? AND level=?",
+                    (candidate_id, level)).fetchone()
+            finally:
+                _db_ts.close()
+            if _iv_ts and _iv_ts["report"]:
+                _cleaned_report = _strip_unsourced_timestamps_for_display(_iv_ts["report"], _iv_ts["transcript_raw"] or "")
+                if _cleaned_report != _iv_ts["report"]:
+                    _db_ts2 = get_db()
+                    try:
+                        _db_ts2.execute("UPDATE interviews SET report=? WHERE candidate_id=? AND level=?",
+                                       (_cleaned_report, candidate_id, level))
+                        _db_ts2.commit()
+                    finally:
+                        _db_ts2.close()
+        except Exception as e:
+            print(f"UYARI (timestamp display cleanup c={candidate_id} L{level}): {type(e).__name__}: {e}")
+
         # TEK DÜZELTME — L3 processing_status ZAMANLAMASI: finalize_interview L3'te bilerek
         # processing_status'u 'processing' bırakmıştı (bkz. finalize_interview) — second evaluator
         # + Quality Gate + final integrity check dahil TÜM L3 pipeline'ı burada bittiğine göre
@@ -8936,6 +9056,21 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     score_position = None
     pos_table_display = ""
     pos_raw = sections.get("pozisyon_yetkinlikleri", "")
+    # İş emri — PRIMARY DEĞERLENDİRME VE KANIT SEÇİMİ GÜVENİLİRLİĞİ / FAZ 1 madde 6-9: kanıt
+    # havuzu (varsa) tablo metninden AYIKLANIR ve evidence'lar BİREBİR eşleşen kriter satırının
+    # 3. hücresine taşınır — BUNDAN SONRAKİ recompute_and_fix_score çağrısı havuz satırlarını
+    # (KRİTER:/E1:...) GÖRMEZ, yalnız temiz tabloyu görür (madde 25). Havuz yoksa/bozuksa
+    # _extract_evidence_pool boş sözlük + değişmemiş metin döner — mevcut davranış AYNEN korunur.
+    _pos_pool, pos_raw = _extract_evidence_pool(pos_raw, _KANIT_HAVUZU_POZISYON_START, _KANIT_HAVUZU_POZISYON_SON)
+    if _pos_pool:
+        pos_raw, _pos_pool_warn = _merge_evidence_pool_into_table(pos_raw, _pos_pool)
+        if _pos_pool_warn:
+            try:
+                record_system_decision(candidate_id, level, "kanit_havuzu_eslesmedi_pozisyon",
+                                       "Kanıt havuzundaki bazı kriter adları pozisyon tablosuyla birebir eşleşmedi (tahmin yapılmadı).",
+                                       {"uyarilar": _pos_pool_warn})
+            except Exception:
+                pass
     if pos_raw and _crit:
         try:
             _fixed_pos, score_position, _w1 = recompute_and_fix_score(
@@ -8984,6 +9119,16 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     score_profile = None
     prof_table_display = ""
     prof_raw = sections.get("profil", "")
+    _prof_pool, prof_raw = _extract_evidence_pool(prof_raw, _KANIT_HAVUZU_PROFIL_START, _KANIT_HAVUZU_PROFIL_SON)
+    if _prof_pool:
+        prof_raw, _prof_pool_warn = _merge_evidence_pool_into_table(prof_raw, _prof_pool)
+        if _prof_pool_warn:
+            try:
+                record_system_decision(candidate_id, level, "kanit_havuzu_eslesmedi_profil",
+                                       "Kanıt havuzundaki bazı kriter adları profil tablosuyla birebir eşleşmedi (tahmin yapılmadı).",
+                                       {"uyarilar": _prof_pool_warn})
+            except Exception:
+                pass
     if prof_raw:
         try:
             _fixed_prof, score_profile, _w2 = recompute_profile_section(
@@ -12023,6 +12168,79 @@ def _rewrite_criterion_cell(line: str, old_cell: str, new_score: str, note: str 
     merged = " ".join([note] + trailing_cells) if trailing_cells else note
     return f"{prefix}| {new_score} | {merged} |"
 
+# İş emri — PRIMARY DEĞERLENDİRME VE KANIT SEÇİMİ GÜVENİLİRLİĞİ / FAZ 1: kanıt havuzu ayıklama +
+# taşıma. Yalnız açık marker'ları kullanır (madde 24), fuzzy/semantic eşleştirme YAPMAZ (madde 5,
+# 9), PUAN ÜRETMEZ/DEĞİŞTİRMEZ (madde 11) — yalnız modelin ZATEN ürettiği evidence set'ini
+# deterministik olarak doğru kriter satırının 3. hücresine taşır.
+_EVIDENCE_POOL_CRIT_LINE_RE = re.compile(r'^\s*KRİTER\s*:\s*(.+?)\s*$', re.IGNORECASE)
+_EVIDENCE_POOL_E_LINE_RE = re.compile(r'^\s*E\d*\s*:\s*"?(.*?)"?\s*$', re.IGNORECASE)
+
+def _extract_evidence_pool(section_text: str, start_marker: str, son_marker: str):
+    """<<<...>>> ... <<<..._SON>>> bloğunu METİNDEN AYIKLAR (madde 7 — final report gövdesinde
+    kalmaz). Dönüş: ({kriter_adı: [alıntı, ...]}, havuzsuz_metin). Başlangıç marker'ı yoksa VEYA
+    kapanış marker'ı bulunamıyorsa (bozuk/malformed, madde 10) DOKUNMADAN (boş sözlük, metin
+    AYNEN) döner — mevcut davranış korunur, rapor kırılmaz."""
+    if not section_text or start_marker not in section_text:
+        return {}, section_text
+    start_idx = section_text.find(start_marker)
+    end_idx = section_text.find(son_marker, start_idx)
+    if end_idx == -1:
+        return {}, section_text
+    pool_block = section_text[start_idx + len(start_marker): end_idx]
+    remaining = section_text[:start_idx] + section_text[end_idx + len(son_marker):]
+    pool = {}
+    current = None
+    for ln in pool_block.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        mcrit = _EVIDENCE_POOL_CRIT_LINE_RE.match(ln)
+        if mcrit:
+            current = mcrit.group(1).strip()
+            pool.setdefault(current, [])
+            continue
+        mev = _EVIDENCE_POOL_E_LINE_RE.match(ln)
+        if mev and current is not None:
+            txt = mev.group(1).strip()
+            if txt and txt.upper() != "YOK":
+                pool[current].append(txt)
+    return pool, remaining
+
+def _merge_evidence_pool_into_table(table_text: str, pool: dict):
+    """Havuzdaki E1/E2/... alıntılarını, KRİTER adı tablo satırının 1. hücresiyle BİREBİR
+    (fuzzy/semantic DEĞİL — madde 5, 9) eşleşiyorsa o satırın 3. hücresine EKLER; mevcut gerekçe
+    metni varsa KORUNUR (silinmez), 4. sütun OLUŞMAZ. Eşleşmeyen kriter adı için hiçbir hücre
+    değiştirilmez, yalnız warning döner (madde 9) — rapor/score ETKİLENMEZ."""
+    if not pool or not table_text:
+        return table_text, []
+    warnings = []
+    lines = table_text.splitlines()
+    row_idx_by_name = {}
+    for i, ln in enumerate(lines):
+        if ln.count("|") < 2:
+            continue
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if len(cells) < 2 or not cells[0]:
+            continue
+        row_idx_by_name.setdefault(cells[0], i)
+    for crit_name, quotes in pool.items():
+        if not quotes:
+            continue
+        li = row_idx_by_name.get(crit_name)
+        if li is None:
+            warnings.append(f"[KANIT HAVUZU] '{crit_name}' tablo satırıyla BİREBİR eşleşmedi — kanıt taşınmadı (tahmin yapılmadı).")
+            continue
+        cells = [c.strip() for c in lines[li].strip().strip("|").split("|")]
+        evidence_add = " ".join(f'"{q}"' for q in quotes)
+        if len(cells) >= 3:
+            cells[2] = f"{cells[2]} {evidence_add}".strip() if cells[2] else evidence_add
+        else:
+            while len(cells) < 2:
+                cells.append("")
+            cells.append(evidence_add)
+        lines[li] = "| " + " | ".join(cells) + " |"
+    return "\n".join(lines), warnings
+
 def recompute_and_fix_score(report_body: str, position_criteria: list, model_score, criteria_coverage=None, transcript: str = None,
                             candidate_id: int = None, level: int = None):
     """Sunucu tarafı puanlama doğrulaması:
@@ -12740,8 +12958,9 @@ def build_l2_report_prompt(candidate, candidate_level: int, transcript: str,
     # üretilir), Tutarlılık/Çelişki artık tamamen deterministik "Beyan Tutarlılığı" bölümü
     # (compute_field_discrepancies) — modele SİSTEM ALAN KARŞILAŞTIRMASI bloğu VERİLMEZ, sen
     # bunu yazmazsın.
+    _has_real_ts = _transcript_has_real_timestamps(transcript)
     report_body_l2 = build_report_content_prompt(
-        build_criteria_table_filled(pos["criteria"]), build_profile_table_filled())
+        build_criteria_table_filled(pos["criteria"]), build_profile_table_filled(), has_real_timestamps=_has_real_ts)
     return f"""Aşağıda bir sesli iş mülakatının transkripti, aday CV'si, pozisyon kriterleri ve derinlik bilgisi vardır. İnsan kaynakları yöneticisinin karar vermesine yardım edecek, adaya özgü ve ayrıntılı bir değerlendirme raporu üret.
 
 Aday: {candidate['name']}
