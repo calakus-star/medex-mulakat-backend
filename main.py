@@ -3851,6 +3851,12 @@ def get_person(person_id: int, payload=Depends(verify_admin), db=Depends(db_dep)
     person = db.execute("SELECT * FROM persons WHERE id=? AND org_id=?", (person_id, scoped_org_id)).fetchone()
     if not person:
         raise HTTPException(status_code=404, detail="Kişi bulunamadı")
+    # İŞ EMRİ — MÜLAKAT LEVEL VE DERİNLİK BİLGİSİNİ GÖSTER: i.level/i.depth_tier AYRICA (ALIAS'lı)
+    # seçilir — bunlar interviews satırının KENDİ kayıtlı değeridir; c.level/c.depth_tier adminin
+    # BU adayın SONRAKİ mülakatı için sonradan değiştirebileceği (editForm) alanlardır, mülakat
+    # BAŞLADIKTAN SONRA artık o geçmiş mülakatı doğru temsil etmeyebilir. Frontend interview_level/
+    # interview_depth_tier VARSA onu, YOKSA (mülakat henüz hiç başlamadıysa i satırı yok) c.level/
+    # c.depth_tier'ı gösterir.
     attempts = db.execute("""
         SELECT c.id as candidate_id, c.name, c.email, c.phone, c.position, c.level, c.depth_tier,
                c.interview_language, c.report_language, c.education, c.university, c.department,
@@ -3861,7 +3867,8 @@ def get_person(person_id: int, payload=Depends(verify_admin), db=Depends(db_dep)
                i.score, i.score_position, i.score_profile, i.recommendation, i.completed_at as interview_completed_at,
                i.processing_status, i.processing_error, i.started_at,
                i.partial, i.completion_pct, i.technical_error_ref,
-               i.reviewer_score_position, i.reviewer_score_profile
+               i.reviewer_score_position, i.reviewer_score_profile,
+               i.level as interview_level, i.depth_tier as interview_depth_tier
         FROM candidates c
         LEFT JOIN interviews i ON i.candidate_id = c.id AND i.level = c.level
         WHERE c.person_id = ?
@@ -13399,6 +13406,16 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
         left_lines.append(f"<b>Mülakat Tarihi:</b> {ptxt(_iv_date)}")
     if _report_created_at:
         left_lines.append(f"<b>Rapor Oluşturulma Tarihi:</b> {ptxt(_report_created_at)}")
+    # İŞ EMRİ — MÜLAKAT LEVEL VE DERİNLİK BİLGİSİNİ GÖSTER: bu PDF'in ürettiği `interview` dict
+    # BU PDF'in ait olduğu tam interview satırıdır (download_interview_pdf: candidate_id+target_level
+    # ile SELECT edilir) — Level/Derinlik BURADAN okunur, candidate'ın güncel/genel alanından DEĞİL.
+    # Değer yoksa/tanınmıyorsa TAHMİN EDİLMEZ, "—" gösterilir.
+    _iv_level = interview.get("level")
+    _level_display = f"L{_iv_level}" if _iv_level in (1, 2, 3) else "—"
+    _iv_depth_key = (interview.get("depth_tier") or "").strip().lower()
+    _depth_display = DEPTH_TIER_CONFIG.get(_iv_depth_key, {}).get("label") or "—"
+    left_lines.append(f"<b>Level:</b> {ptxt(_level_display)}")
+    left_lines.append(f"<b>Derinlik:</b> {ptxt(_depth_display)}")
     left_para = Paragraph("<br/>".join(left_lines), styles["BodyWrap"])
 
     right_lines = []
