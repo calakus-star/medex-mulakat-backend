@@ -9059,14 +9059,24 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     # "YOK" dediyse veya bölüm ayracı hiç gelmediyse) score_position/score_profile None kalır ve
     # apply_structured_rationale_gate hiç ÇALIŞMAZ (_val_log_pos/_val_log_prof boş) — bu durumda
     # "0 kriter düştü, N/N değerlendirildi" YANLIŞ olurdu (aslında hiçbiri değerlendirilmedi).
+    # İŞ EMRİ — RAPORLAMA VE PRIMARY DEĞERLENDİRME TUTARLILIĞI / madde 1-2 (düzeltildi): önceki
+    # sürüm _dropped_pos_names/_dropped_prof_names'i YALNIZ _val_log_pos/_val_log_prof'tan (yani
+    # SADECE apply_structured_rationale_gate'in diskalifiye ettiği satırlardan) çıkarıyordu.
+    # recompute_and_fix_score/recompute_profile_section'ın KENDİ "not_asked" dalı (main.py ~12114)
+    # bir kriteri "Değerlendirilemedi (sistem)" yapabiliyor ve BU gate'ten geçmeden pos_table_display/
+    # prof_table_display'e yazılıyor — o zaman _val_log_pos bunu HİÇ görmüyor, kriter gerçekte payda
+    # dışı olduğu halde Puanlama Kapsamı/Değerlendirilemeyen Alanlar onu "değerlendirildi" sayıyordu
+    # (gerçek production kaydıyla doğrulandı). Artık TEK GERÇEK KAYNAK, append_reviewer_section'ın
+    # devralma-sonrası aynı amaç için zaten kullandığı _extract_disqualified_criteria_names() —
+    # final tablo METNİNİN kendisini tarar, hangi validator/dal diskalifiye ettiğinden BAĞIMSIZDIR.
     if score_position is None:
         _dropped_pos_names = [c.get("name") for c in (_crit or []) if c.get("name")]
     else:
-        _dropped_pos_names = [l["kriter"] for l in (_val_log_pos or []) if l.get("sonuc") == "degerlendirilemedi_sistem"]
+        _dropped_pos_names = _extract_disqualified_criteria_names(pos_table_display)
     if score_profile is None:
         _dropped_prof_names = [pc["name"] for pc in PROFILE_CRITERIA]
     else:
-        _dropped_prof_names = [l["kriter"] for l in (_val_log_prof or []) if l.get("sonuc") == "degerlendirilemedi_sistem"]
+        _dropped_prof_names = _extract_disqualified_criteria_names(prof_table_display)
     try:
         _puanlama_kapsami_text = render_puanlama_kapsami(_crit or [], PROFILE_CRITERIA, _dropped_pos_names, _dropped_prof_names)
     except Exception as e:
@@ -13451,7 +13461,19 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
         story.append(Paragraph("Ekler", styles["Section"]))
 
     if _has_camera:
-        story.append(Paragraph(f"EK {_next_ek()} — Kamera Doğrulama Kareleri ({len(snapshots[:_want])}/{_want} — mimik havuzundan, mülakat süresine yayılmış)", styles["Section"]))
+        # İŞ EMRİ — RAPORLAMA VE PRIMARY DEĞERLENDİRME TUTARLILIĞI / madde 5 (düzeltildi): başlık
+        # önceden HER ZAMAN "mülakat süresine yayılmış" diyordu — mevcut dar-aralık sinyali
+        # (compute_modality_coverage → _frame_distribution'ın "kumelenme" bayrağı, main.py ~12475)
+        # kontrol edilmeden. Yeni bir dağılım analizi YAZILMADI — yalnız bu MEVCUT sinyal okunup
+        # başlık ona göre seçiliyor; sinyal yoksa/hesaplanamazsa eski (varsayılan) ifade korunur.
+        _kaynak_ifadesi = "mimik havuzundan, mülakat süresine yayılmış"
+        try:
+            _dogrulama_dagilim = compute_modality_coverage(candidate.get("id"), _lvl).get("dogrulama") or {}
+            if _dogrulama_dagilim.get("kumelenme"):
+                _kaynak_ifadesi = "mimik havuzundan, dar bir zaman aralığında kümelenmiş"
+        except Exception as e:
+            print(f"UYARI (PDF kamera başlığı dar-aralık kontrolü): {type(e).__name__}: {e}")
+        story.append(Paragraph(f"EK {_next_ek()} — Kamera Doğrulama Kareleri ({len(snapshots[:_want])}/{_want} — {_kaynak_ifadesi})", styles["Section"]))
         rows, row = [], []
         for idx, snap in enumerate(snapshots[:_want], start=1):
             try:
@@ -13510,9 +13532,16 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
 
     story.append(Spacer(1, 14))
     # KALEM 4 — mülakat tarihi/saati (started_at–completed_at) ile RAPOR üretim tarihi ayrı satırlar.
-    _gen_at = interview.get("report_generated_at") or interview.get("report_regenerated_at")
-    _gen_txt = f" (rapor {format_pdf_datetime(_gen_at)} tarihinde üretildi)" if _gen_at else ""
-    story.append(Paragraph(f"Bu rapor {datetime.now().strftime('%d.%m.%Y %H:%M')} tarihinde MedeX AI Interview Platform tarafından oluşturulmuştur.{_gen_txt}", styles["Small"]))
+    # İŞ EMRİ — RAPORLAMA VE PRIMARY DEĞERLENDİRME TUTARLILIĞI / madde 4 (düzeltildi): bu satır
+    # önceden datetime.now() (PDF'in İNDİRİLDİĞİ an, sunucu saatiyle/UTC — Europe/Istanbul DEĞİL)
+    # kullanıyordu ve _gen_txt de format_pdf_datetime() ile HAM (UTC, +3 çevrilmeMİş) saat
+    # basıyordu — üstteki "Rapor Oluşturulma Tarihi" (bu fonksiyonun başında _report_created_at
+    # olarak, +3 ile Europe/Istanbul'a çevrilerek hesaplanan AYNI DB alanı) ile PDF'in alt kısmı
+    # farklı saat/farklı kaynak gösterebiliyordu. Artık ikisi TEK KAYNAKTAN (_report_created_at,
+    # _report_created_raw ile AYNI öncelik: report_regenerated_at varsa o, yoksa report_generated_at)
+    # ve AYNI Europe/Istanbul dönüşümünden üretiliyor — üst ve alt HER ZAMAN aynı anı gösterir.
+    _gen_txt = f" (rapor {_report_created_at} tarihinde üretildi)" if _report_created_at else ""
+    story.append(Paragraph(f"Bu rapor MedeX AI Interview Platform tarafından oluşturulmuştur.{_gen_txt}", styles["Small"]))
 
     # İş emri madde 19 — her sayfada sayfa numarası.
     def _add_page_number(canvas, _doc):
