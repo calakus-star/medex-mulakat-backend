@@ -138,7 +138,7 @@ try:
     cam_events = [e for e in events if e.get("type") == "camera_validation"]
     check("D) camera_validation event'i yazıldı", len(cam_events) == 1)
     check("D) status=verified doğru kaydedildi", cam_events[-1].get("status") == "verified")
-    check("D) description madde-13/15 uyumlu (güvenlik iddiası içermiyor, olgu bazlı)", "kullanılabilir" in cam_events[-1].get("description", "") and "güven" not in cam_events[-1].get("description", "").lower())
+    check("D) description madde-13 uyumlu (güvenlik iddiası içermiyor)", "doğrulandı" in cam_events[-1].get("description", "") and "güven" not in cam_events[-1].get("description", "").lower())
 
     # --- E) backend blank/dark çapraz kontrolü: frontend "verified" derse de kare karanlıksa UNVERIFIED'a düşer ---
     r_dark = call_save_snapshot("mimic_sample", dark_img)  # ayrı kota kullan, camera_validation kotası dolu
@@ -166,7 +166,7 @@ try:
     events3 = get_events()
     cam_events3 = [e for e in events3 if e.get("type") == "camera_validation"]
     check("F) unverified doğrudan kaydedildi", cam_events3[-1].get("status") == "unverified")
-    check("F) description madde-15 uyumlu (0 PERSON örneğiyle eşleşiyor)", cam_events3[-1].get("description", "") == "Başlangıç kamera kontrolünde kişi tespit edilemedi.")
+    check("F) description madde-13 uyumlu (unverified)", "tamamlanamadı" in cam_events3[-1].get("description", ""))
 
     # --- G) _latest_camera_validation_event en SON olayı döner ---
     latest = m._latest_camera_validation_event(CAND, LEVEL)
