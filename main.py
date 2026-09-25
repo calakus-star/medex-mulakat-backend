@@ -25,6 +25,9 @@ import io
 import time
 import base64
 import traceback
+from PIL import Image  # İş emri — MÜLAKAT ÖNCESİ KAMERA KALİTE KAPISI: yalnız deterministik
+# siyah/karanlık/blank snapshot kontrolü için (main.py:_snapshot_image_is_blank_or_dark).
+# Kişi/yüz tespiti YAPILMAZ — bu backend'e HİÇBİR CV/detector modeli eklenmediğinin kanıtıdır.
 from xml.sax.saxutils import escape as xml_escape
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -974,6 +977,21 @@ class SnapshotData(BaseModel):
     reason: Optional[str] = None
     elapsed_ms: Optional[int] = None  # FAZ D: mülakat başından beri geçen süre (transkriptle hizalama)
     level: Optional[int] = None       # FAZ D: kare hangi seviye mülakatında alındı
+
+# İş emri — MÜLAKAT ÖNCESİ KAMERA KALİTE KAPISI: frontend'in tek başlangıç doğrulama denemesinin
+# SONUCUNU (madde 12) audit amaçlı kaydetmek için. Bu bir güvenlik/kimlik kanıtı DEĞİLDİR
+# (madde 13) — yalnız frontend'in ne gördüğünün/kararının kaydıdır.
+class CameraValidationResult(BaseModel):
+    candidate_id: int
+    level: Optional[int] = None
+    status: str            # "verified" | "unverified"
+    reason: Optional[str] = None
+    person_count: Optional[int] = None
+    basic_video_ok: Optional[bool] = None
+    detector_available: Optional[bool] = None
+    attempts: Optional[int] = None
+    client_timestamp: Optional[str] = None
+    snapshot_id: Optional[int] = None
 
 # ============ HELPERS ============
 def hash_password(password: str) -> str:
@@ -5928,6 +5946,41 @@ def _relative_time_bin(t_sn, total_min) -> Optional[str]:
         return "ortasında"
     return "sonlarında"
 
+# İş emri — MÜLAKAT ÖNCESİ KAMERA KALİTE KAPISI / madde 15: backend'in kayıtlı kamera kareleri
+# için yapabileceği TEK deterministik kontrol — siyah/çok karanlık/tek-renk/çok düşük varyans.
+# KİŞİ/YÜZ TESPİTİ YAPILMAZ (backend'e CV/detector modeli EKLENMEDİ, madde 15 net kural).
+def _snapshot_image_is_blank_or_dark(image_base64: str) -> bool:
+    try:
+        raw = image_base64.split(",", 1)[1] if "," in image_base64 else image_base64
+        img_bytes = base64.b64decode(raw)
+        img = Image.open(io.BytesIO(img_bytes)).convert("L").resize((80, 60))
+        pixels = list(img.getdata())
+        if not pixels:
+            return True
+        mean = sum(pixels) / len(pixels)
+        variance = sum((p - mean) ** 2 for p in pixels) / len(pixels)
+        return mean < 18 or variance < 4
+    except Exception:
+        return False  # analiz edilemiyorsa "kesin blank" DENMEZ — muhafazakâr taraf
+
+def _latest_camera_validation_event(candidate_id: int, level: int) -> Optional[dict]:
+    """İş emri madde 12/16: mevcut result_events_json'dan (_append_result_event ile yazılan)
+    EN SON 'camera_validation' olayını okur — yeni bir depolama mekanizması KURULMADI."""
+    try:
+        db = get_db()
+        try:
+            row = db.execute("SELECT result_events_json FROM interviews WHERE candidate_id=? AND level=?",
+                             (candidate_id, level)).fetchone()
+        finally:
+            db.close()
+        if not row or not row["result_events_json"]:
+            return None
+        events = json.loads(row["result_events_json"]) or []
+        cam_events = [e for e in events if isinstance(e, dict) and e.get("type") == "camera_validation"]
+        return cam_events[-1] if cam_events else None
+    except Exception:
+        return None
+
 def build_modality_prose(candidate_id: int, level: int) -> str:
     """Mimik + ses + mülakatçı gözlemlerinden İNSAN DİLİYLE, JSON ALAN ADI/ETİKETİ SIZDIRMAYAN,
     GÖRÜNTÜ ve SES ayrı paragraflarda bir 'Görüntü ve Ses Gözlemi' bölümü üretir. Ham SAYILAR bu
@@ -5948,7 +6001,19 @@ def build_modality_prose(candidate_id: int, level: int) -> str:
                 goruntu.append("Aday kamera görüntüsü oturumun sınırlı bir bölümünden doğrulandı; "
                                "kareler dar bir aralıkta toplandığı için oturumun geri kalanı görüntüyle gözlemlenemedi.")
             else:
-                goruntu.append("Aday kamera görüntüsü oturum boyunca düzenli aralıklarla doğrulandı.")
+                # İş emri madde 16: "oturum boyunca düzenli aralıklarla doğrulandı" gibi oturumun
+                # TAMAMINI kapsadığını ima eden bir ifade YASAK — elimizde yalnız ayrık kareler var,
+                # aralarındaki süreklilik hakkında hiçbir kanıt yok. Yalnız kaç kare/hangi kapsamda
+                # doğrulama yapıldığını, olduğu gibi bildiriyoruz.
+                goruntu.append(f"Oturum sırasında alınan {dg.get('n')} kamera karesinin tamamında "
+                               "aday görüntüsü doğrulanabildi; kareler arasındaki süreklilik ayrıca izlenmedi.")
+        _cam_ev = _latest_camera_validation_event(candidate_id, level)
+        if _cam_ev:
+            if _cam_ev.get("status") == "verified":
+                goruntu.append("Mülakat başlangıcında kamera görüntüsü doğrulandı.")
+            else:
+                goruntu.append("Mülakat başlangıcında kişi doğrulaması tamamlanamadı "
+                               "(kamera görüntüsü kullanılabilir durumdaydı).")
         if isinstance(mimic, dict) and mimic and mimic.get("durum") != "yetersiz_kare":
             # genel_durus + goz_temasi_egilimi TEK cümlede birleşir (alan adları hiç yazılmaz,
             # değerler cümle içine gömülürken ilk harfleri küçültülür — iş emri madde 1.2).
@@ -9799,26 +9864,77 @@ def save_snapshot(data: SnapshotData, payload=Depends(verify_token), db=Depends(
 
     reason = (data.reason or "").strip() or "auto"
     is_mimic = reason == "mimic_sample"
+    # İş emri — MÜLAKAT ÖNCESİ KAMERA KALİTE KAPISI: başlangıç doğrulama karesi (madde 12) da
+    # mimik gibi AYRI bir kotaya sahip — mevcut 4-6 karelik "auto" sınırını YEMEZ.
+    is_camera_validation = reason == "camera_validation"
     # FAZ D: doğrulama kareleri (kamera kanıtı — PDF/panel) ile mimik analiz kareleri AYRI sayılır
     # ve AYRI üst sınıra tabidir; biri diğerinin kotasını yemez.
     if is_mimic:
         cap, count_filter = 32, "reason='mimic_sample'"   # GÖREV 3.4 — 24→32 üst sınır (kısa mülakatta bile yeterli havuz)
+    elif is_camera_validation:
+        cap, count_filter = 1, "reason='camera_validation'"   # yalnız 1 başlangıç doğrulama karesi tutulur
     else:
-        cap, count_filter = 6, "(reason IS NULL OR reason<>'mimic_sample')"   # eski fallback seti
+        cap, count_filter = 6, "(reason IS NULL OR (reason<>'mimic_sample' AND reason<>'camera_validation'))"   # eski fallback seti
 
     existing_count = db.execute(
         f"SELECT COUNT(*) as c FROM snapshots WHERE candidate_id=? AND {count_filter}", (data.candidate_id,)
     ).fetchone()["c"]
 
     if existing_count >= cap:
-        return {"message": "Kare sınırına ulaşıldı, kaydedilmedi", "count": existing_count}
+        return {"message": "Kare sınırına ulaşıldı, kaydedilmedi", "count": existing_count, "id": None}
 
-    db.execute(
-        "INSERT INTO snapshots (candidate_id, image_base64, level, elapsed_ms, reason) VALUES (?, ?, ?, ?, ?)",
+    new_id = db.execute(
+        "INSERT INTO snapshots (candidate_id, image_base64, level, elapsed_ms, reason) VALUES (?, ?, ?, ?, ?) RETURNING id",
         (data.candidate_id, data.image_base64, data.level, data.elapsed_ms, reason)
-    )
+    ).fetchone()["id"]
     db.commit()
-    return {"message": "Kare kaydedildi", "count": existing_count + 1}
+    return {"message": "Kare kaydedildi", "count": existing_count + 1, "id": new_id}
+
+# İş emri — MÜLAKAT ÖNCESİ KAMERA KALİTE KAPISI / madde 12: frontend'in TEK başlangıç doğrulama
+# denemesinin sonucunu audit amaçlı kaydeder. Mevcut result_events_json (append-only olay
+# listesi, main.py:_append_result_event — BÖLÜM 3 ihlal/sonuç kayıtlarıyla AYNI mekanizma)
+# kullanılır; yeni DB alanı/tablo YOK. record_system_decision KULLANILMADI çünkü o TEK SLOT'luk
+# "son karar" alanıdır — finalize_interview sonradan üzerine yazar, bu olay o zaman KAYBOLURDU.
+@app.post("/api/interview/camera-validation")
+def report_camera_validation(data: CameraValidationResult, payload=Depends(verify_token), db=Depends(db_dep)):
+    if payload.get("role") != "candidate":
+        raise HTTPException(status_code=403, detail="Yetkisiz")
+    effective_candidate_id = int(payload.get("candidate_id") or data.candidate_id)
+    candidate = db.execute("SELECT level FROM candidates WHERE id=?", (effective_candidate_id,)).fetchone()
+    level = data.level or (candidate["level"] if candidate else None) or 1
+    status = data.status if data.status in ("verified", "unverified") else "unverified"
+    # İş emri madde 15: backend KİŞİ TESPİTİ yapmaz, ama frontend "verified" derse bile saklanan
+    # kareyi basit deterministik kör/karanlık kontrolünden geçirir — kare fiilen boşsa "verified"
+    # etiketine güvenmeyip UNVERIFIED'a düşürür (yanlış "doğrulandı" iddiasının admin tarafına
+    # sızmaması için tek satırlık bütünlük kontrolü).
+    _downgraded_blank = False
+    if status == "verified" and data.snapshot_id:
+        try:
+            snap_row = db.execute("SELECT image_base64 FROM snapshots WHERE id=? AND candidate_id=?",
+                                  (data.snapshot_id, effective_candidate_id)).fetchone()
+            if snap_row and snap_row["image_base64"] and _snapshot_image_is_blank_or_dark(snap_row["image_base64"]):
+                status = "unverified"
+                _downgraded_blank = True
+        except Exception as e:
+            print(f"[camera_validation] blank-check hatasi: {e}")
+    event = {
+        "type": "camera_validation",
+        "source": "candidate",
+        "status": status,
+        "reason": data.reason,
+        "person_count": data.person_count,
+        "basic_video_ok": data.basic_video_ok,
+        "detector_available": data.detector_available,
+        "attempts": data.attempts,
+        "client_timestamp": data.client_timestamp,
+        "snapshot_id": data.snapshot_id,
+        "backend_blank_check_downgraded": _downgraded_blank,
+        # madde 13 — bu bir güvenlik/kimlik kanıtı DEĞİLDİR, yalnız frontend'in kendi audit kaydıdır.
+        "description": ("Mülakat başlangıcında kamera görüntüsü doğrulandı." if status == "verified"
+                        else "Mülakat başlangıcında kişi doğrulaması tamamlanamadı (kamera görüntüsü kullanılabilir durumdaydı)."),
+    }
+    _append_result_event(effective_candidate_id, level, event)
+    return {"message": "Kaydedildi"}
 
 # ---- Sesli mod (OpenAI Whisper STT + TTS) ----
 # Not: Bu, Claude'un mülakat mantığına DOKUNMAZ — sadece ses<->yazı katmanı.
