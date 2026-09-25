@@ -1670,7 +1670,11 @@ def _is_near_duplicate(text: str, existing: list, threshold: float = 0.6) -> boo
 def select_verification_frames(candidate_id: int, level: Optional[int]) -> list:
     """Mimik havuzundan süreye yayılmış N doğrulama karesi seçer. Dönüş: [{id, image_base64,
     captured_at, elapsed_ms}] — elapsed_ms artan sırada. Mimik karesi yoksa eski doğrulama
-    setine (reason<>'mimic_sample') düşer."""
+    setine (reason<>'mimic_sample') düşer.
+    İş emri (GÖRÜNTÜ VE SES GÖZLEMİ ZENGİNLEŞTİRME) madde 20/37 — bu sorgu ÖNCEDEN candidate_id
+    ile FİLTRELİYORDU, level İLE DEĞİL: aynı adayın L2 mimik kareleri L3 raporuna (ya da tersi)
+    SIZABİLİYORDU (interviews candidate_id+level ile keylenirken snapshots öyle sorgulanmıyordu).
+    level de filtreye eklendi — L2 raporuna L3 karesi, L3 raporuna L2 karesi artık gelmez."""
     n = VERIFICATION_FRAME_COUNT.get(level or 1, 4)
     if n <= 0:
         return []
@@ -1678,15 +1682,15 @@ def select_verification_frames(candidate_id: int, level: Optional[int]) -> list:
     try:
         pool = db.execute(
             "SELECT id, image_base64, captured_at, elapsed_ms FROM snapshots "
-            "WHERE candidate_id=? AND reason='mimic_sample' ORDER BY COALESCE(elapsed_ms,0) ASC, id ASC",
-            (candidate_id,)
+            "WHERE candidate_id=? AND level=? AND reason='mimic_sample' ORDER BY COALESCE(elapsed_ms,0) ASC, id ASC",
+            (candidate_id, level)
         ).fetchall()
         if not pool:
             pool = db.execute(
                 "SELECT id, image_base64, captured_at, elapsed_ms FROM snapshots "
-                "WHERE candidate_id=? AND (reason IS NULL OR reason<>'mimic_sample') "
+                "WHERE candidate_id=? AND level=? AND (reason IS NULL OR (reason<>'mimic_sample' AND reason<>'camera_validation')) "
                 "ORDER BY COALESCE(elapsed_ms,0) ASC, captured_at ASC, id ASC",
-                (candidate_id,)
+                (candidate_id, level)
             ).fetchall()
     finally:
         db.close()
@@ -5981,6 +5985,54 @@ def _latest_camera_validation_event(candidate_id: int, level: int) -> Optional[d
     except Exception:
         return None
 
+# İş emri (GÖRÜNTÜ VE SES GÖZLEMİ ZENGİLEŞTİRME) madde 20-23 — TEK temsilî kamera görüntüsü,
+# DETERMİNİSTİK seçim (AI ile "en iyi fotoğraf" seçimi YOK). candidate_id + level ile KESİN
+# olarak sınırlıdır (madde 20/37 — L3 raporuna L2 karesi asla gelmez, tersi de).
+def select_representative_camera_image(candidate_id: int, level: int) -> Optional[dict]:
+    """Öncelik: (1) camera_validation karesi — kullanılabilirse, (2) yoksa en erken kullanılabilir
+    normal/auto kare, (3) yoksa en erken kullanılabilir mimic_sample karesi. Hiçbiri kullanılabilir
+    değilse None. Dönüş: {id, image_base64, reason, elapsed_ms, captured_at} veya None."""
+    if not _level_has_camera(level):
+        return None
+    db = get_db()
+    try:
+        cand_row = db.execute(
+            "SELECT id, image_base64, elapsed_ms, captured_at FROM snapshots "
+            "WHERE candidate_id=? AND level=? AND reason='camera_validation' ORDER BY id DESC LIMIT 1",
+            (candidate_id, level)
+        ).fetchone()
+        if cand_row and cand_row["image_base64"] and not _snapshot_image_is_blank_or_dark(cand_row["image_base64"]):
+            return {"id": cand_row["id"], "image_base64": cand_row["image_base64"], "reason": "camera_validation",
+                    "elapsed_ms": cand_row["elapsed_ms"], "captured_at": cand_row["captured_at"]}
+
+        normal_rows = db.execute(
+            "SELECT id, image_base64, elapsed_ms, captured_at FROM snapshots "
+            "WHERE candidate_id=? AND level=? AND (reason IS NULL OR (reason<>'mimic_sample' AND reason<>'camera_validation')) "
+            "ORDER BY COALESCE(elapsed_ms,0) ASC, captured_at ASC, id ASC",
+            (candidate_id, level)
+        ).fetchall()
+        for r in normal_rows:
+            if r["image_base64"] and not _snapshot_image_is_blank_or_dark(r["image_base64"]):
+                return {"id": r["id"], "image_base64": r["image_base64"], "reason": "auto",
+                        "elapsed_ms": r["elapsed_ms"], "captured_at": r["captured_at"]}
+
+        mimic_rows = db.execute(
+            "SELECT id, image_base64, elapsed_ms, captured_at FROM snapshots "
+            "WHERE candidate_id=? AND level=? AND reason='mimic_sample' "
+            "ORDER BY COALESCE(elapsed_ms,0) ASC, id ASC",
+            (candidate_id, level)
+        ).fetchall()
+        for r in mimic_rows:
+            if r["image_base64"] and not _snapshot_image_is_blank_or_dark(r["image_base64"]):
+                return {"id": r["id"], "image_base64": r["image_base64"], "reason": "mimic_sample",
+                        "elapsed_ms": r["elapsed_ms"], "captured_at": r["captured_at"]}
+        return None
+    except Exception as e:
+        print(f"UYARI (select_representative_camera_image c={candidate_id} L{level}): {type(e).__name__}: {e}")
+        return None
+    finally:
+        db.close()
+
 def build_modality_prose(candidate_id: int, level: int) -> str:
     """Mimik + ses + mülakatçı gözlemlerinden İNSAN DİLİYLE, JSON ALAN ADI/ETİKETİ SIZDIRMAYAN,
     GÖRÜNTÜ ve SES ayrı paragraflarda bir 'Görüntü ve Ses Gözlemi' bölümü üretir. Ham SAYILAR bu
@@ -5995,25 +6047,48 @@ def build_modality_prose(candidate_id: int, level: int) -> str:
     # ── Görüntü paragrafı (yalnız kamera yakalayan seviyelerde) ──
     goruntu = []
     if _level_has_camera(level):
-        dg = cov.get("dogrulama") or {}
-        if dg.get("n"):
-            if dg.get("kumelenme"):
-                goruntu.append("Aday kamera görüntüsü oturumun sınırlı bir bölümünden doğrulandı; "
-                               "kareler dar bir aralıkta toplandığı için oturumun geri kalanı görüntüyle gözlemlenemedi.")
-            else:
-                # İş emri madde 16: "oturum boyunca düzenli aralıklarla doğrulandı" gibi oturumun
-                # TAMAMINI kapsadığını ima eden bir ifade YASAK — elimizde yalnız ayrık kareler var,
-                # aralarındaki süreklilik hakkında hiçbir kanıt yok. Yalnız kaç kare/hangi kapsamda
-                # doğrulama yapıldığını, olduğu gibi bildiriyoruz.
-                goruntu.append(f"Oturum sırasında alınan {dg.get('n')} kamera karesinin tamamında "
-                               "aday görüntüsü doğrulanabildi; kareler arasındaki süreklilik ayrıca izlenmedi.")
+        # İş emri (GÖRÜNTÜ VE SES GÖZLEMİ ZENGİLEŞTİRME) madde 15/27 — başlangıç kamera kontrolü
+        # SONUCU paragrafın EN BAŞINA gelir. TEK KAYNAK: report_camera_validation'ın audit olayına
+        # yazdığı description (madde 28 — PDF/admin AYNI backend hesaplamasını kullanır, ikinci bir
+        # yorum algoritması YOK). Event yoksa (aday hiç değerlendirilmediyse) hiçbir şey yazılmaz.
         _cam_ev = _latest_camera_validation_event(candidate_id, level)
-        if _cam_ev:
-            if _cam_ev.get("status") == "verified":
-                goruntu.append("Mülakat başlangıcında kamera görüntüsü doğrulandı.")
+        if _cam_ev and _cam_ev.get("description"):
+            goruntu.append(_cam_ev["description"])
+        elif _cam_ev:
+            # Eski (bu düzeltmeden önce yazılmış) olaylarda description olmayabilir — geriye dönük
+            # uyumlu, olgu bazlı bir yedek (asla "doğrulandı" gibi desteklenmeyen bir iddia üretmez).
+            goruntu.append(_CAMERA_VALIDATION_REASON_TEXT.get(
+                (_cam_ev.get("reason") or "").strip(), _CAMERA_VALIDATION_UNVERIFIED_FALLBACK_TEXT)
+                if _cam_ev.get("status") != "verified" else _CAMERA_VALIDATION_REASON_TEXT["ok"])
+
+        # İş emri madde 24/25 — periyodik kamera kareleri İÇİN backend KİŞİ TESPİTİ YAPMADIĞI
+        # için "aday görüntüsü doğrulandı" gibi bir kişi-doğrulama iddiası YASAK. Yalnız deterministik
+        # kör/karanlık kontrolü (_snapshot_image_is_blank_or_dark, backend KİŞİ tespiti değildir)
+        # ile "teknik olarak değerlendirilebilir mi" sınıflaması yapılır.
+        try:
+            _vframes = select_verification_frames(candidate_id, level)
+        except Exception as e:
+            print(f"UYARI (build_modality_prose select_verification_frames c={candidate_id}): {type(e).__name__}: {e}")
+            _vframes = []
+        if _vframes:
+            _n = len(_vframes)
+            _usable = 0
+            for _f in _vframes:
+                try:
+                    if _f.get("image_base64") and not _snapshot_image_is_blank_or_dark(_f["image_base64"]):
+                        _usable += 1
+                except Exception:
+                    pass  # analiz edilemeyen kare "kullanılamaz" sayılmaz, sessizce atlanır
+            if _usable == _n:
+                goruntu.append(f"Oturum sırasında {_n} kamera karesi kaydedildi; tamamı teknik olarak değerlendirilebilir durumdaydı.")
+            elif _usable == 0:
+                goruntu.append("Bir kamera karesinden değerlendirilebilir görsel veri elde edilemedi." if _n == 1
+                               else f"Oturum sırasında {_n} kamera karesi kaydedildi; hiçbiri teknik olarak değerlendirilebilir görsel veri içermiyordu.")
             else:
-                goruntu.append("Mülakat başlangıcında kişi doğrulaması tamamlanamadı "
-                               "(kamera görüntüsü kullanılabilir durumdaydı).")
+                goruntu.append(f"Oturum sırasında {_n} kamera karesi kaydedildi; {_usable}'i teknik olarak değerlendirilebilir durumdaydı.")
+            dg = cov.get("dogrulama") or {}
+            if dg.get("kumelenme"):
+                goruntu.append("Bu kareler dar bir zaman aralığında toplandığından oturumun geri kalanı için görsel veri elde edilemedi.")
         if isinstance(mimic, dict) and mimic and mimic.get("durum") != "yetersiz_kare":
             # genel_durus + goz_temasi_egilimi TEK cümlede birleşir (alan adları hiç yazılmaz,
             # değerler cümle içine gömülürken ilk harfleri küçültülür — iş emri madde 1.2).
@@ -6124,6 +6199,13 @@ def build_modality_prose(candidate_id: int, level: int) -> str:
         bolumler.append("Görüntü: " + " ".join(goruntu))
     if ses:
         bolumler.append("Ses: " + " ".join(ses))
+    # İş emri madde 32 — sabit metodoloji/yanılma payı notu, bölümün SONUNDA, DEĞİŞTİRİLMEDEN.
+    bolumler.append(
+        "Bu rapordaki görüntü, davranış ve oturum bütünlüğüne ilişkin tespitlerin bir bölümü "
+        "yapay zekâ ve otomatik algoritmalar tarafından, mevcut teknik koşulların el verdiği "
+        "ölçüde üretilmiştir. Bu nedenle otomatik tespit ve yorumlarda her zaman yanılma payı "
+        "bulunabilir. Nihai değerlendirme, raporu inceleyen yetkili tarafından yapılmalıdır."
+    )
     return "\n\n".join(bolumler)
 
 MIMIC_ANALYSIS_PROMPT = """Aşağıda bir iş mülakatı sırasında adayın web kamerasından ~45 saniye arayla alınmış kareler var; her karenin öncesinde [t=SANİYE] etiketi bulunur. Bu kareler DÜŞÜK çözünürlüklüdür ve seyrektir.
@@ -9585,6 +9667,13 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         _degerlendirilemeyen_text = render_degerlendirilemeyen_alanlar(_dropped_pos_names, _dropped_prof_names)
 
         parts = []
+        # İş emri (GÖRÜNTÜ VE SES GÖZLEMİ ZENGİLEŞTİRME) madde 27 — bu bölüm artık raporun EN
+        # BAŞINA (Yönetici Özeti'nden bile ÖNCE) taşındı; PDF ayrıca kendi story sırasını
+        # BAĞIMSIZ olarak da bu şekilde kurar (_make_report_pdf) — burada parts sırasını
+        # değiştirmek admin panelinin (aynı metni doğrudan basan ReportText) de üst bölümde
+        # göstermesini sağlar (madde 28 — tek kaynak, iki ayrı yorum algoritması YOK).
+        if modality_prose:
+            parts.append(modality_prose)
         if yo_text:
             parts.append("**Yönetici Özeti:**\n" + yo_text)
         # İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 1.1 — Puanlama Kapsamı (deterministik, HER
@@ -9615,8 +9704,6 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
             parts.append("**Güçlü Yönler:**\n" + gy_text)
         if ga_text:
             parts.append("**Gelişim Alanları:**\n" + ga_text)
-        if modality_prose:
-            parts.append(modality_prose)
         if cv_ozeti_text.strip():
             parts.append("**CV Özeti:**\n" + cv_ozeti_text.strip())
         if beyan_tutarliligi_text:
@@ -9869,15 +9956,18 @@ def save_snapshot(data: SnapshotData, payload=Depends(verify_token), db=Depends(
     is_camera_validation = reason == "camera_validation"
     # FAZ D: doğrulama kareleri (kamera kanıtı — PDF/panel) ile mimik analiz kareleri AYRI sayılır
     # ve AYRI üst sınıra tabidir; biri diğerinin kotasını yemez.
+    # İş emri (GÖRÜNTÜ VE SES GÖZLEMİ ZENGİNLEŞTİRME) madde 18 — camera_validation kotası yalnız
+    # candidate_id ile sayılıyordu; aynı adayın L2'si L3'ün tek karesini TÜKETEBİLİYORDU
+    # (candidate_id+level keyed interviews mimarisiyle çelişen bug). level de filtreye eklendi.
     if is_mimic:
-        cap, count_filter = 32, "reason='mimic_sample'"   # GÖREV 3.4 — 24→32 üst sınır (kısa mülakatta bile yeterli havuz)
+        cap, count_filter, count_params = 32, "reason='mimic_sample'", (data.candidate_id,)   # GÖREV 3.4 — 24→32 üst sınır (kısa mülakatta bile yeterli havuz)
     elif is_camera_validation:
-        cap, count_filter = 1, "reason='camera_validation'"   # yalnız 1 başlangıç doğrulama karesi tutulur
+        cap, count_filter, count_params = 1, "reason='camera_validation' AND level=?", (data.candidate_id, data.level)   # yalnız 1 başlangıç doğrulama karesi tutulur, candidate+level bazlı
     else:
-        cap, count_filter = 6, "(reason IS NULL OR (reason<>'mimic_sample' AND reason<>'camera_validation'))"   # eski fallback seti
+        cap, count_filter, count_params = 6, "(reason IS NULL OR (reason<>'mimic_sample' AND reason<>'camera_validation'))", (data.candidate_id,)   # eski fallback seti
 
     existing_count = db.execute(
-        f"SELECT COUNT(*) as c FROM snapshots WHERE candidate_id=? AND {count_filter}", (data.candidate_id,)
+        f"SELECT COUNT(*) as c FROM snapshots WHERE candidate_id=? AND {count_filter}", count_params
     ).fetchone()["c"]
 
     if existing_count >= cap:
@@ -9889,6 +9979,28 @@ def save_snapshot(data: SnapshotData, payload=Depends(verify_token), db=Depends(
     ).fetchone()["id"]
     db.commit()
     return {"message": "Kare kaydedildi", "count": existing_count + 1, "id": new_id}
+
+# İş emri (GÖRÜNTÜ VE SES GÖZLEMİ ZENGİNLEŞTİRME) madde 15 — reason -> olgu bazlı, yorum İÇERMEYEN
+# sabit metin haritası. Yeni bir reason gelirse (haritada yoksa) generic bir "tamamlanamadı" metni
+# kullanılır — asla "doğrulandı" gibi desteklenmeyen bir iddia üretilmez.
+_CAMERA_VALIDATION_REASON_TEXT = {
+    "ok": "Başlangıç kamera kontrolünde görüntü kullanılabilir durumdaydı ve tek kişi tespit edildi.",
+    "multiple_people": "Başlangıç kamera kontrolünde birden fazla kişi tespit edildi.",
+    "person_not_detected": "Başlangıç kamera kontrolünde kişi tespit edilemedi.",
+    "black_or_dark_image": "Başlangıç kamera görüntüsü teknik olarak değerlendirilebilir durumda değildi.",
+    "frozen_video": "Başlangıç kamera görüntüsü güncellenmiyor gibi görünüyordu.",
+    "detector_unavailable": "Başlangıç kişi doğrulaması teknik nedenle tamamlanamadı.",
+    "detector_error": "Başlangıç kişi doğrulaması teknik nedenle tamamlanamadı.",
+    "detector_timeout": "Başlangıç kişi doğrulaması teknik nedenle tamamlanamadı.",
+    "no_stream": "Başlangıç kamera görüntüsü teknik olarak değerlendirilebilir durumda değildi.",
+    "track_not_live": "Başlangıç kamera görüntüsü teknik olarak değerlendirilebilir durumda değildi.",
+    "video_not_ready": "Başlangıç kamera görüntüsü teknik olarak değerlendirilebilir durumda değildi.",
+    "no_dimensions": "Başlangıç kamera görüntüsü teknik olarak değerlendirilebilir durumda değildi.",
+    "no_camera": "Cihazda kullanılabilir kamera bulunamadığından görüntü gözlemi gerçekleştirilemedi.",
+    "permission_denied": "Kamera erişim izni sağlanamadığından görüntü gözlemi gerçekleştirilemedi.",
+}
+_CAMERA_VALIDATION_BLANK_DOWNGRADE_TEXT = "Başlangıç kamera görüntüsü teknik olarak değerlendirilebilir durumda değildi."
+_CAMERA_VALIDATION_UNVERIFIED_FALLBACK_TEXT = "Başlangıç kişi doğrulaması tamamlanamadı."
 
 # İş emri — MÜLAKAT ÖNCESİ KAMERA KALİTE KAPISI / madde 12: frontend'in TEK başlangıç doğrulama
 # denemesinin sonucunu audit amaçlı kaydeder. Mevcut result_events_json (append-only olay
@@ -9917,6 +10029,16 @@ def report_camera_validation(data: CameraValidationResult, payload=Depends(verif
                 _downgraded_blank = True
         except Exception as e:
             print(f"[camera_validation] blank-check hatasi: {e}")
+    # İş emri madde 26 — backend blank/dark nedeniyle verified->unverified düşürdüyse "kamera
+    # görüntüsü kullanılabilir durumdaydı" gibi ÇELİŞKİLİ bir metin ASLA yazılmaz; reason'a göre
+    # DEĞİL, düşürme nedenine göre (blank/dark) doğru metin seçilir.
+    if _downgraded_blank:
+        description = _CAMERA_VALIDATION_BLANK_DOWNGRADE_TEXT
+    elif status == "verified":
+        description = _CAMERA_VALIDATION_REASON_TEXT["ok"]
+    else:
+        description = _CAMERA_VALIDATION_REASON_TEXT.get(
+            (data.reason or "").strip(), _CAMERA_VALIDATION_UNVERIFIED_FALLBACK_TEXT)
     event = {
         "type": "camera_validation",
         "source": "candidate",
@@ -9930,8 +10052,7 @@ def report_camera_validation(data: CameraValidationResult, payload=Depends(verif
         "snapshot_id": data.snapshot_id,
         "backend_blank_check_downgraded": _downgraded_blank,
         # madde 13 — bu bir güvenlik/kimlik kanıtı DEĞİLDİR, yalnız frontend'in kendi audit kaydıdır.
-        "description": ("Mülakat başlangıcında kamera görüntüsü doğrulandı." if status == "verified"
-                        else "Mülakat başlangıcında kişi doğrulaması tamamlanamadı (kamera görüntüsü kullanılabilir durumdaydı)."),
+        "description": description,
     }
     _append_result_event(effective_candidate_id, level, event)
     return {"message": "Kaydedildi"}
@@ -13732,7 +13853,6 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
         story.append(st)
         story.append(Spacer(1, 4))
 
-    # ============ RAPOR GÖVDESİ (iş emri madde 3) — yalnız gerçekten üretilen bölümler ============
     # Savunma amaçlı: reviewer henüz çalışmadıysa (arka plan işi bitmeden PDF istenirse) yer
     # tutucu asla görünmez.
     _report_raw = (interview.get("report") or "").replace(_REVIEWER_SLOT_MARK, "")
@@ -13740,6 +13860,39 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     lines = [ln.rstrip() for ln in report_text.split("\n") if ln.strip()]
     secs = _split_report_sections(lines)
 
+    # İş emri (GÖRÜNTÜ VE SES GÖZLEMİ ZENGİLEŞTİRME) madde 27 — bu bölüm + temsilî görüntü,
+    # metadata/Sonuç Gerekçesi'nden hemen SONRA, kriter tablolarından/Yönetici Özeti'nden ÖNCE
+    # basılır (aşağıdaki asıl "RAPOR GÖVDESİ" döngüsünden ÇIKARILDI — madde 44/45: yalnız BU sıra
+    # değişikliği, başka hiçbir bölümün metni/mantığı değişmedi).
+    if "Görüntü ve Ses Gözlemi" in secs:
+        story.append(Paragraph("Görüntü ve Ses Gözlemi", styles["Section"]))
+        _emit_report_block(secs["Görüntü ve Ses Gözlemi"])
+        try:
+            _rep_img = select_representative_camera_image(candidate.get("id"), interview.get("level") or 1)
+        except Exception as e:
+            print(f"UYARI (PDF temsilî kamera görüntüsü): {type(e).__name__}: {e}")
+            _rep_img = None
+        story.append(Spacer(1, 4))
+        story.append(Paragraph("Temsilî Kamera Görüntüsü", styles["MiniHeading"]))
+        if _rep_img and _rep_img.get("image_base64"):
+            try:
+                _raw = _rep_img["image_base64"]
+                _raw = _raw.split(",", 1)[1] if "," in _raw else _raw
+                _img_bytes = base64.b64decode(_raw)
+                _cap = "Temsilî Kamera Görüntüsü"
+                _ems = _safe_int(_rep_img.get("elapsed_ms"))
+                if _ems:
+                    _cap += f" — +{_ems // 60000:02d}:{(_ems // 1000) % 60:02d}"
+                story.append(Image(io.BytesIO(_img_bytes), width=6.0*cm, height=4.4*cm))
+                story.append(Paragraph(f"<font size=7>{ptxt(_cap)}</font>", styles["Small"]))
+            except Exception as e:
+                print(f"UYARI (PDF temsilî görüntü render): {type(e).__name__}: {e}")
+                story.append(Paragraph("Temsilî kamera görüntüsü elde edilemedi.", styles["BodyWrap"]))
+        else:
+            story.append(Paragraph("Temsilî kamera görüntüsü elde edilemedi.", styles["BodyWrap"]))
+        story.append(Spacer(1, 6))
+
+    # ============ RAPOR GÖVDESİ (iş emri madde 3) — yalnız gerçekten üretilen bölümler ============
     if not any(k in secs for k in _KNOWN_REPORT_HEADINGS):
         # Tanınan hiçbir bölüm başlığı yok (yedek/eski biçim rapor) — ham blok olarak bas.
         story.append(Paragraph("Değerlendirme Raporu", styles["Section"]))
@@ -13774,7 +13927,7 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
                 _emit_report_block(secs[_head])
         _render_score_table()
         for _head in ("Pozisyon Yetkinlikleri", "Kişisel ve Bilişsel Profil", "İkinci Değerlendirici Görüşü",
-                     "Güçlü Yönler", "Gelişim Alanları", "Görüntü ve Ses Gözlemi", "CV Özeti",
+                     "Güçlü Yönler", "Gelişim Alanları", "CV Özeti",
                      "Beyan Tutarlılığı", "Öneri Gerekçesi", "Takip Mülakatı İçin Önerilen Sorular"):
             if _head in secs:
                 story.append(Paragraph(ptxt(_head), styles["Section"]))
@@ -13997,6 +14150,14 @@ def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depend
         result["result_events"] = []
     _rr = (result.get("result_reason") or "").strip()
     result["result_reason_missing"] = _rr.startswith("[EKSİK")
+
+    # İş emri (GÖRÜNTÜ VE SES GÖZLEMİ ZENGİLEŞTİRME) madde 28 — admin da PDF ile AYNI temsilî
+    # görüntüyü, AYNI backend seçim fonksiyonuyla görsün (iki farklı algoritma YOK).
+    try:
+        result["representative_camera_image"] = select_representative_camera_image(candidate_id, level)
+    except Exception as e:
+        print(f"UYARI (get_interview representative_camera_image c={candidate_id}): {type(e).__name__}: {e}")
+        result["representative_camera_image"] = None
 
     # ═══ BÖLÜM D1 — tam oturum kaydı (admin görünür, ham) ═══
     def _loadj(col):
