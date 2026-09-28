@@ -1533,6 +1533,14 @@ def _parse_iso(value):
     except Exception:
         return None
 
+def _interview_elapsed_seconds(started_at) -> Optional[int]:
+    """started_at (DB DEFAULT CURRENT_TIMESTAMP, UTC) ile ŞU AN (UTC) arasındaki farkı saniye
+    olarak döner. İŞ EMRİ madde 6 — üst sınıra ulaşılıp ulaşılmadığını belirlemek için kullanılır."""
+    dt = _parse_iso(started_at)
+    if dt is None:
+        return None
+    return max(0, int((datetime.utcnow() - dt).total_seconds()))
+
 def build_transcript_view(messages_raw, level: int, started_at=None, for_report: bool = False) -> list:
     """interviews.messages'ı (L1/L3 dizi VEYA L2 tek blob) ortak bir görünüme çevirir:
     [{"role": "aday"|"mulakatci", "ts": "<iso|mm:ss|'' >", "text": "...", "elapsed_ms": int|None}].
@@ -2544,15 +2552,24 @@ def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_t
     level=2 (varsayılan) çıktısı bilerek birebir eskisiyle aynı bırakıldı — sadece level=3
     çağrıldığında ek bir SEVİYE TONU satırı ve L3'ün kendi süre/derinlik hedefi devreye girer."""
     pos = get_position(position_name) or {"criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}], "role_description": ""}
-    criteria = pos.get("criteria") or []
+    all_criteria = pos.get("criteria") or []
     role_desc = (pos.get("role_description") or "").strip()   # B6 — L1/L3'te olduğu gibi L2'ye de ver
+    # İŞ EMRİ madde 3 — yalnız SEÇİLİ kriterler (pozisyon liste sırası + profil sabit 1-6 sırası,
+    # her gruptan ilk N) modele gösterilir; kapsam dışı kalanlar hiç sorulmaz (madde 7'de raporda
+    # N/A olarak sistem tarafından deterministik eklenir).
+    criteria, _pos_out_of_scope = select_criteria_for_level(all_criteria, level)
+    profile_criteria, _prof_out_of_scope = select_criteria_for_level(PROFILE_CRITERIA, level)
     criteria_compact = "; ".join(f"{c.get('name','Kriter')} %{c.get('weight',0)}" for c in criteria)
     criteria_names = ", ".join(f'"{c.get("name", "Kriter")}"' for c in criteria)
+    profile_compact = "; ".join(c.get("name", "Kriter") for c in profile_criteria)
+    all_criteria_names_for_coverage = ", ".join(f'"{c.get("name", "Kriter")}"' for c in (criteria + profile_criteria))
     lang_name = LANGUAGE_NAMES.get(interview_language, "Türkçe")
     cv_compact = " ".join((cv_text or "").split())[:900] or "CV özeti yok"
     note_compact = " ".join((ai_note or "").split())[:500]
     lvl_cfg = get_effective_level_config(level, depth_tier)
     depth_label = lvl_cfg.get("depth_label", "Standart")
+    depth_question_rule = _build_depth_question_rule_text(depth_tier)
+    ai_note_supremacy = _build_ai_note_supremacy_text(ai_note)
     # level=2 için bu satır boş kalır (çıktı eskisiyle birebir aynı); yalnızca level=3'te
     # LEVEL_CONFIG[3]'ün tonu ek bir talimat satırı olarak eklenir.
     level_tone_line = f"\nSEVİYE TONU: {LEVEL_CONFIG.get(level, LEVEL_CONFIG[2])['tone']}\n" if level == 3 else ""
@@ -2564,17 +2581,24 @@ Amacın adayın mesleki bilgi ve yetkinlik düzeyini ölçmek. Bu amaca ulaşmak
 
 Aday: {candidate_name}. Pozisyon: {position_name}. Derinlik: {depth_label}.
 Rol: {role_desc or 'Bu pozisyon için genel yetkinlik değerlendirmesi.'}
-Kriterler: {criteria_compact}. CV özeti: {cv_compact}. Özel not: {note_compact or 'yok'}.
+Pozisyon kriterleri: {criteria_compact}. Profil kriterleri (bunlar da AYRI sorularla ölçülür, yalnız gözlemle DEĞİL): {profile_compact}.
+CV özeti: {cv_compact}. Özel not: {note_compact or 'yok'}.
 {level_tone_line}
+SÜRE (İŞ EMRİ madde 1): Bu mülakat için minimum süre {lvl_cfg['min_mmss']}, üst sınır {lvl_cfg['max_mmss']} (dk:sn). Üst sınıra AŞILMADAN ulaşılır; minimum süre dolmadan bitirme.
+
+{depth_question_rule}
+
+{ai_note_supremacy}
+{_NONINTERACTIVE_5MIN_RULE if level in (2, 3) else ""}
+
 İNİSİYATİF:
-- Sabit soru sırası/sayısı yok; adayın cevabına göre yön belirle. Zayıf alanı derinleştir, güçlü alanda oyalanma.
+- Sabit soru sırası yok; adayın cevabına göre yön belirle. Zayıf alanı derinleştir, güçlü alanda oyalanma (ama yukarıdaki SORU KURALI'nı ihlal etme).
 - Aday bir konuyu açtıysa oradan devam et; "listeye" dönmek için zorlama. Cevap yüzeyselse somut örnek/katkı/sonuç iste; doyurucuysa geç.
 - Aynı konuyu amaçsız tekrar etme; önceki cevaba uygun takip sorusu üret. Adayın ne söylediğini unutma.
-- Hedef ~{lvl_cfg['minutes']} dakika bir yön göstergesidir; parasal eşik nedeniyle asla bitirme, yeterli kanıt oluşana kadar doğal sürdür.
 
 {INTERVIEWER_REASK_RULES}
 
-KRİTER KAPSAMA (ÖNEMLİ — İŞ EMRİ): Amaç, tanımlı kriterlerin TAMAMININ mülakat sırasında gerçekten ölçülme fırsatı bulmasıdır — bu opsiyonel bir "varsa kontrol et" değil, mülakatın asıl işlevidir. Akış içinde mekanik kapı yok, ama end_interview çağırmadan ÖNCE her kriteri tek tek gözden geçir: hiç dokunulmamış olan varsa en az bir soru sor. Adayın verdiği TEK bir cevap birden fazla kriter için geçerli kanıt oluşturabilir — böyle bir kriteri tekrar sormaya ZORUNLU değilsin, gereksiz tekrar soru üretme. Yine de mülakat sonunda gerçekten hiç sorulamayan bir kriter kalırsa raporda "değerlendirilmedi" işaretlenir — uydurma değerlendirme yapma.
+KRİTER KAPSAMA (ÖNEMLİ — İŞ EMRİ madde 3/5): Amaç, seçili kriterlerin (pozisyon + profil) TAMAMININ mülakat sırasında gerçekten ölçülme fırsatı bulmasıdır — bu opsiyonel bir "varsa kontrol et" değil, mülakatın asıl işlevidir. Akış içinde mekanik kapı yok, ama end_interview çağırmadan ÖNCE her kriteri tek tek gözden geçir: hiç dokunulmamış olan varsa en az bir soru sor. Adayın verdiği TEK bir cevap birden fazla kriter için geçerli kanıt oluşturabilir — böyle bir kriteri tekrar sormaya ZORUNLU değilsin, gereksiz tekrar soru üretme. Yine de mülakat sonunda gerçekten hiç sorulamayan bir kriter kalırsa raporda "değerlendirilmedi" işaretlenir — uydurma değerlendirme yapma.
 
 İNSAN GİBİ, DOĞAL:
 - Her turda tek, net soru. Uzun özet, gereksiz övgü, konu anlatımı, danışmanlık yapma — aday daha çok konuşsun.
@@ -2605,13 +2629,13 @@ DİL: Mülakatın odağı değil. Pozisyon bir dil yeterliliği gerektiriyorsa d
 
 DERİNLİK: STANDART modda geniş kapsam + yeterli derinlik; DERİN modda daha fazla takip, kanıt, çapraz kontrol — daha çok senin konuşman değil, adayı daha derin sorgulaman demek.
 
-KAPANIŞ PROTOKOLÜ ZORUNLUDUR:
-1) Kriterlerin çoğu yeterince değerlendirildiğinde önce mutlaka “Mülakatımızı tamamlamadan önce son olarak eklemek veya özellikle belirtmek istediğiniz bir konu var mı?” diye sor.
+KAPANIŞ PROTOKOLÜ ZORUNLUDUR — BİTİRME ŞARTI (İŞ EMRİ madde 5) İKİSİ BİRDEN sağlanınca uygulanır: (a) minimum süre ({lvl_cfg['min_mmss']}) dolmuş VE (b) seçili kriterlerin/soruların gerektirdiği kapsam tamamlanmış. Kriterler minimum süreden ÖNCE biterse minimum süre dolana kadar sormaya DEVAM ET (yukarıdaki SORU KURALI'na göre). Üst sınıra ({lvl_cfg['max_mmss']}) ulaşılırsa kriterler tamamlanmamış olsa BİLE aşağıdaki kapanışı başlat — üst sınır aşılmaz.
+1) Bitirme şartı sağlandığında (veya üst sınıra ulaşıldığında) önce mutlaka “Mülakatımızı tamamlamadan önce son olarak eklemek veya özellikle belirtmek istediğiniz bir konu var mı?” diye sor.
 2) Adayın son cevabını dinle.
 3) Ardından kısa ve profesyonel biçimde teşekkür et: “Teşekkür ederim. Görüşmemiz burada tamamlandı. Katılımınız ve ayırdığınız zaman için teşekkür ederim.”
-4) Yalnızca bu kapanış cümlesi tamamen bittikten sonra end_interview(reason='tamamlandı', criteria_coverage={{...}}) çağır: {criteria_names}.
+4) Yalnızca bu kapanış cümlesi tamamen bittikten sonra end_interview(reason='tamamlandı', criteria_coverage={{...}}) çağır: {all_criteria_names_for_coverage}.
 - Aday AÇIKÇA bitirmek isterse (net sözlü talep: "bitirelim", "devam etmek istemiyorum") end_interview(reason='aday_talebi'). Sadece nezaketen sorulan "eklemek istediğiniz bir şey var mı" kapanış sorusuna "yok" demek bitirme talebi DEĞİLDİR — bu durumda reason='tamamlandı'.
-- Kapanışta modele criteria_coverage'ı MUTLAKA doldur (her kriter için 0-100): rapor yanıtsız kriterleri buradan tespit ediyor.
+- Kapanışta modele criteria_coverage'ı MUTLAKA doldur (her kriter için 0-100, pozisyon VE profil kriterlerinin HEPSİ dahil): rapor yanıtsız kriterleri buradan tespit ediyor.
 
 SES GÖZLEMİ ARACI (note_voice_observation) — SIKI KULLANIM:
 - Bu aracı YALNIZCA adayın SESİNDE rapora değecek, BELİRGİN bir şey fark ettiğinde çağır: net tereddüt, akıcılık kaybı, tonda belirgin kayma, aşırı gerginlik veya aşırı güven.
@@ -3221,49 +3245,151 @@ def detect_forbidden_followup_patterns(text: str) -> list:
     return [ln.strip() for ln in text.splitlines()
             if ln.strip() and (_FORBIDDEN_FOLLOWUP_RE.search(ln) or banned_phrase_hits(ln))]
 
-# Level bazlı konfigürasyon: süre (dk), soru sayısı güvenlik ağı, CV zorunluluğu, ton talimatı.
+# İŞ EMRİ — LEVEL/DERİNLİK/SÜRE/KRİTER/SORU KURALLARI (2026-09) madde 1: level x derinlik
+# için SABİT dakika:saniye min/max matrisi (min = minimum süre, max = min x 1,25 — L3 için
+# ESKİ "sabit üst sınır yok / adaptif" tanımı bu matrisle DEĞİŞTİ). coverage_threshold, L2/L3'te
+# end_interview çağrısına eklenen kriter bazlı kapsanma yüzdesinin hangi eşiği geçmesi
+# gerektiğini belirler (motor DIŞI, yalnız modele verilen bir hedef).
 LEVEL_CONFIG = {
-    1: {
-        "minutes": 10, "min_q": 6, "max_q": 12, "cv_required": False,
-        "tone": "Level 1 — standart, orta tempoda mülakat. Ton nötr ve profesyonel."
-    },
-    2: {
-        "minutes": 20, "min_q": 6, "max_q": 18, "cv_required": True,
-        "tone": "Level 2 — meslektaş tonu, orta seviye derinlik. Süreç ve uygulama odaklı sorular sor. Çelişki/netleştirme sorularını nazik bir tonda sor (\"bunu biraz açar mısınız\" gibi)."
-    },
-    3: {
-        "minutes": 30, "min_q": 8, "max_q": 26, "cv_required": True, "adaptive": True,
-        "tone": "Level 3 — senior, direkt ton. Karar verme, kriz yönetimi ve zaman baskılı senaryolara ağırlık ver. Çelişki/netleştirme sorularını daha direkt sor (\"az önce söylediğinizle bu çelişiyor gibi, siz nasıl görüyorsunuz\" gibi). Bu seviye adaptiftir: gidişata göre süre 30 dakikayı aşabilir, sabit bir üst sınır yok — yeterli sinyali alana kadar derinleştirmeye devam et."
-    },
+    1: {"cv_required": False,
+        "tone": "Level 1 — standart, orta tempoda mülakat. Ton nötr ve profesyonel."},
+    2: {"cv_required": True,
+        "tone": "Level 2 — meslektaş tonu, orta seviye derinlik. Süreç ve uygulama odaklı sorular sor. Çelişki/netleştirme sorularını nazik bir tonda sor (\"bunu biraz açar mısınız\" gibi)."},
+    3: {"cv_required": True,
+        "tone": "Level 3 — senior, direkt ton. Karar verme, kriz yönetimi ve zaman baskılı senaryolara ağırlık ver. Çelişki/netleştirme sorularını daha direkt sor (\"az önce söylediğinizle bu çelişiyor gibi, siz nasıl görüyorsunuz\" gibi)."},
 }
 
 def get_level_config(level: Optional[int]) -> dict:
     return LEVEL_CONFIG.get(level or 1, LEVEL_CONFIG[1])
 
-# Derinlik seviyesi: level'ın (L1/L2/L3) kendi baz süresini/soru sayısını YAKLAŞIK olarak
-# ölçekler. Kesin bir dakika/soru hedefi DEĞİLDİR — sadece AI'a yön veren bir çarpandır.
-# "kisa" ayrıca ucuz/test amaçlı kullanılabilir. coverage_threshold, L2'de end_interview
-# çağrısına eklenen kriter bazlı kapsanma yüzdesinin hangi eşiği geçmesi gerektiğini belirler.
+# İŞ EMRİ madde 1 — level x derinlik min/max süre tablosu (saniye). max = min x 1,25 (tablodaki
+# dakika:saniye değerleriyle birebir — ör. L1 Kısa 5:00->6:15, L3 Derin 30:00->37:30).
+LEVEL_DEPTH_DURATION_SECONDS = {
+    1: {"kisa": (5 * 60, 6 * 60 + 15), "standart": (10 * 60, 12 * 60 + 30), "derin": (15 * 60, 18 * 60 + 45)},
+    2: {"kisa": (10 * 60, 12 * 60 + 30), "standart": (15 * 60, 18 * 60 + 45), "derin": (20 * 60, 25 * 60)},
+    3: {"kisa": (10 * 60, 12 * 60 + 30), "standart": (20 * 60, 25 * 60), "derin": (30 * 60, 37 * 60 + 30)},
+}
+
+# İŞ EMRİ madde 3 — her grup (pozisyon / profil) için level başına seçilen kriter sayısı
+# (sıradaki İLK N: pozisyonda ekrandaki mevcut liste sırası, profilde sabit 1-6 sırası).
+LEVEL_CRITERIA_COUNT = {1: 3, 2: 5, 3: 6}
+
 DEPTH_TIER_CONFIG = {
-    "kisa":     {"factor": 0.5, "coverage_threshold": 40, "label": "Kısa"},
-    "standart": {"factor": 1.0, "coverage_threshold": 60, "label": "Standart"},
-    "derin":    {"factor": 1.6, "coverage_threshold": 80, "label": "Derin"},
+    "kisa":     {"coverage_threshold": 40, "label": "Kısa"},
+    "standart": {"coverage_threshold": 60, "label": "Standart"},
+    "derin":    {"coverage_threshold": 80, "label": "Derin"},
 }
 
 def get_depth_tier_config(depth_tier: Optional[str]) -> dict:
     return DEPTH_TIER_CONFIG.get((depth_tier or "standart").lower(), DEPTH_TIER_CONFIG["standart"])
 
+def _fmt_mmss(total_seconds: int) -> str:
+    m, s = divmod(int(total_seconds), 60)
+    return f"{m}:{s:02d}"
+
 def get_effective_level_config(level: Optional[int], depth_tier: Optional[str] = None) -> dict:
-    """LEVEL_CONFIG'teki baz süre/soru sayısını depth_tier'a göre yaklaşık olarak ölçekler."""
+    """İŞ EMRİ madde 1 — level x derinlik için SABİT min/max süre (saniye) + ilgili metadata.
+    'minutes' geriye uyum için ÜST SINIRIN dakika karşılığını taşır (eski çağıranlar — rapor
+    başlığı, hedef süre gösterimi, frame örnekleme aralığı vb. — bunu üst tahmin olarak kullanır)."""
     base = get_level_config(level)
-    dt = get_depth_tier_config(depth_tier)
+    dt_key = (depth_tier or "standart").lower()
+    if dt_key not in DEPTH_TIER_CONFIG:
+        dt_key = "standart"
+    dt = DEPTH_TIER_CONFIG[dt_key]
+    lvl_key = level if level in LEVEL_DEPTH_DURATION_SECONDS else 1
+    min_s, max_s = LEVEL_DEPTH_DURATION_SECONDS[lvl_key][dt_key]
     cfg = dict(base)
-    cfg["minutes"] = round(base["minutes"] * dt["factor"])
-    cfg["min_q"] = max(3, round(base["min_q"] * dt["factor"]))
-    cfg["depth_tier"] = (depth_tier or "standart").lower()
+    cfg["min_seconds"] = min_s
+    cfg["max_seconds"] = max_s
+    cfg["min_mmss"] = _fmt_mmss(min_s)
+    cfg["max_mmss"] = _fmt_mmss(max_s)
+    cfg["minutes"] = round(max_s / 60)   # geriye uyum: üst sınırın dakika karşılığı
+    cfg["depth_tier"] = dt_key
     cfg["depth_label"] = dt["label"]
     cfg["coverage_threshold"] = dt["coverage_threshold"]
+    n_per_group = LEVEL_CRITERIA_COUNT.get(lvl_key, LEVEL_CRITERIA_COUNT[1])
+    cfg["criteria_count_per_group"] = n_per_group
+    # İŞ EMRİ madde 4/5 — min_q: bitirme şartının "kriter/soru şartı" tarafı için taban —
+    # her seçili kriter (pozisyon+profil, 2*N) en az 1 ana soru alır. max_q yalnız maliyet/
+    # uzunluk GÜVENLİK AĞI (madde 4'teki takip soruları için derinliğe göre geniş bir tavan) —
+    # resmi bitirme şartı DEĞİL, aşırı uzamayı önleyen bir üst sınırdır.
+    total_criteria = n_per_group * 2
+    cfg["min_q"] = total_criteria
+    _max_q_mult = {"kisa": 1, "standart": 2, "derin": 3}.get(dt_key, 2)
+    cfg["max_q"] = total_criteria * (1 + _max_q_mult)
     return cfg
+
+_AI_NOTE_DURATION_RE = re.compile(r"(\d{1,3})\s*(?:dakika|dk)\b", re.IGNORECASE)
+
+def extract_ai_note_duration_minutes(ai_note: Optional[str]) -> Optional[int]:
+    """İŞ EMRİ madde 8 — AI notunda rakamla yazılmış süre ('30 dakika', '30 dk') varsa onu
+    dakika olarak döner; yoksa None (tablo süresi geçerli kalır)."""
+    if not ai_note:
+        return None
+    m = _AI_NOTE_DURATION_RE.search(ai_note)
+    if not m:
+        return None
+    try:
+        v = int(m.group(1))
+        return v if v > 0 else None
+    except Exception:
+        return None
+
+def select_criteria_for_level(criteria: list, level: Optional[int]) -> tuple:
+    """İŞ EMRİ madde 3 — mevcut sırayı KORUYARAK ilk N kriteri seçer (N = LEVEL_CRITERIA_COUNT).
+    Dönüş: (secili, kapsam_disi) — kapsam_disi kriterler modele hiç gösterilmez, raporda N/A
+    olarak (madde 7) sonradan deterministik eklenir."""
+    n = LEVEL_CRITERIA_COUNT.get(level or 1, LEVEL_CRITERIA_COUNT[1])
+    return list(criteria[:n]), list(criteria[n:])
+
+def _append_na_criteria_rows(table_text: str, out_of_scope: list) -> str:
+    """İŞ EMRİ madde 7 — level kapsamı dışında kalan (seçilmeyen) kriterler DETERMİNİSTİK
+    olarak N/A satırı ile tabloya eklenir. Bu kriterler puanlama motoruna hiç girmedi
+    (select_criteria_for_level ile zaten dışlandılar) — bu yalnız GÖRÜNÜM/rapor metnidir,
+    ağırlıkları hiçbir payda hesabını etkilemez (madde 7: kalan kriterler kendi grubu içinde
+    zaten %100'e normalize ediliyor, çünkü evaluated_cap yalnız SEÇİLİ kriterlerden oluşuyor)."""
+    if not out_of_scope:
+        return table_text or ""
+    rows = [f"| {c.get('name', 'Kriter')} | N/A | Bu kriter bu mülakat seviyesi/derinliğinde kapsam dışıdır (İŞ EMRİ madde 3/7)." "|"
+            for c in out_of_scope]
+    base = (table_text or "").rstrip()
+    if not base:
+        return ""
+    return base + "\n" + "\n".join(rows)
+
+def _build_depth_question_rule_text(depth_tier: Optional[str]) -> str:
+    """İŞ EMRİ madde 4 — derinliğe göre soru kuralı, hem L1 hem L2/L3 promptunda birebir kullanılır."""
+    dt = (depth_tier or "standart").lower()
+    if dt == "kisa":
+        return ("SORU KURALI (KISA): Seçili HER kriter için yalnız 1 ana soru sor. Cevaba bağlı takip "
+                "sorusu YOK. Kriterler minimum süreden ÖNCE biterse, minimum süre dolana kadar YENİ, "
+                "BAĞIMSIZ ana sorular sormaya devam et (bunlar takip sorusu DEĞİLDİR) — seçili kriterler "
+                "hakkında farklı açılardan yeni sorular.")
+    if dt == "derin":
+        return ("SORU KURALI (DERİN): Seçili HER kriter için 1 ana soru + EN AZ 1 takip sorusu sor. Kriter "
+                "kesin ve net değerlendirilebilir olana kadar derinleştirmeye devam et.")
+    return ("SORU KURALI (STANDART): Seçili HER kriter için 1 ana soru sor; cevap ya da kriterin kendisi "
+            "net değilse takip sorusu sor.")
+
+def _build_ai_note_supremacy_text(ai_note: Optional[str]) -> str:
+    """İŞ EMRİ madde 8 — AI notu, süre/kriter/soru/puanlama/dil dahil TÜM kurallardan üstündür."""
+    if not ai_note or not ai_note.strip():
+        return ""
+    return ("AI NOTU ÜSTÜNLÜĞÜ (İŞ EMRİ madde 8): Yukarıdaki özel not bu talimattaki SÜRE, KRİTER, "
+            "SORU, PUANLAMA ve DİL kurallarının TÜM'ünün ÜSTÜNDEDİR — notta ne yazıyorsa kesinlikle "
+            "uygulanır. Tek istisna teknik zorunluluklar (55 dakika bağlantı tavanı gibi). Notta "
+            "rakamla yazılmış bir süre varsa ('30 dakika', '30 dk' gibi) mülakatın hedef süresi TABLO "
+            "yerine BU süre olur. Not, bir veya birden fazla sorunun BAŞKA bir dilde (İngilizce, Almanca "
+            "vb.) sorulmasını istiyorsa: o soruyu o dilde sor; adayın cevabını ilgili kriterde Türkçe "
+            "cevaplar gibi NORMAL puanla, AYRICA adayın o dildeki yetkinliğini ayrı, somut bir gözlem "
+            "olarak not al (rapora ayrıca yansıyacak).")
+
+_NONINTERACTIVE_5MIN_RULE = (
+    "ETKİLEŞİMSİZ MÜLAKAT (İŞ EMRİ madde 9 — YALNIZ SESLİ): Sorduğun bir soruya 5 DAKİKA boyunca "
+    "ilgili/anlamlı bir aday cevabı gelmezse mülakatı end_interview(reason='etkilesimsiz', "
+    "criteria_coverage={...}) ile kapat. Ortamdaki sesler (televizyon, arka plan konuşması, gürültü "
+    "vb.) aday cevabı SAYILMAZ. Bu 5 dakikayı kendin, konuşmanın akışından takip et — ayrı bir sistem "
+    "sayacı YOKTUR, bu tamamen senin sorumluluğundadır.")
 
 def cached_system(system_text: str) -> list:
     """Maliyet optimizasyonu: sistem prompt'u (felsefe+kurallar+kriterler+CV) her
@@ -3283,9 +3409,15 @@ def get_system_prompt(position_name: str, candidate_name: str, cv_text: Optional
         ]}
 
     lvl_cfg = get_effective_level_config(level, depth_tier)
-    criteria_text = build_criteria_text(pos["criteria"])
-    total_weight = sum(c["weight"] for c in pos["criteria"])
+    # İŞ EMRİ madde 3 — yalnız SEÇİLİ kriterler (pozisyon + profil, her gruptan ilk N) modele
+    # gösterilir/sorulur; kapsam dışı kalanlar raporda N/A olarak (madde 7) sistemce eklenir.
+    selected_criteria, _pos_out_of_scope = select_criteria_for_level(pos["criteria"], level)
+    selected_profile_criteria, _prof_out_of_scope = select_criteria_for_level(PROFILE_CRITERIA, level)
+    criteria_text = build_criteria_text(selected_criteria)
+    profile_criteria_text = build_criteria_text(selected_profile_criteria)
+    total_weight = sum(c["weight"] for c in selected_criteria)
     category = pos.get("category", "Genel")
+    depth_question_rule = _build_depth_question_rule_text(depth_tier)
 
     cv_section = ""
     if cv_text and len(cv_text.strip()) > 20:
@@ -3309,6 +3441,7 @@ ADAY ÖZEL AI NOTU — BAĞLAYICI TALİMAT (aday görmez, mutlaka uygula, opsiyo
 {ai_note.strip()[:1200]}
 Bu notu mülakat boyunca aktif bir koşul olarak uygula: notta bir konu/iddia geçiyorsa en az 1 soruyla doğrudan test/doğrula; notta bir değerlendirme önceliği belirtiliyorsa (örn. belirli bir yetkinliğe ağırlık ver) soru dağılımını buna göre şekillendir. Bu notu görmezden gelip standart akışa devam etmek KABUL EDİLEMEZ.
 Raporda bu notun nasıl ele alındığını (hangi soru/sorularla test edildi, sonucu ne oldu) Yönetici Özeti'nde veya ilgili olduğu Güçlü Yönler/Gelişim Alanları maddesinde somut olarak yansıt — ayrı bir başlık AÇMA.
+{_build_ai_note_supremacy_text(ai_note)}
 """
 
     interview_lang_name = LANGUAGE_NAMES.get(interview_language, "Türkçe")
@@ -3326,7 +3459,7 @@ Raporda bu notun nasıl ele alındığını (hangi soru/sorularla test edildi, s
     # build_report_content_prompt). Kimlik/tarih alanları artık modelden İSTENMEZ: Başlık
     # Şeridi'ni sistem candidate/interview kayıtlarından DETERMİNİSTİK üretir.
     report_body_l13 = build_report_content_prompt(
-        build_criteria_table_filled(pos["criteria"]), build_profile_table_filled())
+        build_criteria_table_filled(selected_criteria), build_criteria_table_filled(selected_profile_criteria, evidence_header="Somut Örnek + [dk] → Analiz → Sonuç"))
 
     return f"""Sen MedeX AI mülakat uzmanısın. {lang_instruction} Aday: {candidate_name}. Pozisyon: {position_name}. Kategori: {category}.
 
@@ -3334,18 +3467,24 @@ MÜLAKATÇI İLKESİ — MERKEZ (kural listesi değil, karar çerçeven):
 Amacın adayın mesleki bilgi ve yetkinlik düzeyini ölçmek. Bu amaca ulaşmak için TAM inisiyatif sendedir: senaryo/soru listesi takip etmezsin, adayı okur ve duruma göre karar verirsin. Amaca hizmet ettiğin sürece adayla tam uyumlu davranırsın. Amaç eleme değil; sahada güçlü ama mülakatta gerilen adayı da yakalamak. Bir cevabı yetersiz saymadan önce, bu gerçek bir eksiklik mi yoksa soru net değil miydi ayır.
 
 Rol: {pos['role_description']}
-Kriterler ({total_weight} puan):
+Pozisyon kriterleri ({total_weight} puan):
 {criteria_text}
+Profil kriterleri (bunlar da AYRI sorularla ölçülür, yalnız gözlemle DEĞİL):
+{profile_criteria_text}
 {candidate_profile}
 {cv_section}
 {admin_instruction}
 
 SEVİYE TALİMATI: {lvl_cfg["tone"]}
 
-DERİNLİK ({lvl_cfg["depth_label"]}): ~{lvl_cfg["minutes"]} dakika ve en az {lvl_cfg["min_q"]} ana konu bir YÖN GÖSTERGESİDİR, kesin hedef değil. Bir kriterde hâlâ net sinyal yoksa süreyi/sayıyı aşarak devam et; yeterli sinyali aldığın kriterde ısrarla soru sorma.
+SÜRE (İŞ EMRİ madde 1): Bu mülakat için minimum süre {lvl_cfg['min_mmss']}, üst sınır {lvl_cfg['max_mmss']} (dk:sn). Üst sınır AŞILMAZ; minimum süre dolmadan bitirme.
+
+{depth_question_rule}
+
+BİTİRME ŞARTI (İŞ EMRİ madde 5): Mülakat ancak İKİSİ BİRDEN sağlanınca biter: (a) minimum süre doldu VE (b) yukarıdaki SORU KURALI'nın gerektirdiği kriter/soru şartı tamamlandı. Kriterler minimum süreden önce biterse minimum süre dolana kadar sormaya devam et. Üst sınıra ulaşılırsa kriterler tamamlanmamış olsa bile kapanışa geç.
 
 İNİSİYATİF:
-- Sabit soru sırası/sayısı yok; adayın cevabına göre yön belirle.
+- Sabit soru sırası yok; adayın cevabına göre yön belirle (ama SORU KURALI'nı ihlal etme).
 - Zayıf gördüğün alanı derinleştir, güçlü gördüğün alanda oyalanma.
 - Aday bir konuyu açtıysa oradan devam et; "listeye" dönmek için zorlama.
 - Cevap yüzeyselse detay iste; doyurucuysa geç.
@@ -3354,7 +3493,7 @@ DERİNLİK ({lvl_cfg["depth_label"]}): ~{lvl_cfg["minutes"]} dakika ve en az {lv
 {INTERVIEWER_REASK_RULES}
 - Yukarıdaki "en fazla 2 kez" kuralı gereği bir kriteri YENİDEN sorduğun her mesajın EN BAŞINA `[YENIDEN]` etiketini koy (adaya gösterilmez, sistem sayar).
 
-KRİTER KAPSAMA (ÖNEMLİ — İŞ EMRİ): Amaç, tanımlı kriterlerin TAMAMININ mülakat sırasında gerçekten ölçülme fırsatı bulmasıdır — bu opsiyonel bir "varsa kontrol et" değil, mülakatın asıl işlevidir. Akış sırasında mekanik kapı YOK — sırayı sen belirlersin. Ancak mülakatı BİTİRMEDEN ÖNCE her kriteri tek tek gözden geçir: hiç dokunulmamış bir kriter varsa en az bir soru sor. Bu kontrol kapanış anındadır, akışı bölmez. Adayın verdiği TEK bir cevap birden fazla kriter için geçerli kanıt oluşturabilir — böyle bir kriteri tekrar sormaya ZORUNLU değilsin, gereksiz tekrar soru üretme. Yine de sorulamayan bir kriter kalırsa raporda "değerlendirilmedi" olarak işaretlenir — uydurma değerlendirme yapma.
+KRİTER KAPSAMA (ÖNEMLİ — İŞ EMRİ madde 3/5): Amaç, seçili kriterlerin (pozisyon + profil) TAMAMININ mülakat sırasında gerçekten ölçülme fırsatı bulmasıdır — bu opsiyonel bir "varsa kontrol et" değil, mülakatın asıl işlevidir. Akış sırasında mekanik kapı YOK — sırayı sen belirlersin. Ancak mülakatı BİTİRMEDEN ÖNCE her kriteri tek tek gözden geçir: hiç dokunulmamış bir kriter varsa en az bir soru sor. Bu kontrol kapanış anındadır, akışı bölmez. Adayın verdiği TEK bir cevap birden fazla kriter için geçerli kanıt oluşturabilir — böyle bir kriteri tekrar sormaya ZORUNLU değilsin, gereksiz tekrar soru üretme. Yine de sorulamayan bir kriter kalırsa raporda "değerlendirilmedi" olarak işaretlenir — uydurma değerlendirme yapma.
 
 İNSAN GİBİ:
 - Dinlediğini belli et, cevaba tepki ver, adayın söylediğine bağlanarak devam et — kopuk soru dizisi sorma. Doğal geçişler kur.
@@ -4606,8 +4745,8 @@ def start_interview(payload=Depends(verify_token)):
         log_ai_provider(level, "claude", "blocked")
         raise HTTPException(status_code=400, detail="Level 2/3 mülakatlar sesli (OpenAI Realtime) akışını kullanır. Lütfen /api/realtime/session üzerinden bağlanın.")
     existing = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
-    lvl_cfg = get_level_config(level)
-    total_seconds = lvl_cfg["minutes"] * 60
+    lvl_cfg = get_effective_level_config(level, (candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart") or "standart")
+    total_seconds = lvl_cfg["max_seconds"]
 
     # Level 2-3'te CV zorunlu: mülakat CV yüklenmeden başlatılamaz.
     if lvl_cfg["cv_required"] and not (candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20):
@@ -4704,17 +4843,17 @@ def interview_chat(data: ChatMessage, background_tasks: BackgroundTasks, payload
     messages.append({"role": "user", "content": data.message, "ts": _now_ts()})
     compact_memory = build_compact_memory(messages[:-1])
     q_count = sum(1 for m in messages if m.get("role") == "assistant" and "---RAPOR---" not in (m.get("content") or ""))
-    lvl_cfg = get_level_config(level)
-    # Not: q_count tavanı level'a göre yükseltildi çünkü derinleştirme/netleştirme turları da bu sayaca dahil oluyor.
-    # Süre bazlı bitiş asıl tetikleyici; sabit soru tavanı sadece maliyet/uzunluk güvenlik ağı.
-    # Level 3 adaptif: elapsed eşiği aşılsa da minimum soru sayısı daha yüksek tutulur (daha geç kesilir).
+    depth_tier = (candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart") or "standart"
+    lvl_cfg = get_effective_level_config(level, depth_tier)
+    # İŞ EMRİ madde 5 — BİTİRME ŞARTI: (a) minimum süre doldu VE (b) kriter/soru şartı tamamlandı.
+    # min_q = seçili kriter sayısı (madde 4'ün "her kritere en az 1 ana soru" tabanı). max_q
+    # yalnız maliyet/uzunluk GÜVENLİK AĞI — resmi kural değil.
     should_finish_condition = (
-        (data.elapsed_seconds > lvl_cfg["minutes"] * 60 and q_count >= lvl_cfg["min_q"])
+        (data.elapsed_seconds >= lvl_cfg["min_seconds"] and q_count >= lvl_cfg["min_q"])
         or q_count >= lvl_cfg["max_q"]
-        # MADDE 3 — metin akışı üst süre sınırı (L1/L3-metin): hedef sürenin 3 katını aşan oturum
-        # min_q sağlanmasa bile kapanışa girer. Metin turu ucuz olduğu için tavan yüksek tutuldu;
-        # gerçek bir mülakat bu sınıra ulaşmaz, yalnızca saatlerce açık kalan oturumları bağlar.
-        or data.elapsed_seconds > lvl_cfg["minutes"] * 60 * 3
+        # Üst sınıra (madde 1 tablosu) ulaşılınca da kapanışa girilir — "max = aşılmaz" hedefi
+        # bu iki aşamalı kapanış akışıyla (önce son-söz sorusu, sonra gerçek bitiş) uygulanır.
+        or data.elapsed_seconds >= lvl_cfg["max_seconds"]
     )
 
     # İKİ AŞAMALI KAPANIŞ: bitiş şartı oluştuğunda direkt rapor üretip kesmek yerine,
@@ -9098,7 +9237,16 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
                         (candidate_id, level)).fetchone()
     _dbc.close()
     _pos = get_position(candidate["position"]) if candidate else None
-    _crit = (_pos or {}).get("criteria") or []
+    # İŞ EMRİ madde 3 — yalnız SEÇİLİ kriterler (canlı görüşmede sorulanlarla AYNI liste)
+    # puanlama motoruna girer; kapsam dışı kalanlar N/A olarak (madde 7) ayrıca eklenir.
+    _crit, _pos_out_of_scope = select_criteria_for_level((_pos or {}).get("criteria") or [], level)
+    _prof_crit, _prof_out_of_scope = select_criteria_for_level(PROFILE_CRITERIA, level)
+    # İŞ EMRİ madde 6 — üst sınıra ulaşılıp ulaşılmadığı: hiç sorulamamış kriterin TABAN PUAN
+    # (payda içinde) mı yoksa eski 'Değerlendirilemedi (sistem)' (payda dışı) mı alacağını belirler.
+    _depth_tier_for_time = (candidate["depth_tier"] if candidate and "depth_tier" in candidate.keys() else "standart") or "standart"
+    _lvl_cfg_for_time = get_effective_level_config(level, _depth_tier_for_time)
+    _elapsed_s_for_time = _interview_elapsed_seconds(_ivr["started_at"] if _ivr else None)
+    _time_limit_reached = _elapsed_s_for_time is not None and _elapsed_s_for_time >= (_lvl_cfg_for_time["max_seconds"] - 10)
     try:
         _fcov = json.loads(_ivr["criteria_coverage_json"]) if (_ivr and _ivr["criteria_coverage_json"]) else None
     except Exception:
@@ -9147,7 +9295,7 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         try:
             _fixed_pos, score_position, _w1 = recompute_and_fix_score(
                 pos_raw, _crit, extract_score(pos_raw), criteria_coverage=_fcov, transcript=_ftx,
-                candidate_id=candidate_id, level=level)
+                candidate_id=candidate_id, level=level, time_limit_reached=_time_limit_reached)
             _score_warnings += list(_w1)
             # İş emri GÖREV 2 — DETERMİNİSTİK DOĞRULAYICI KAPI: yapısal G/K/E/S alanlarını denetler,
             # geçemeyeni HEDEFLİ (max 3 deneme) yeniden ürettirir, hâlâ geçemezse kriteri payda
@@ -9186,6 +9334,9 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
             pos_table_display = pos_raw
     elif pos_raw:
         pos_table_display = pos_raw
+    # İŞ EMRİ madde 7 — level kapsamı dışında kalan pozisyon kriterleri raporda N/A olarak
+    # DETERMİNİSTİK eklenir; puanlama motoruna hiç girmediler (_crit zaten seçili N ile sınırlı).
+    pos_table_display = _append_na_criteria_rows(pos_table_display, _pos_out_of_scope)
 
     # --- Kişisel ve Bilişsel Profil: aynı yöntemle, TAMAMEN AYRI bölüm metninden. ---
     score_profile = None
@@ -9204,12 +9355,13 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     if prof_raw:
         try:
             _fixed_prof, score_profile, _w2 = recompute_profile_section(
-                prof_raw, transcript=_ftx, criteria_coverage=_fcov, candidate_id=candidate_id, level=level)
+                prof_raw, transcript=_ftx, criteria_coverage=_fcov, candidate_id=candidate_id, level=level,
+                profile_criteria=_prof_crit, time_limit_reached=_time_limit_reached)
             _score_warnings += list(_w2)
-            # İş emri GÖREV 2 — AYNI doğrulayıcı kapı, K1..K6 (PROFILE_CRITERIA) için.
+            # İş emri GÖREV 2 — AYNI doğrulayıcı kapı, seçili profil kriterleri için.
             try:
                 _fixed_prof, _new_score_prof, _val_log_prof, _flag_prof = apply_structured_rationale_gate(
-                    _fixed_prof, PROFILE_CRITERIA, "K", _tview, _ftx, _gate_provider, _gate_model, candidate_id, level)
+                    _fixed_prof, _prof_crit, "K", _tview, _ftx, _gate_provider, _gate_model, candidate_id, level)
                 _scope_flagged.extend(_flag_prof)
                 if _new_score_prof is not None:
                     score_profile = _new_score_prof
@@ -9223,7 +9375,7 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
             # kriterleri için de (jenerik mekanizma — beyan hiçbir profil kriteriyle eşleşmezse no-op).
             try:
                 _fixed_prof, _new_score_prof2, _val_log_prof2 = apply_scope_clamp_transcript_wide(
-                    _fixed_prof, PROFILE_CRITERIA, _tview, "K", candidate_id, level)
+                    _fixed_prof, _prof_crit, _tview, "K", candidate_id, level)
                 if _new_score_prof2 is not None:
                     score_profile = _new_score_prof2
                 if _val_log_prof2:
@@ -9236,6 +9388,9 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         except Exception as e:
             print(f"UYARI (finalize_interview profil puanlama c={candidate_id}): {type(e).__name__}: {e}")
             prof_table_display = prof_raw
+    # İŞ EMRİ madde 7 — level kapsamı dışında kalan profil kriterleri raporda N/A olarak
+    # DETERMİNİSTİK eklenir; puanlama motoruna hiç girmediler (_prof_crit zaten seçili N ile sınırlı).
+    prof_table_display = _append_na_criteria_rows(prof_table_display, _prof_out_of_scope)
 
     # İş emri GÖREV 1.5 (VALIDATOR KALİBRASYONU) — İHLAL DAĞILIMI: hangi ihlal kaç kez, hangi
     # kriterde — validator'ın hangi kuralının fazla sert olduğu VERİYLE görülebilsin (log-only,
@@ -9259,7 +9414,7 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     # İş emri GÖREV 1.4 (VALIDATOR KALİBRASYONU, 2026-09) — kanıtlı örnek: Murat AYZİT raporunda
     # 12 kriterin 5'i (%41.7) düşmüştü. Yönetici kaydına uyarı YİNE yazılır (log-only).
     try:
-        _total_crit_n = len(_crit) + len(PROFILE_CRITERIA)
+        _total_crit_n = len(_crit) + len(_prof_crit)
         _dropped_n = len(_disqualified_entries)
         if _total_crit_n and (_dropped_n / _total_crit_n) > 0.25:
             record_system_decision(candidate_id, level, "yuksek_dusme_orani",
@@ -9291,11 +9446,11 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     else:
         _dropped_pos_names = _extract_disqualified_criteria_names(pos_table_display)
     if score_profile is None:
-        _dropped_prof_names = [pc["name"] for pc in PROFILE_CRITERIA]
+        _dropped_prof_names = [pc["name"] for pc in _prof_crit]
     else:
         _dropped_prof_names = _extract_disqualified_criteria_names(prof_table_display)
     try:
-        _puanlama_kapsami_text = render_puanlama_kapsami(_crit or [], PROFILE_CRITERIA, _dropped_pos_names, _dropped_prof_names)
+        _puanlama_kapsami_text = render_puanlama_kapsami(_crit or [], _prof_crit, _dropped_pos_names, _dropped_prof_names)
     except Exception as e:
         print(f"UYARI (finalize_interview puanlama kapsamı c={candidate_id}): {type(e).__name__}: {e}")
         _puanlama_kapsami_text = ""
@@ -9380,7 +9535,7 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
     else:
         # GÖREV 9.2 — boşluk kaybı onarımı (kriter adları glue_terms olarak verilir)
         try:
-            _glue = [c.get("name") for c in (_crit or []) if c.get("name")] + [pc["name"] for pc in PROFILE_CRITERIA]
+            _glue = [c.get("name") for c in (_crit or []) if c.get("name")] + [pc["name"] for pc in _prof_crit]
             yo_text = repair_report_spacing(yo_text, glue_terms=_glue)
             gy_text = repair_report_spacing(gy_text, glue_terms=_glue)
             ga_text = repair_report_spacing(ga_text, glue_terms=_glue)
@@ -10077,12 +10232,15 @@ MIN_L2_ANSWERED_COUNT = 3  # En az üç gerçek aday cevabı olmadan puan/ret ü
 # yüksek seçildi çünkü kesilme = aday bozuk cümle duyar = KABUL EDİLEMEZ.
 REALTIME_MAX_RESPONSE_TOKENS = 4096
 
-def realtime_safe_limit_seconds(target_seconds: int) -> int:
-    """MADDE 3 — her seviye/derinlik için sesli mülakat üst süre sınırı. Hedef sürenin 1.5 katı
-    (doğal akışı kesmez), 12 dk alt ve 55 dk üst sınırla (OpenAI Realtime platform tavanı 60 dk).
-    Sınıra ulaşınca frontend mülakatçıya doğal kapanış talimatı verir (ani kesme YOK), gecikmeli
-    zorla bitiş devreye girer — mevcut L3 mekanizmasının aynısı, artık L2'de de aktif."""
-    return int(min(55 * 60, max(12 * 60, round((target_seconds or 0) * 1.5))))
+def realtime_safe_limit_seconds(max_seconds: int, ai_note_minutes: Optional[int] = None) -> int:
+    """İŞ EMRİ — LEVEL/DERİNLİK/SÜRE/... madde 2 (ONAYLI MOTOR DEĞİŞİKLİĞİ) — sesli mülakat
+    (L2/L3) bağlantı süresi = mülakat üst sınırı (max) + 5 dakika. AI notunda rakamla yazılmış
+    süre varsa (madde 8) o süre + 5 dakika geçerli olur. Her durumda en fazla 55 dakika (OpenAI
+    Realtime platform tavanı 60 dk'ya karşı güvenlik payı — TEKNİK ZORUNLULUK, AI notu bile bunu
+    aşamaz). Sınıra ulaşınca frontend mülakatçıya doğal kapanış talimatı verir (ani kesme YOK),
+    gecikmeli zorla bitiş devreye girer — bu mekanizmaya DOKUNULMADI."""
+    base_seconds = (ai_note_minutes * 60) if ai_note_minutes else (max_seconds or 0)
+    return int(min(55 * 60, base_seconds + 5 * 60))
 
 # İŞ EMRİ — ÇOKLU TALENT MİMARİSİ / madde B: aynı candidate+level için aktif Realtime "sahiplik"
 # eşiği. Frontend heartbeat'i (/api/realtime/sync) ~25sn'de bir gelir; bu eşik bir heartbeat'in
@@ -10190,9 +10348,12 @@ async def create_realtime_session(payload=Depends(verify_token)):
 
     depth_tier = candidate.get("depth_tier") or "standart"
     depth_cfg = get_effective_level_config(candidate_level, depth_tier)
+    _ai_note_minutes = extract_ai_note_duration_minutes(candidate.get("ai_note"))
 
     pos_for_criteria = get_position(candidate["position"]) or {"criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
-    criteria_names_list = [c["name"] for c in pos_for_criteria["criteria"]]
+    _selected_pos_criteria, _ = select_criteria_for_level(pos_for_criteria["criteria"], candidate_level)
+    _selected_prof_criteria, _ = select_criteria_for_level(PROFILE_CRITERIA, candidate_level)
+    criteria_names_list = [c["name"] for c in _selected_pos_criteria] + [c["name"] for c in _selected_prof_criteria]
 
     instructions = build_l2_realtime_instructions(
         candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["interview_language"] or "tr", depth_tier, level=candidate_level
@@ -10232,11 +10393,11 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "tools": [{
                 "type": "function",
                 "name": "end_interview",
-                "description": f"Aday bitirirse, uygunsuz davranış tekrarlanırsa veya kriterlerin çoğu yaklaşık %{depth_cfg['coverage_threshold']} kanıt düzeyine ulaşırsa çağır. Her kriter için 0-100 coverage yaz.",
+                "description": f"Aday bitirirse, uygunsuz davranış tekrarlanırsa, kriterlerin çoğu yaklaşık %{depth_cfg['coverage_threshold']} kanıt düzeyine ulaşırsa VEYA aday 5 dakika boyunca ilgili cevap vermezse çağır. Her kriter için 0-100 coverage yaz.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "reason": {"type": "string", "enum": ["tamamlandı", "aday_talebi", "uygunsuz_davranis"]},
+                        "reason": {"type": "string", "enum": ["tamamlandı", "aday_talebi", "uygunsuz_davranis", "etkilesimsiz"]},
                         "criteria_coverage": {
                             "type": "object",
                             "description": "Her kriter adı için 0-100 arası tahmini kapsanma/netlik yüzdesi.",
@@ -10292,10 +10453,11 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "coverage_threshold": depth_cfg["coverage_threshold"],
             "criteria_names": criteria_names_list,
             # FAZ D: mimik kare örneklemesi bu planlanan süreye eşit dağıtılır (aralik = target_seconds/24).
-            "target_seconds": depth_cfg["minutes"] * 60,
-            # MADDE 3: sesli mülakat üst süre sınırı (L2 + L3). Frontend bu değere ulaşınca AI'a
-            # doğal kapanış talimatı verir; gecikmeli zorla bitiş devreye girer.
-            "safe_limit_seconds": realtime_safe_limit_seconds(depth_cfg["minutes"] * 60),
+            "target_seconds": depth_cfg["max_seconds"],
+            # İŞ EMRİ madde 2: sesli mülakat üst bağlantı süresi = mülakat üst sınırı (+AI notu
+            # override) + 5 dk, en fazla 55 dk. Frontend bu değere ulaşınca AI'a doğal kapanış
+            # talimatı verir; gecikmeli zorla bitiş devreye girer (mekanizma DEĞİŞMEDİ).
+            "safe_limit_seconds": realtime_safe_limit_seconds(depth_cfg["max_seconds"], _ai_note_minutes),
         }
     except AIError as e:
         raise ai_http_exception(e)
@@ -12365,7 +12527,7 @@ def _merge_evidence_pool_into_table(table_text: str, pool: dict):
     return "\n".join(lines), warnings
 
 def recompute_and_fix_score(report_body: str, position_criteria: list, model_score, criteria_coverage=None, transcript: str = None,
-                            candidate_id: int = None, level: int = None):
+                            candidate_id: int = None, level: int = None, time_limit_reached: bool = False):
     """Sunucu tarafı puanlama doğrulaması:
       - hiçbir kriter puanı kendi tavanını (pozisyon ağırlığı) aşamaz → aşan tavana sabitlenir
       - KALEM 1: 'Değerlendirilmedi' iki sebebe ayrılır:
@@ -12462,8 +12624,20 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
                 cand_missing.append({"kriter": cname, "gerekce": _gk})
                 li = best["line_idx"]
                 lines[li] = lines[li].replace(f"| {puan_cell} |", f"| 0/{cap} — Yetersiz (aday): {_gk} |", 1)
+            elif status == "not_asked" and time_limit_reached:
+                # İŞ EMRİ madde 6 — YENİ KURAL: üst sınıra ulaşıldığı için hiç sorulamamış kriter
+                # artık 'Değerlendirilemedi (sistem)' DEĞİL — TABAN PUAN (%25), PAYDA İÇİNDE.
+                floor_awarded = _insufficient_answer_floor_score(cap)
+                _gk = "üst sınıra ulaşıldığı için bu kriter hiç sorulamadı (İŞ EMRİ madde 6)"
+                denom_cap += cap
+                awarded_sum += floor_awarded
+                cand_missing.append({"kriter": cname, "gerekce": _gk, "puan_turu": "taban_puan_25_ust_sinir"})
+                if _found and puan_cell:
+                    li = best["line_idx"]
+                    lines[li] = _rewrite_criterion_cell(lines[li], puan_cell, f"{floor_awarded}/{cap}",
+                                                        f"Taban puan (üst sınıra ulaşıldı, sorulamadı): {_gk}")
             elif status == "not_asked":
-                # (a) SİSTEM kaynaklı — PAYDA DIŞI, DEĞİŞMEDİ
+                # (a) SİSTEM kaynaklı — PAYDA DIŞI, DEĞİŞMEDİ (üst sınıra ulaşılmadıysa)
                 _sysreason = "bu kriter mülakatta sorulmadı"
                 if _found and refusal:
                     warnings.append(f"'{cname}' hücrede 'ret' geçiyor ama geçerli aday cevabı yok → sistem kaynaklı eksik sayıldı (payda dışı).")
@@ -12501,7 +12675,19 @@ def recompute_and_fix_score(report_body: str, position_criteria: list, model_sco
         # Geçerli cevap varsa (valid_ask) modelin 0'ı olduğu gibi korunur (aşağıya düşer).
         if awarded == 0:
             _st0 = _criterion_ask_status(cname, criteria_coverage, transcript, _repeated_unanswered)
-            if _st0 == "not_asked":
+            if _st0 == "not_asked" and time_limit_reached:
+                # İŞ EMRİ madde 6 — üst sınıra ulaşıldığı için hiç sorulamamış kriter: TABAN PUAN.
+                floor_awarded = _insufficient_answer_floor_score(cap)
+                _sr0 = "üst sınıra ulaşıldığı için bu kriter hiç sorulamadı (İŞ EMRİ madde 6)"
+                warnings.append(f"'{cname}' modelce 0/{cap} verilmiş, kriter hiç sorulmamış ama üst sınıra ulaşıldı → taban puan {floor_awarded}/{cap} uygulandı (payda içinde).")
+                cand_missing.append({"kriter": cname, "gerekce": _sr0, "puan_turu": "taban_puan_25_ust_sinir"})
+                li = best["line_idx"]
+                lines[li] = _rewrite_criterion_cell(lines[li], puan_cell, f"{floor_awarded}/{cap}",
+                                                    f"Taban puan (üst sınıra ulaşıldı, sorulamadı): {_sr0}")
+                awarded_sum += floor_awarded
+                denom_cap += cap
+                continue
+            elif _st0 == "not_asked":
                 _sr0 = "bu kriter mülakatta sorulmadı"
                 warnings.append(f"'{cname}' modelce 0/{cap} verilmiş ama bu kriter hiç sorulmamış → 'Değerlendirilemedi (sistem)', payda dışı.")
                 sys_missing.append({"kriter": cname, "gerekce": _sr0})
@@ -12632,7 +12818,8 @@ def _canonicalize_profile_region_order(p2_text: str) -> str:
     return out if out.strip() else p2_text
 
 def recompute_profile_section(profile_region: str, transcript: str = None, criteria_coverage=None,
-                              candidate_id: int = None, level: int = None):
+                              candidate_id: int = None, level: int = None, profile_criteria: list = None,
+                              time_limit_reached: bool = False):
     """ÇİFT PUANLAMA — PUAN 2 (kişisel/bilişsel profil) bölgesi için PUAN 1 ile AYNI puanlama
     doğrulaması: kriter tavanı + aday/sistem-kaynaklı eksiklik ayrımı + değerlendirilen ağırlığa
     normalize. 'PROFİL PUANI' satırını NORMALİZE değerle yeniden yazar.
@@ -12677,7 +12864,7 @@ def recompute_profile_section(profile_region: str, transcript: str = None, crite
     denom_cap = 0
     evaluated_names = []
     sys_missing, cand_missing = [], []
-    for c in PROFILE_CRITERIA:
+    for c in (profile_criteria if profile_criteria is not None else PROFILE_CRITERIA):
         cap = _safe_int(c.get("weight"))
         cname = c.get("name", "")
         best, best_s = None, 0.0
@@ -12712,6 +12899,17 @@ def recompute_profile_section(profile_region: str, transcript: str = None, crite
                 cand_missing.append({"kriter": cname, "gerekce": _gk})
                 li = best["line_idx"]
                 lines[li] = lines[li].replace(f"| {puan_cell} |", f"| 0/{cap} — Yetersiz (aday): {_gk} |", 1)
+            elif status == "not_asked" and time_limit_reached:
+                # İŞ EMRİ madde 6 — üst sınıra ulaşıldığı için hiç sorulamamış kriter: TABAN PUAN.
+                floor_awarded = _insufficient_answer_floor_score(cap)
+                _gk = "üst sınıra ulaşıldığı için bu kriter hiç sorulamadı (İŞ EMRİ madde 6)"
+                denom_cap += cap
+                awarded_sum += floor_awarded
+                cand_missing.append({"kriter": cname, "gerekce": _gk, "puan_turu": "taban_puan_25_ust_sinir"})
+                if _found and puan_cell:
+                    li = best["line_idx"]
+                    lines[li] = _rewrite_criterion_cell(lines[li], puan_cell, f"{floor_awarded}/{cap}",
+                                                        f"Taban puan (üst sınıra ulaşıldı, sorulamadı): {_gk}")
             elif status == "not_asked":
                 _sr = "bu kriter mülakatta ölçülmedi"
                 if not _found:
@@ -12743,7 +12941,17 @@ def recompute_profile_section(profile_region: str, transcript: str = None, crite
             warnings.append(f"[PROFİL] '{cname}' payda {written_cap} yazılmış, gerçek tavan {cap} → düzeltildi.")
         if awarded == 0:
             _st0 = _criterion_ask_status(cname, criteria_coverage, transcript, _repeated_unanswered)
-            if _st0 == "not_asked":
+            if _st0 == "not_asked" and time_limit_reached:
+                floor_awarded = _insufficient_answer_floor_score(cap)
+                _sr0 = "üst sınıra ulaşıldığı için bu kriter hiç sorulamadı (İŞ EMRİ madde 6)"
+                warnings.append(f"[PROFİL] '{cname}' modelce 0/{cap} verilmiş, kriter hiç sorulmamış ama üst sınıra ulaşıldı → taban puan {floor_awarded}/{cap} uygulandı (payda içinde).")
+                cand_missing.append({"kriter": cname, "gerekce": _sr0, "puan_turu": "taban_puan_25_ust_sinir"})
+                lines[best["line_idx"]] = _rewrite_criterion_cell(lines[best["line_idx"]], puan_cell, f"{floor_awarded}/{cap}",
+                                                                  f"Taban puan (üst sınıra ulaşıldı, sorulamadı): {_sr0}")
+                awarded_sum += floor_awarded
+                denom_cap += cap
+                continue
+            elif _st0 == "not_asked":
                 _sr0 = "bu kriter mülakatta ölçülmedi"
                 warnings.append(f"[PROFİL] '{cname}' modelce 0/{cap} verilmiş ama bu kriter hiç sorulmamış → 'Değerlendirilemedi (sistem)', payda dışı.")
                 sys_missing.append({"kriter": cname, "gerekce": _sr0})
@@ -13054,8 +13262,12 @@ def build_l2_report_prompt(candidate, candidate_level: int, transcript: str,
                            criteria_coverage=None, extra_notes: str = "") -> str:
     """L2/L3 sesli rapor promptu — hem create_l2_report hem /regenerate-report kullanır."""
     pos = get_position(candidate["position"]) or {"category": "Genel", "criteria": [{"name": "Genel Yetkinlik", "weight": 100, "desc": ""}]}
-    criteria_text = build_criteria_text(pos["criteria"])
-    total_weight = sum(c["weight"] for c in pos["criteria"])
+    # İŞ EMRİ madde 3 — yalnız SEÇİLİ kriterler (canlı görüşmede sorulanlarla AYNI liste) rapor
+    # tablosuna girer; kapsam dışı kalanlar N/A olarak (madde 7) sistemce ayrıca eklenir.
+    selected_pos_criteria, _ = select_criteria_for_level(pos["criteria"], candidate_level)
+    selected_profile_criteria, _ = select_criteria_for_level(PROFILE_CRITERIA, candidate_level)
+    criteria_text = build_criteria_text(selected_pos_criteria)
+    total_weight = sum(c["weight"] for c in selected_pos_criteria)
     report_lang = LANGUAGE_NAMES.get(candidate["report_language"] or "tr", "Türkçe")
     cv_for_report = candidate["cv_text"][:7000] if candidate["cv_text"] and len(candidate["cv_text"].strip()) > 20 else "CV yüklenmemiş; sadece transkripte göre değerlendir."
     ai_note_section = ""
@@ -13069,7 +13281,7 @@ def build_l2_report_prompt(candidate, candidate_level: int, transcript: str,
     if isinstance(criteria_coverage, dict) and criteria_coverage:
         coverage_block = "\n\nMÜLAKATÇININ BİLDİRDİĞİ KRİTER KAPSANMA (0-100, destekleyici — puanı bağlamaz):\n" + \
             "\n".join(f"- {k}: ~%{int(float(v or 0))}" for k, v in criteria_coverage.items() if str(v) != "")
-    unanswered = build_unanswered_criteria(pos["criteria"], criteria_coverage, coverage_threshold)
+    unanswered = build_unanswered_criteria(selected_pos_criteria, criteria_coverage, coverage_threshold)
     unanswered_block = ""
     if unanswered:
         unanswered_block = ("\n\nKAPSANMA DÜŞÜK KRİTERLER (mülakatçının bildirdiği kapsanma eşiğin altında). Bunlar için "
@@ -13083,7 +13295,9 @@ def build_l2_report_prompt(candidate, candidate_level: int, transcript: str,
     # bunu yazmazsın.
     _has_real_ts = _transcript_has_real_timestamps(transcript)
     report_body_l2 = build_report_content_prompt(
-        build_criteria_table_filled(pos["criteria"]), build_profile_table_filled(), has_real_timestamps=_has_real_ts)
+        build_criteria_table_filled(selected_pos_criteria),
+        build_criteria_table_filled(selected_profile_criteria, evidence_header="Somut Örnek + [dk] → Analiz → Sonuç"),
+        has_real_timestamps=_has_real_ts)
     return f"""Aşağıda bir sesli iş mülakatının transkripti, aday CV'si, pozisyon kriterleri ve derinlik bilgisi vardır. İnsan kaynakları yöneticisinin karar vermesine yardım edecek, adaya özgü ve ayrıntılı bir değerlendirme raporu üret.
 
 Aday: {candidate['name']}
@@ -13226,6 +13440,7 @@ async def create_l2_report(data: RealtimeReportRequest, background_tasks: Backgr
 
     _l2_cfg = get_effective_level_config(candidate_level, candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart")
     pos_for_suff = get_position(candidate["position"]) or {"criteria": [{"name": "Genel Yetkinlik", "weight": 100}]}
+    _selected_pos_for_suff, _ = select_criteria_for_level(pos_for_suff.get("criteria") or [], candidate_level)
     _coverage = data.criteria_coverage if isinstance(data.criteria_coverage, dict) and data.criteria_coverage else None
 
     # A4: modelin bildirdiği kriter kapsanma yüzdelerini sakla (rapor + admin panel için).
@@ -13254,7 +13469,7 @@ async def create_l2_report(data: RealtimeReportRequest, background_tasks: Backgr
     _eff_answered = max(0, _safe_int(data.answered_count) - _hall_n)
     _completion_pct = min(100, round(_eff_answered / max(1, _l2_cfg["min_q"]) * 100))
     # A1: veri yeterliliği — answered_count + criteria_coverage BİRLİKTE.
-    suff = assess_data_sufficiency(_eff_answered, _l2_cfg["min_q"], _coverage, pos_for_suff.get("criteria") or [])
+    suff = assess_data_sufficiency(_eff_answered, _l2_cfg["min_q"], _coverage, _selected_pos_for_suff)
 
     # end_reason -> insana yönelik etiket + YAPILANDIRILMIŞ OLAY (C2 dar kapsam: bu bir 'kesme' değil, not).
     _reason_meta = {

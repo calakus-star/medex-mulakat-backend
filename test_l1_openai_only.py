@@ -157,7 +157,7 @@ try:
     cleanup()
     _ensure_candidate(level=LEVEL_L1)
     # lvl_cfg L1 min_q'yu aşacak kadar çok soru + elapsed süresi minutes*60'ı geçsin.
-    lvl_cfg_l1 = m.get_level_config(LEVEL_L1)
+    lvl_cfg_l1 = m.get_effective_level_config(LEVEL_L1, "standart")
     many_q = [{"role": "assistant", "content": f"Soru {i}", "ts": "2026-01-01T10:00:00"} for i in range(lvl_cfg_l1["min_q"] + 2)]
     _seed_interview(level=LEVEL_L1, messages=many_q, closing_asked=1)  # kapanış zaten soruldu -> should_finish=True
     m.anthropic.Anthropic = _FailAnthropic
@@ -165,7 +165,7 @@ try:
     m.run_deferred_finish_job = lambda *a, **k: deferred_calls_3.__setitem__("n", deferred_calls_3["n"] + 1)
     try:
         data3 = m.ChatMessage(candidate_id=TEST_CID, message="Son cevabım bu.", history=[],
-                              elapsed_seconds=lvl_cfg_l1["minutes"] * 60 + 5)
+                              elapsed_seconds=lvl_cfg_l1["min_seconds"] + 5)
         bt3 = BackgroundTasks()
         res3 = m.interview_chat(data3, bt3, payload={"role": "candidate", "candidate_id": TEST_CID,
                                                       "position": "Test Pozisyonu", "name": "Test Aday"})
