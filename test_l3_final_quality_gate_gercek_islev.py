@@ -237,9 +237,9 @@ try:
     # ============================================================
     src_job = inspect.getsource(m.run_deferred_finish_job)
     idx_finalize = src_job.find("finalize_interview(candidate_id, reply")
-    idx_reviewer = src_job.find("append_reviewer_section(candidate_id, level, transcript_text, modality_block, _pcrit)")
+    idx_reviewer = src_job.find("append_reviewer_section(candidate_id, level, transcript_text, modality_block, _pcrit, _prof_crit_sel)")
     idx_recovery = src_job.find("run_one_cikan_proje_recovery(candidate_id, level, _pcrit)")
-    idx_qg = src_job.find("run_final_report_quality_gate(candidate_id, level, _pcrit, _reviewer_findings)")
+    idx_qg = src_job.find("run_final_report_quality_gate(candidate_id, level, _pcrit, _reviewer_findings, _prof_crit_sel)")
     idx_integrity = src_job.find("run_final_deterministic_integrity_check(candidate_id, level)")
     check("K) Kaynak sırası bulundu (hepsi run_deferred_finish_job içinde)",
           all(i >= 0 for i in (idx_finalize, idx_reviewer, idx_recovery, idx_qg, idx_integrity)))
