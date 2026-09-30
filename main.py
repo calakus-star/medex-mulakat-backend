@@ -374,6 +374,21 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_error_logs_unresolved ON error_logs (resolved, severity, error_class);
 
+            CREATE TABLE IF NOT EXISTS consent_records (
+                id BIGSERIAL PRIMARY KEY,
+                candidate_id BIGINT NOT NULL,
+                level INTEGER NOT NULL,
+                org_id BIGINT,
+                tenant_name TEXT NOT NULL,
+                consent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                text_version INTEGER NOT NULL,
+                disclosure_text TEXT NOT NULL,
+                checkbox_text TEXT NOT NULL,
+                ip_address TEXT,
+                user_agent TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_consent_candidate_level ON consent_records (candidate_id, level);
+
             CREATE INDEX IF NOT EXISTS idx_candidates_email ON candidates (lower(email));
             CREATE INDEX IF NOT EXISTS idx_interviews_candidate_level ON interviews (candidate_id, level);
             CREATE INDEX IF NOT EXISTS idx_snapshots_candidate ON snapshots (candidate_id);
@@ -468,6 +483,21 @@ def init_db():
                 resolved INTEGER DEFAULT 0, resolved_at TEXT, resolved_by TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_error_logs_unresolved ON error_logs (resolved, severity, error_class);
+
+            CREATE TABLE IF NOT EXISTS consent_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                candidate_id INTEGER NOT NULL,
+                level INTEGER NOT NULL,
+                org_id INTEGER,
+                tenant_name TEXT NOT NULL,
+                consent_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                text_version INTEGER NOT NULL,
+                disclosure_text TEXT NOT NULL,
+                checkbox_text TEXT NOT NULL,
+                ip_address TEXT,
+                user_agent TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_consent_candidate_level ON consent_records (candidate_id, level);
         """)
     conn.commit()
 
@@ -3075,6 +3105,7 @@ def _tr_upper(s: str) -> str:
 
 _REPORT_SECTION_ALIASES = {
     _tr_upper("Yönetici Özeti"): "yonetici_ozeti",
+    _tr_upper("AI Notu Sonuçları"): "ai_notu_sonuclari",
     # İş emri — KAYIP ANLATI BÖLÜMLERİ (2026-09, sonraki tur) / GÖREV 1.1 — eski (2026-09-08
     # öncesi) rapor formatında Yönetici Özeti ile kriter tabloları ARASINDA bir anlatı katmanı
     # vardı (Analitik Düşünme, Problem Çözme, Kavrama ve İletişim, Öne Çıkan Proje, CV↔Mülakat↔
@@ -3121,7 +3152,7 @@ def parse_llm_report_sections(text: str) -> dict:
         out[key] = content
     return out
 
-def build_report_content_prompt(criteria_table_filled: str, profile_table_filled: str, has_real_timestamps: bool = False) -> str:
+def build_report_content_prompt(criteria_table_filled: str, profile_table_filled: str, has_real_timestamps: bool = False, has_ai_note: bool = False) -> str:
     """Modelden istenen TEK gövde: 13 bölüm, ===BAŞLIK=== ayraçlı. L1/L2/L3 ORTAK — seviyeler
     arası içerik farkı yoktur; CV yoksa/kamera-ses yoksa ilgili içerik zaten deterministik
     katmanda atlanır, modele ayrı bir 'seviye talimatı' verilmesine gerek yok.
@@ -3137,11 +3168,21 @@ def build_report_content_prompt(criteria_table_filled: str, profile_table_filled
     instructions) — fiziksel çıktı sırası KANIT HAVUZU → TABLO'dur, model puanı kanıtı yazdıktan
     SONRA üretir. has_real_timestamps, kaynak transkriptte gerçek [mm:ss] olup olmadığına göre
     havuz talimatının timestamp beklentisini ayarlar (bkz. _transcript_has_real_timestamps)."""
+    _ai_notu_sonuclari_section = (
+        "\n\n===AI NOTU SONUÇLARI===\n"
+        "Adaya özel AI notunda verilen talimatların SONUÇLARINI TEK BİR PARAGRAF olarak yaz (başlık/alt başlık kullanma, "
+        "madde işareti kullanma — düz paragraf). Örnekler: notla başka bir dilde sorulan soru(lar)ın cevabı ve adayın o "
+        "dildeki yetkinliği; notla eklenmesi istenen ekstra kriter(ler)in değerlendirmesi. Ekstra kriterleri \"istenen "
+        "ekstra yetkinliklerde eksiklik/fazlalık\" çerçevesinde anlat (adayın bu ekstra beklentiyi ne ölçüde "
+        "karşıladığı/karşılamadığı). AÇIKÇA belirt ki bu ekstra değerlendirme Pozisyon/Profil puanlarını ETKİLEMEZ. "
+        "Notta gerçekten karşılığı olmayan bir konu için cümle UYDURMA. Somut bir şey yoksa YOK yaz."
+    ) if has_ai_note else ""
     return f"""Aşağıdaki bölümleri, TAM OLARAK bu sırayla ve TAM OLARAK bu ayraçlarla üret. Ayraç satırlarını (===...===) AYNEN kopyala; başka hiçbir başlık/ayraç EKLEME. Bir bölümde yazacak GERÇEKTEN somut bir şey yoksa o bölümün içeriğine SADECE "YOK" yaz (sistem o bölümü rapordan çıkarır) — asla "belirtilecek bir şey yok" gibi dolgu cümle kurma, asla "-", "—" veya "bulunmamaktadır" yazma. Aşağıdaki HİÇBİR bölümde yasak kalıp (banned_phrase_hits — "daha fazla/somut/derin ... gerekmektedir/beklenmektedir/gerektiği" ailesi, "beklenmiştir" ailesi) KULLANMA; sistem bunu tespit edip o CÜMLEYİ siler. Hiçbir bölümde bir kriterin KANIT alanındaki veya Pozisyon/Profil tablolarındaki cümleyi AYNEN tekrar ETME. Sorulmamış bir konuda eksiklik/olumsuz yargı YAZMA.
 
 ===YÖNETİCİ ÖZETİ===
 2-3 kısa paragraf, TOPLAM yaklaşık 150-250 kelime (bu sınırı AŞMA). İçerik: aday kim, hangi deneyime sahip; mülakatta NEYİ SOMUT OLARAK gösterdi; hangi konularda güçlü, hangi konularda değil; pozisyona uygunluk açısından sonuç. Dakika damgası KULLANMA (detay aşağıdaki bölümlerde). Bir karar/öneri kelimesi (Reddet/İşe Al/Değerlendir vb.) YAZMA — karar ayrı, sistem tarafından üretilir. Aşağıdaki bölümlerdeki cümleleri AYNEN kopyalama.
 KESİN YASAK — GELECEĞE DÖNÜK BEKLENTİ CÜMLESİ KURMA ("aday X yapmalı/sunmalı/göstermeli", "...beklenmektedir", "...gerekmektedir/gerektiği" gibi "adayın NE YAPMASI GEREKTİĞİ" cümleleri) — bu özet adayın MÜLAKATTA NE YAPTIĞINI/GÖSTERDİĞİNİ anlatır, ne yapması gerektiğini DEĞİL (o Gelişim Alanları'nın işi). Bu ihlal edilirse sistem cümleyi SİLER.
+{_ai_notu_sonuclari_section}
 
 ===ANALİTİK DÜŞÜNME VE MUHAKEME===
 1-2 cümle, EN AZ BİR [dk] damgasıyla: adayın problemi nasıl parçaladığı, neden-sonuç kurma biçimi, veri/örnek kullanımı — somut. Pozisyon/Profil tablolarındaki gerekçenin TEKRARI OLMAYACAK (orada puan gerekçesi var, burada niteliksel bir gözlem). Somut bir şey yoksa YOK yaz.
@@ -3463,7 +3504,8 @@ Raporda bu notun nasıl ele alındığını (hangi soru/sorularla test edildi, s
     # build_report_content_prompt). Kimlik/tarih alanları artık modelden İSTENMEZ: Başlık
     # Şeridi'ni sistem candidate/interview kayıtlarından DETERMİNİSTİK üretir.
     report_body_l13 = build_report_content_prompt(
-        build_criteria_table_filled(selected_criteria), build_criteria_table_filled(selected_profile_criteria, evidence_header="Somut Örnek + [dk] → Analiz → Sonuç"))
+        build_criteria_table_filled(selected_criteria), build_criteria_table_filled(selected_profile_criteria, evidence_header="Somut Örnek + [dk] → Analiz → Sonuç"),
+        has_ai_note=bool(ai_note and ai_note.strip()))
 
     return f"""Sen MedeX AI mülakat uzmanısın. {lang_instruction} Aday: {candidate_name}. Pozisyon: {position_name}. Kategori: {category}.
 
@@ -4725,6 +4767,191 @@ def candidate_login(data: CandidateLogin, db=Depends(db_dep)):
         }
     }
 
+# ============================================================
+# İŞ EMRİ — BAŞLANGIÇ EKRANI, KVKK ONAYI, ONAY KAYDI, AI NOTU RAPORU
+# ============================================================
+# Aydınlatma metni ve onay kutusu metni SÜRÜM numarasıyla tutulur (madde 2). Metin değişirse
+# yeni bir sürüm eklenir (eskisi SİLİNMEZ — geçmiş onay kayıtları kendi sürümünün TAM metnini
+# ayrıca sakladığı için buradaki metin ileride değişse bile geçmiş kayıtlar etkilenmez).
+CURRENT_CONSENT_VERSION = 1
+_CONSENT_CHECKBOX_TEMPLATE_V1 = (
+    "Aydınlatma Metni'ni okudum. Ses, görüntü ve CV verilerimin {tenant} tarafından yapay zekâ ile "
+    "analiz edilerek işlenmesine ve bu amaçla yurt dışındaki yapay zekâ hizmet sağlayıcılarına "
+    "aktarılmasına açık rıza veriyorum."
+)  # {tenant} -> _current_consent_texts() içinde .replace() ile doldurulur
+_CONSENT_DISCLOSURE_TEMPLATE_V1 = """AI MÜLAKAT UYGULAMASI ADAY AYDINLATMA METNİ
+
+İşbu aydınlatma metni, 6698 sayılı Kişisel Verilerin Korunması Kanunu'nun
+(KVKK) 10. maddesi uyarınca, veri sorumlusu sıfatıyla mülakat süreçlerini
+yürüten ve bu mülakat bağlantısı/daveti vasıtasıyla pozisyonuna başvuru
+yaptığınız {tenant} tarafından, iş başvurusu ve değerlendirme
+süreçlerine ilişkin olarak sizleri bilgilendirmek amacıyla hazırlanmıştır.
+
+Mülakatın gerçekleştirildiği yapay zekâ tabanlı dijital platformun teknik
+altyapısı {tenant} tarafından sağlanmaktadır.
+
+1. Veri Sorumlusunun Kimliği
+Kişisel verileriniz; veri sorumlusu sıfatıyla, size bu mülakat davetini
+gönderen ve ilana başvurduğunuz {tenant} tarafından işlenmektedir.
+
+2. İşlenen Kişisel Verileriniz
+- Kimlik ve İletişim Bilgileri: Ad, soyad, e-posta adresi, telefon numarası.
+- Mesleki Deneyim Bilgileri: Özgeçmişinizde (CV) yer alan eğitim durumu,
+  iş deneyimleri, sertifikalar, yabancı dil bilgisi ve yetkinlikler.
+- Görsel ve İşitsel Kayıtlar: Yapay zekâ mülakatı sırasında sistem
+  tarafından kaydedilen sesiniz, görüntünüz ve mülakat sorularına
+  verdiğiniz yanıtlar.
+- Yapay Zekâ Analiz Verileri: Mülakat sırasındaki cevaplarınızın, ses
+  tonunuzun ve ifadelerinizin yapay zekâ algoritmaları tarafından analiz
+  edilmesiyle oluşan değerlendirme skorları ve raporlar.
+- İşlem Güvenliği ve Onay Kayıtları: Onay verdiğiniz tarih ve saat,
+  IP adresiniz, tarayıcı bilgileriniz ve onayladığınız metnin sürümü.
+
+3. Kişisel Verilerin İşlenme Amaçları ve Hukuki Sebepleri
+- Sözleşmenin Kurulması veya İfası (Madde 5/2-c): İş başvuru sürecinizin
+  yürütülmesi, pozisyona uygunluğunuzun tespiti ve sizinle iletişim
+  kurulması.
+- Veri Sorumlusunun Meşru Menfaati (Madde 5/2-f): İşe alım süreçlerinin
+  yapay zekâ desteğiyle objektif, hızlı ve verimli bir şekilde optimize
+  edilmesi; onay kayıtlarının, verdiğiniz onayın ispatı amacıyla
+  saklanması.
+- Açık Rıza (Madde 5/1): Özgeçmişinizde kendi isteğinizle paylaştığınız
+  özel nitelikli kişisel verilerin işlenmesi ile mülakat esnasında ses ve
+  görüntü analizi yapan yapay zekâ sisteminin kullanılması.
+
+4. Yapay Zekâ ile Otomatik Karar Verme Süreçleri
+Mülakat sürecinde, verdiğiniz yanıtlar ve yetkinlikleriniz yapay zekâ
+algoritmaları tarafından ön değerlendirmeye tabi tutulmaktadır. Ancak işe
+alım sürecindeki nihai karar tamamen insan ({tenant} insan kaynakları
+yetkilileri) tarafından verilmekte olup, sadece yapay zekâ analizine
+dayalı otomatik bir karar mekanizması uygulanmamaktadır.
+
+5. Kişisel Verilerin Aktarılması
+Kişisel verileriniz; işe alım sürecinin yürütülmesi amacıyla ve yasal
+zorunluluklar dahilinde yetkili kamu kurum ve kuruluşları ile KVKK'nın 8.
+ve 9. maddelerine uygun olarak paylaşılabilecektir.
+Mülakat sırasındaki ses, görüntü ve yanıtlarınız ile özgeçmiş bilgileriniz,
+yapay zekâ analizinin gerçekleştirilebilmesi amacıyla, açık rızanıza
+dayanarak ve KVKK'nın 9. maddesi uyarınca, yurt dışında yerleşik yapay
+zekâ hizmet sağlayıcılarına aktarılmaktadır.
+
+6. Kişisel Veri Toplamanın Yöntemi
+Kişisel verileriniz, bu dijital platform üzerinden özgeçmişinizi
+yüklemeniz, başvuru formunu doldurmanız, onay vermeniz ve kamera/mikrofon
+erişimi aracılığıyla yapay zekâ mülakatını tamamlamanız suretiyle tamamen
+otomatik yöntemlerle toplanmaktadır.
+
+7. Haklarınız
+KVKK'nın 11. maddesi uyarınca {tenant}'na başvurarak;
+a) kişisel verilerinizin işlenip işlenmediğini öğrenme,
+b) işlenmişse buna ilişkin bilgi talep etme,
+c) işlenme amacını ve amacına uygun kullanılıp kullanılmadığını öğrenme,
+ç) yurt içinde veya yurt dışında aktarıldığı üçüncü kişileri bilme,
+d) eksik veya yanlış işlenmişse düzeltilmesini isteme,
+e) silinmesini veya yok edilmesini isteme,
+f) (d) ve (e) bentleri uyarınca yapılan işlemlerin, verilerin aktarıldığı
+   üçüncü kişilere bildirilmesini isteme,
+g) münhasıran otomatik sistemler vasıtasıyla analiz edilmesi suretiyle
+   aleyhinize bir sonucun ortaya çıkmasına itiraz etme,
+ğ) kanuna aykırı olarak işlenmesi sebebiyle zarara uğramanız hâlinde
+   zararın giderilmesini talep etme
+haklarına sahipsiniz.
+
+İletişim: [sonradan eklenecek]"""
+
+CONSENT_TEXT_VERSIONS = {
+    1: {"disclosure": _CONSENT_DISCLOSURE_TEMPLATE_V1, "checkbox": _CONSENT_CHECKBOX_TEMPLATE_V1},
+}
+
+def resolve_tenant_name(candidate) -> str:
+    """Madde 2 — {tenant adı}: adayı davet eden organizasyonun sistemdeki adı. candidate.org_id
+    doluysa o organizasyonun adı; boşsa (eski/genel havuz kaydı) sistemin varsayılan
+    organizasyonuna (slug='medex') düşer — organizations tablosu/alanı sistemde HER ZAMAN var,
+    yalnız bazı eski aday kayıtlarında org_id boş olabilir."""
+    org_id = candidate["org_id"] if (candidate and "org_id" in candidate.keys()) else None
+    db = get_db()
+    try:
+        if org_id:
+            row = db.execute("SELECT name FROM organizations WHERE id=?", (org_id,)).fetchone()
+            if row and row["name"]:
+                return row["name"]
+        row = db.execute("SELECT name FROM organizations WHERE slug=?", ("medex",)).fetchone()
+        return row["name"] if row else "MedeX"
+    finally:
+        db.close()
+
+def _current_consent_texts(tenant_name: str) -> dict:
+    v = CONSENT_TEXT_VERSIONS[CURRENT_CONSENT_VERSION]
+    return {
+        "version": CURRENT_CONSENT_VERSION,
+        "disclosure_text": v["disclosure"].replace("{tenant}", tenant_name),
+        "checkbox_text": v["checkbox"].replace("{tenant}", tenant_name),
+    }
+
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+def has_consent(candidate_id: int, level: int) -> bool:
+    db = get_db()
+    try:
+        row = db.execute("SELECT id FROM consent_records WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+        return row is not None
+    finally:
+        db.close()
+
+@app.get("/api/consent/current")
+def get_current_consent(payload=Depends(verify_token)):
+    if payload.get("role") != "candidate":
+        raise HTTPException(status_code=403, detail="Yetkisiz")
+    candidate_id = payload["candidate_id"]
+    db = get_db()
+    candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+    db.close()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Aday kaydı bulunamadı")
+    tenant_name = resolve_tenant_name(candidate)
+    texts = _current_consent_texts(tenant_name)
+    return {
+        "tenant_name": tenant_name,
+        "already_given": has_consent(candidate_id, candidate["level"] or 1),
+        **texts,
+    }
+
+@app.post("/api/consent/accept")
+def accept_consent(request: Request, payload=Depends(verify_token)):
+    if payload.get("role") != "candidate":
+        raise HTTPException(status_code=403, detail="Yetkisiz")
+    candidate_id = payload["candidate_id"]
+    db = get_db()
+    candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+    if not candidate:
+        db.close()
+        raise HTTPException(status_code=404, detail="Aday kaydı bulunamadı")
+    level = candidate["level"] or 1
+    # Madde 4 — onay kaydı silinmez ve değiştirilemez: tekrar çağrılırsa (sayfa yenileme vb.)
+    # var olan kaydı AYNEN döner, yeni satır YAZILMAZ / eskisi GÜNCELLENMEZ.
+    existing = db.execute("SELECT * FROM consent_records WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+    if existing:
+        db.close()
+        return {"ok": True, "already_given": True, "consent_at": existing["consent_at"]}
+    tenant_name = resolve_tenant_name(candidate)
+    texts = _current_consent_texts(tenant_name)
+    org_id = candidate["org_id"] if "org_id" in candidate.keys() else None
+    ip = _client_ip(request)
+    user_agent = (request.headers.get("user-agent") or "")[:500]
+    db.execute(
+        "INSERT INTO consent_records (candidate_id, level, org_id, tenant_name, text_version, disclosure_text, checkbox_text, ip_address, user_agent) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (candidate_id, level, org_id, tenant_name, texts["version"], texts["disclosure_text"], texts["checkbox_text"], ip, user_agent)
+    )
+    db.commit()
+    row = db.execute("SELECT consent_at FROM consent_records WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+    db.close()
+    return {"ok": True, "already_given": False, "consent_at": row["consent_at"] if row else None}
+
 @app.post("/api/interview/start")
 def start_interview(payload=Depends(verify_token)):
     if payload.get("role") != "candidate":
@@ -4748,6 +4975,12 @@ def start_interview(payload=Depends(verify_token)):
         db.close()
         log_ai_provider(level, "claude", "blocked")
         raise HTTPException(status_code=400, detail="Level 2/3 mülakatlar sesli (OpenAI Realtime) akışını kullanır. Lütfen /api/realtime/session üzerinden bağlanın.")
+
+    # İŞ EMRİ — BAŞLANGIÇ EKRANI/KVKK madde 1 — onay verilmeden mülakat başlamaz.
+    if not has_consent(candidate_id, level):
+        db.close()
+        raise HTTPException(status_code=403, detail="Mülakata başlamadan önce KVKK onayı vermeniz gerekiyor.")
+
     existing = db.execute("SELECT * FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
     lvl_cfg = get_effective_level_config(level, (candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart") or "standart", candidate["ai_note"] if "ai_note" in candidate.keys() else None)
     total_seconds = lvl_cfg["max_seconds"]
@@ -9481,6 +9714,11 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
 
     # --- Rapor gövdesi: yalnız GERÇEKTEN içeriği olan bölümler, kanonik sırada (iş emri madde 3). ---
     yo_text = sections.get("yonetici_ozeti", "")
+    # İŞ EMRİ — AI NOTU RAPORU madde 6 — AI notu VARSA, model bu talimatın sonuçlarını AYRI bir
+    # ===AI NOTU SONUÇLARI=== bölümünde yazar (bkz. build_report_content_prompt); sistem bunu
+    # BAŞLIKSIZ bir paragraf olarak Yönetici Özeti'nin HEMEN ALTINA ekler (aşağıda, parts listesi).
+    # AI notu YOKSA bu bölüm modelden hiç istenmedi — boş kalır, paragraf eklenmez.
+    ai_notu_sonuclari_text = sections.get("ai_notu_sonuclari", "") if (candidate and candidate["ai_note"] and candidate["ai_note"].strip()) else ""
     gy_text = sections.get("guclu_yonler", "")
     ga_text = sections.get("gelisim_alanlari", "")
     tm_text = sections.get("takip_sorulari", "")
@@ -9750,6 +9988,8 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
         parts = []
         if yo_text:
             parts.append("**Yönetici Özeti:**\n" + yo_text)
+        if ai_notu_sonuclari_text:
+            parts.append(ai_notu_sonuclari_text)
         # İş emri — KAYIP ANLATI BÖLÜMLERİ / GÖREV 1.1 — Puanlama Kapsamı (deterministik, HER
         # ZAMAN) + anlatı bölümleri, Yönetici Özeti'nden SONRA, kriter tablolarından ÖNCE (eski
         # rapor formatındaki yerleri; ADIM 2 ile Genel Kanı da BU bloğa taşındı).
@@ -10354,6 +10594,10 @@ async def create_realtime_session(payload=Depends(verify_token)):
             "message": "Bu mülakat için zaten aktif bir canlı oturum var. Lütfen diğer sekmeyi/pencereyi kapatıp birkaç saniye sonra tekrar deneyin.",
             "error_class": "session_already_active", "retryable": False,
         })
+
+    # İŞ EMRİ — BAŞLANGIÇ EKRANI/KVKK madde 1 — onay verilmeden mikrofon istenmez/mülakat başlamaz.
+    if not has_consent(candidate_id, candidate_level):
+        raise HTTPException(status_code=403, detail="Mülakata başlamadan önce KVKK onayı vermeniz gerekiyor.")
 
     depth_tier = candidate.get("depth_tier") or "standart"
     depth_cfg = get_effective_level_config(candidate_level, depth_tier, candidate.get("ai_note"))
@@ -13306,7 +13550,7 @@ def build_l2_report_prompt(candidate, candidate_level: int, transcript: str,
     report_body_l2 = build_report_content_prompt(
         build_criteria_table_filled(selected_pos_criteria),
         build_criteria_table_filled(selected_profile_criteria, evidence_header="Somut Örnek + [dk] → Analiz → Sonuç"),
-        has_real_timestamps=_has_real_ts)
+        has_real_timestamps=_has_real_ts, has_ai_note=bool(candidate["ai_note"] and candidate["ai_note"].strip()))
     return f"""Aşağıda bir sesli iş mülakatının transkripti, aday CV'si, pozisyon kriterleri ve derinlik bilgisi vardır. İnsan kaynakları yöneticisinin karar vermesine yardım edecek, adaya özgü ve ayrıntılı bir değerlendirme raporu üret.
 
 Aday: {candidate['name']}
@@ -13614,6 +13858,94 @@ def _insert_heading_breaks(text):
     if not text:
         return text
     return re.sub(r'(?<!\n)(\*\*[^*\n]+:\*\*)', r'\n\1', text)
+
+# İŞ EMRİ — BAŞLANGIÇ EKRANI/KVKK madde 5 — onay kaydı ayrı PDF belge olarak indirilebilir
+# (madde 4'teki tüm bilgiler, onaylanan metnin tam hali dahil).
+def _make_consent_pdf(candidate: dict, consent: dict):
+    try:
+        from reportlab.lib import colors as rl_colors
+        from reportlab.lib.enums import TA_CENTER
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF kütüphanesi yüklenemedi: {e}")
+
+    def register_unicode_font():
+        import glob
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        ]
+        bold_candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        ]
+        try:
+            candidates += sorted(glob.glob("/nix/store/*dejavu*/share/fonts/**/DejaVuSans.ttf", recursive=True))
+            bold_candidates += sorted(glob.glob("/nix/store/*dejavu*/share/fonts/**/DejaVuSans-Bold.ttf", recursive=True))
+        except Exception:
+            pass
+        regular = next((f for f in candidates if os.path.exists(f)), None)
+        bold = next((f for f in bold_candidates if os.path.exists(f)), None)
+        if regular:
+            pdfmetrics.registerFont(TTFont("MedeXConsentFont", regular))
+            pdfmetrics.registerFont(TTFont("MedeXConsentFont-Bold", bold or regular))
+            return "MedeXConsentFont", "MedeXConsentFont-Bold"
+        try:
+            import reportlab as _rl
+            rl_dir = os.path.dirname(_rl.__file__)
+            vera_regular = os.path.join(rl_dir, "fonts", "Vera.ttf")
+            vera_bold = os.path.join(rl_dir, "fonts", "VeraBd.ttf")
+            if os.path.exists(vera_regular):
+                pdfmetrics.registerFont(TTFont("MedeXConsentFont", vera_regular))
+                pdfmetrics.registerFont(TTFont("MedeXConsentFont-Bold", vera_bold if os.path.exists(vera_bold) else vera_regular))
+                return "MedeXConsentFont", "MedeXConsentFont-Bold"
+        except Exception:
+            pass
+        return "Helvetica", "Helvetica-Bold"
+
+    font_regular, font_bold = register_unicode_font()
+
+    def ptxt(value):
+        return xml_escape(str(value if value is not None else "-")).replace("\n", "<br/>")
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=1.6*cm, leftMargin=1.6*cm, topMargin=1.4*cm, bottomMargin=1.2*cm)
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="ConsentTitle", parent=styles["Title"], fontName=font_bold, fontSize=17, leading=21, textColor=rl_colors.HexColor("#1e3a5f"), alignment=TA_CENTER, spaceAfter=10))
+    styles.add(ParagraphStyle(name="ConsentSection", parent=styles["Heading2"], fontName=font_bold, fontSize=12, leading=15, textColor=rl_colors.HexColor("#1e3a5f"), spaceBefore=10, spaceAfter=6))
+    styles.add(ParagraphStyle(name="ConsentBody", parent=styles["BodyText"], fontName=font_regular, fontSize=9.3, leading=13, textColor=rl_colors.HexColor("#0f172a"), wordWrap="CJK"))
+
+    story = [Paragraph("KVKK Onay Kaydı", styles["ConsentTitle"]), Spacer(1, 6)]
+    story.append(Paragraph("Bilgiler", styles["ConsentSection"]))
+    info_lines = [
+        f"<b>Aday:</b> {ptxt(candidate.get('name'))}",
+        f"<b>Pozisyon:</b> {ptxt(candidate.get('position'))}",
+        f"<b>Seviye:</b> Level {ptxt(consent.get('level') or candidate.get('level') or 1)}",
+        f"<b>Kurum (tenant):</b> {ptxt(consent.get('tenant_name'))}",
+        f"<b>Onay tarih-saati:</b> {ptxt(consent.get('consent_at'))}",
+        f"<b>Metin sürümü:</b> {ptxt(consent.get('text_version'))}",
+        f"<b>IP adresi:</b> {ptxt(consent.get('ip_address'))}",
+        f"<b>Tarayıcı bilgisi:</b> {ptxt(consent.get('user_agent'))}",
+    ]
+    for line in info_lines:
+        story.append(Paragraph(line, styles["ConsentBody"]))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("Onaylanan Onay Kutusu Metni", styles["ConsentSection"]))
+    story.append(Paragraph(ptxt(consent.get("checkbox_text")), styles["ConsentBody"]))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("Onaylanan Aydınlatma Metni (tam hali)", styles["ConsentSection"]))
+    story.append(Paragraph(ptxt(consent.get("disclosure_text")), styles["ConsentBody"]))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
 
 def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     try:
@@ -14179,6 +14511,22 @@ def download_interview_pdf(candidate_id: int, level: Optional[int] = None, paylo
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", candidate["name"] or "aday")
     return StreamingResponse(pdf, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=medex_report_{safe_name}.pdf"})
 
+# İŞ EMRİ — BAŞLANGIÇ EKRANI/KVKK madde 5 — onay kaydı ayrı PDF.
+@app.get("/api/admin/interviews/{candidate_id}/consent-pdf")
+def download_consent_pdf(candidate_id: int, level: Optional[int] = None, payload=Depends(verify_admin), db=Depends(db_dep)):
+    scoped_org_id = get_org_id_for_admin(db, payload)
+    candidate = db.execute("SELECT * FROM candidates WHERE id=? AND org_id=?", (candidate_id, scoped_org_id)).fetchone()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Aday bulunamadı")
+    target_level = level if level is not None else (candidate["level"] or 1)
+    consent = db.execute(
+        "SELECT * FROM consent_records WHERE candidate_id=? AND level=?", (candidate_id, target_level)).fetchone()
+    if not consent:
+        raise HTTPException(status_code=404, detail="Bu mülakat için KVKK onay kaydı bulunamadı.")
+    pdf = _make_consent_pdf(dict(candidate), dict(consent))
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", candidate["name"] or "aday")
+    return StreamingResponse(pdf, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=kvkk_onay_{safe_name}.pdf"})
+
 # ---- Admin Report Detail ----
 @app.get("/api/admin/interviews/{candidate_id}")
 def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depends(verify_admin), db=Depends(db_dep)):
@@ -14203,6 +14551,11 @@ def get_interview(candidate_id: int, level: Optional[int] = None, payload=Depend
     if not interview:
         raise HTTPException(status_code=404, detail="Mülakat bulunamadı")
     result = dict(interview)
+    # İŞ EMRİ — BAŞLANGIÇ EKRANI/KVKK madde 5 — admin panelinde onay durumu.
+    consent_row = db.execute(
+        "SELECT id, tenant_name, consent_at, text_version, disclosure_text, checkbox_text, ip_address, user_agent "
+        "FROM consent_records WHERE candidate_id=? AND level=?", (candidate_id, level)).fetchone()
+    result["consent"] = dict(consent_row) if consent_row else None
     result["usage_logs"] = [dict(r) for r in usage_rows]
     result["usage_total_tokens"] = sum(_safe_int(r["total_tokens"]) for r in usage_rows)
     result["usage_total_cost_usd"] = round(sum((r["estimated_cost_usd"] or 0) for r in usage_rows), 4)

@@ -48,6 +48,13 @@ def _ensure_candidate(level=LEVEL_L1, cv_text="Lisans mezunu, 4 yıl deneyim."):
             db.execute("INSERT INTO candidates (id, name, position, cv_text, level, interview_language, report_language) VALUES (?, ?, ?, ?, ?, ?, ?)",
                        (TEST_CID, "Test Aday", "Test Pozisyonu", cv_text, level, "tr", "tr"))
         db.commit()
+        # İŞ EMRİ — BAŞLANGIÇ EKRANI/KVKK madde 1 — onay yoksa start_interview artık 403 döner;
+        # bu test dosyası mülakat AKIŞINI test ediyor, KVKK kapısını değil — testin kendi
+        # candidate'ı için onayı burada önceden veriyoruz.
+        db.execute("DELETE FROM consent_records WHERE candidate_id=? AND level=?", (TEST_CID, level))
+        db.execute("INSERT INTO consent_records (candidate_id, level, tenant_name, text_version, disclosure_text, checkbox_text) VALUES (?, ?, ?, ?, ?, ?)",
+                   (TEST_CID, level, "Test Tenant", 1, "test disclosure", "test checkbox"))
+        db.commit()
     finally:
         db.close()
 
@@ -77,6 +84,7 @@ def cleanup():
     try:
         for lv in (LEVEL_L1, LEVEL_L2, LEVEL_L3):
             db.execute("DELETE FROM interviews WHERE candidate_id=? AND level=?", (TEST_CID, lv))
+            db.execute("DELETE FROM consent_records WHERE candidate_id=? AND level=?", (TEST_CID, lv))
         db.execute("DELETE FROM candidates WHERE id=?", (TEST_CID,))
         db.commit()
     finally:
