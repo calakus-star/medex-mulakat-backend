@@ -3174,8 +3174,8 @@ def build_report_content_prompt(criteria_table_filled: str, profile_table_filled
         "madde işareti kullanma — düz paragraf). Örnekler: notla başka bir dilde sorulan soru(lar)ın cevabı ve adayın o "
         "dildeki yetkinliği; notla eklenmesi istenen ekstra kriter(ler)in değerlendirmesi. Ekstra kriterleri \"istenen "
         "ekstra yetkinliklerde eksiklik/fazlalık\" çerçevesinde anlat (adayın bu ekstra beklentiyi ne ölçüde "
-        "karşıladığı/karşılamadığı). AÇIKÇA belirt ki bu ekstra değerlendirme Pozisyon/Profil puanlarını ETKİLEMEZ. "
-        "Notta gerçekten karşılığı olmayan bir konu için cümle UYDURMA. Somut bir şey yoksa YOK yaz."
+        "karşıladığı/karşılamadığı). Notta gerçekten karşılığı olmayan bir konu için cümle UYDURMA. "
+        "Somut bir şey yoksa YOK yaz."
     ) if has_ai_note else ""
     return f"""Aşağıdaki bölümleri, TAM OLARAK bu sırayla ve TAM OLARAK bu ayraçlarla üret. Ayraç satırlarını (===...===) AYNEN kopyala; başka hiçbir başlık/ayraç EKLEME. Bir bölümde yazacak GERÇEKTEN somut bir şey yoksa o bölümün içeriğine SADECE "YOK" yaz (sistem o bölümü rapordan çıkarır) — asla "belirtilecek bir şey yok" gibi dolgu cümle kurma, asla "-", "—" veya "bulunmamaktadır" yazma. Aşağıdaki HİÇBİR bölümde yasak kalıp (banned_phrase_hits — "daha fazla/somut/derin ... gerekmektedir/beklenmektedir/gerektiği" ailesi, "beklenmiştir" ailesi) KULLANMA; sistem bunu tespit edip o CÜMLEYİ siler. Hiçbir bölümde bir kriterin KANIT alanındaki veya Pozisyon/Profil tablolarındaki cümleyi AYNEN tekrar ETME. Sorulmamış bir konuda eksiklik/olumsuz yargı YAZMA.
 
@@ -13861,6 +13861,27 @@ def _insert_heading_breaks(text):
 
 # İŞ EMRİ — BAŞLANGIÇ EKRANI/KVKK madde 5 — onay kaydı ayrı PDF belge olarak indirilebilir
 # (madde 4'teki tüm bilgiler, onaylanan metnin tam hali dahil).
+# DÜZELTME — KVKK onay saati Türkiye saatiyle (Europe/Istanbul, sabit UTC+3, 2016'dan beri DST
+# yok) gösterilir; DB'deki değer (UTC, CURRENT_TIMESTAMP) DEĞİŞMEZ — yalnız GÖRÜNÜM dönüşümü.
+# Aynı sabit +3 kalıbı _make_report_pdf'in _format_pdf_datetime_istanbul'unda da kullanılıyor.
+def _format_istanbul_datetime(value):
+    if not value:
+        return None
+    if hasattr(value, "strftime"):
+        dt = value
+    else:
+        s = str(value).strip().split(".")[0].replace("T", " ")
+        dt = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                dt = datetime.strptime(s, fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            return str(value)
+    return (dt + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
+
 def _make_consent_pdf(candidate: dict, consent: dict):
     try:
         from reportlab.lib import colors as rl_colors
@@ -13929,7 +13950,7 @@ def _make_consent_pdf(candidate: dict, consent: dict):
         f"<b>Pozisyon:</b> {ptxt(candidate.get('position'))}",
         f"<b>Seviye:</b> Level {ptxt(consent.get('level') or candidate.get('level') or 1)}",
         f"<b>Kurum (tenant):</b> {ptxt(consent.get('tenant_name'))}",
-        f"<b>Onay tarih-saati:</b> {ptxt(consent.get('consent_at'))}",
+        f"<b>Onay tarih-saati:</b> {ptxt(_format_istanbul_datetime(consent.get('consent_at')))} (TR saati)",
         f"<b>Metin sürümü:</b> {ptxt(consent.get('text_version'))}",
         f"<b>IP adresi:</b> {ptxt(consent.get('ip_address'))}",
         f"<b>Tarayıcı bilgisi:</b> {ptxt(consent.get('user_agent'))}",

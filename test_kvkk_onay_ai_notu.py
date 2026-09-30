@@ -116,7 +116,10 @@ try:
     # ============================================================
     prompt_with_note = m.build_report_content_prompt("tablo", "profil_tablo", has_ai_note=True)
     check("8) AI notu var -> '===AI NOTU SONUÇLARI===' promptta VAR", "AI NOTU SONUÇLARI" in prompt_with_note)
-    check("8) prompt puanı ETKİLEMEZ diye açıkça belirtiyor", "ETKİLEMEZ" in prompt_with_note)
+    # DÜZELTME — "puanları ETKİLEMEZ, açıkça belirt" talimatı kaldırıldı (paragraf yalnız
+    # sonuçları anlatır); bu artık promptta YOK olmalı — puanı etkilememe zaten kod tarafında
+    # (motor ekstra kriter satırı kabul etmiyor) yapısal olarak sağlanıyor, madde 10'da doğrulanıyor.
+    check("8) prompt artık 'ETKİLEMEZ' talimatı İÇERMİYOR (kaldırıldı)", "ETKİLEMEZ" not in prompt_with_note)
 
     # ============================================================
     # 9) '===AI Notu Sonuçları===' ayracı doğru anahtara parse ediliyor
@@ -131,6 +134,14 @@ try:
     # ============================================================
     sel, exc = m.select_criteria_for_level([{"name": f"K{i}", "weight": 10} for i in range(10)], 1)
     check("10) seçili kriter sayısı sabit (AI notu bunu değiştiremez, parametre almıyor)", len(sel) == 3)
+
+    # ============================================================
+    # 11) DÜZELTME — KVKK onay saati Türkiye saatiyle (UTC+3) gösterilir, DB değeri değişmez.
+    # ============================================================
+    ist = m._format_istanbul_datetime("2026-01-01 10:00:00")
+    check("11) _format_istanbul_datetime 10:00 UTC -> 13:00 TR", ist == "01.01.2026 13:00")
+    row_raw = m.get_db().execute("SELECT consent_at FROM consent_records WHERE candidate_id=?", (TEST_CID,)).fetchone()
+    check("11) DB'deki ham consent_at DEĞİŞMEDİ (dönüşüm yalnız görünümde)", row_raw["consent_at"] == row["consent_at"])
 
 finally:
     cleanup()
