@@ -2090,14 +2090,14 @@ def cv_extraction_error(cv_text: Optional[str]) -> Optional[str]:
     return None
 
 # ============ MAIL ============
-def send_invite_email(candidate_name: str, email: str, username: str, password: str, position: str):
+def send_invite_email(candidate_name: str, email: str, username: str, password: str, position: str, tenant_name: str = "MACS4"):
     if not email:
         return False
     try:
         html = f"""
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
             <div style="background: #1e3a5f; padding: 20px; text-align: center;">
-                <h1 style="color: white; margin: 0;">MedeX SMO</h1>
+                <h1 style="color: white; margin: 0;">{tenant_name}</h1>
                 <p style="color: #7eb8f7; margin: 5px 0;">Mülakat Daveti</p>
             </div>
             <div style="padding: 30px; background: #f8fafc;">
@@ -2123,7 +2123,7 @@ def send_invite_email(candidate_name: str, email: str, username: str, password: 
         httpx.post(
             "https://api.resend.com/emails",
             headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
-            json={"from": FROM_EMAIL, "to": email, "subject": f"MedeX SMO - {position} Pozisyonu Mülakat Daveti", "html": html},
+            json={"from": FROM_EMAIL, "to": email, "subject": f"{tenant_name} - {position} Pozisyonu Mülakat Daveti", "html": html},
             timeout=20.0,
         ).raise_for_status()
         return True
@@ -2131,14 +2131,14 @@ def send_invite_email(candidate_name: str, email: str, username: str, password: 
         print(f"Mail hatası: {e}")
         return False
 
-def send_report_email(candidate_name, position, report, score, recommendation, standard_cv, terminated_reason=None):
+def send_report_email(candidate_name, position, report, score, recommendation, standard_cv, terminated_reason=None, tenant_name: str = "MACS4"):
     try:
         rec_color = "#22c55e" if recommendation == "İşe Al" else "#f59e0b" if recommendation == "Değerlendirmeye Al" else "#ef4444"
         term_html = f'<div style="background:#fef2f2;border:1px solid #ef4444;color:#ef4444;padding:12px;border-radius:8px;margin-bottom:16px;"><strong>⚠️ Mülakat ihlal nedeniyle sonlandırıldı:</strong> {terminated_reason}</div>' if terminated_reason else ""
         html = f"""
         <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto;">
             <div style="background: #1e3a5f; padding: 20px; text-align: center;">
-                <h1 style="color: white; margin: 0;">MedeX SMO</h1>
+                <h1 style="color: white; margin: 0;">{tenant_name}</h1>
                 <p style="color: #7eb8f7;">Mülakat Raporu</p>
             </div>
             <div style="padding: 30px; background: #f8fafc;">
@@ -3446,7 +3446,7 @@ def cached_system(system_text: str) -> list:
 
 LANGUAGE_NAMES = {"tr": "Türkçe", "en": "İngilizce", "de": "Almanca"}
 
-def get_system_prompt(position_name: str, candidate_name: str, cv_text: Optional[str] = None, ai_note: Optional[str] = None, education: Optional[str] = None, university: Optional[str] = None, department: Optional[str] = None, experience_years: Optional[int] = None, level: Optional[int] = 1, interview_language: str = "tr", report_language: str = "tr", depth_tier: Optional[str] = "standart", email: Optional[str] = None) -> str:
+def get_system_prompt(position_name: str, candidate_name: str, cv_text: Optional[str] = None, ai_note: Optional[str] = None, education: Optional[str] = None, university: Optional[str] = None, department: Optional[str] = None, experience_years: Optional[int] = None, level: Optional[int] = 1, interview_language: str = "tr", report_language: str = "tr", depth_tier: Optional[str] = "standart", email: Optional[str] = None, tenant_name: str = "MACS4") -> str:
     pos = get_position(position_name)
     if not pos:
         pos = {"category": "Genel", "role_description": "Genel pozisyon", "criteria": [
@@ -3507,7 +3507,7 @@ Raporda bu notun nasıl ele alındığını (hangi soru/sorularla test edildi, s
         build_criteria_table_filled(selected_criteria), build_criteria_table_filled(selected_profile_criteria, evidence_header="Somut Örnek + [dk] → Analiz → Sonuç"),
         has_ai_note=bool(ai_note and ai_note.strip()))
 
-    return f"""Sen MedeX AI mülakat uzmanısın. {lang_instruction} Aday: {candidate_name}. Pozisyon: {position_name}. Kategori: {category}.
+    return f"""Sen {tenant_name} AI mülakat uzmanısın. {lang_instruction} Aday: {candidate_name}. Pozisyon: {position_name}. Kategori: {category}.
 
 MÜLAKATÇI İLKESİ — MERKEZ (kural listesi değil, karar çerçeven):
 Amacın adayın mesleki bilgi ve yetkinlik düzeyini ölçmek. Bu amaca ulaşmak için TAM inisiyatif sendedir: senaryo/soru listesi takip etmezsin, adayı okur ve duruma göre karar verirsin. Amaca hizmet ettiğin sürece adayla tam uyumlu davranırsın. Amaç eleme değil; sahada güçlü ama mülakatta gerilen adayı da yakalamak. Bir cevabı yetersiz saymadan önce, bu gerçek bir eksiklik mi yoksa soru net değil miydi ayır.
@@ -3883,9 +3883,13 @@ def admin_login(data: AdminLogin, db=Depends(db_dep)):
 
 @app.get("/api/admin/profile")
 def get_admin_profile(payload=Depends(verify_admin)):
+    # İŞ EMRİ — SABİT 'MEDEX' ADLARININ KURUM ADIYLA DEĞİŞTİRİLMESİ: org_name, admin panel üst
+    # başlığında (AdminDashboard.js, PersonDetail.js) kullanılır. org_id yoksa (superadmin belirli
+    # bir kuruma bağlı değildir) TEMEL KURAL gereği PLATFORM_FALLBACK_NAME ("MACS4") döner.
     return {
         "admin_id": payload.get("admin_id"), "email": payload.get("email"),
         "org_id": payload.get("org_id"), "admin_role": payload.get("admin_role"),
+        "org_name": resolve_tenant_name({"org_id": payload.get("org_id")}),
     }
 
 @app.put("/api/admin/profile")
@@ -4272,7 +4276,7 @@ def invite_from_cv_pool(candidate_id: int, data: CvPoolInvite, payload=Depends(v
 
     mail_sent = False
     if data.send_email and pool_candidate["email"]:
-        mail_sent = send_invite_email(pool_candidate["name"], pool_candidate["email"], username, password, data.position)
+        mail_sent = send_invite_email(pool_candidate["name"], pool_candidate["email"], username, password, data.position, tenant_name=resolve_tenant_name({"org_id": org_id}))
 
     return {
         "id": new_id, "username": username, "password": password, "mail_sent": mail_sent,
@@ -4307,7 +4311,7 @@ def create_candidate(data: CandidateCreate, payload=Depends(verify_admin), db=De
 
     mail_sent = False
     if data.send_email and data.email:
-        mail_sent = send_invite_email(data.name, data.email, username, password, data.position)
+        mail_sent = send_invite_email(data.name, data.email, username, password, data.position, tenant_name=resolve_tenant_name({"org_id": org_id}))
 
     return {
         "id": candidate_id, "username": username, "password": password,
@@ -4365,7 +4369,7 @@ def resend_invite(candidate_id: int, payload=Depends(verify_admin), db=Depends(d
     mail_sent = False
     if mail_attempted:
         try:
-            mail_sent = send_invite_email(candidate["name"], candidate["email"], candidate["username"], candidate["plain_password"], candidate["position"])
+            mail_sent = send_invite_email(candidate["name"], candidate["email"], candidate["username"], candidate["plain_password"], candidate["position"], tenant_name=resolve_tenant_name(candidate))
         except Exception as e:
             print(f"UYARI (resend_invite davet maili c={candidate_id}): {type(e).__name__}: {e}")
             mail_sent = False
@@ -4610,7 +4614,7 @@ def create_new_attempt(candidate_id: int, data: NewAttemptRequest, payload=Depen
     mail_sent = False
     if mail_attempted:
         try:
-            mail_sent = send_invite_email(src["name"], target_email, username, password, position)
+            mail_sent = send_invite_email(src["name"], target_email, username, password, position, tenant_name=resolve_tenant_name({"org_id": src_org_id}))
         except Exception as e:
             print(f"UYARI (create_new_attempt davet maili c={new_id}): {type(e).__name__}: {e}")
             mail_sent = False
@@ -4863,20 +4867,20 @@ CONSENT_TEXT_VERSIONS = {
     1: {"disclosure": _CONSENT_DISCLOSURE_TEMPLATE_V1, "checkbox": _CONSENT_CHECKBOX_TEMPLATE_V1},
 }
 
+PLATFORM_FALLBACK_NAME = "MACS4"
+
 def resolve_tenant_name(candidate) -> str:
-    """Madde 2 — {tenant adı}: adayı davet eden organizasyonun sistemdeki adı. candidate.org_id
-    doluysa o organizasyonun adı; boşsa (eski/genel havuz kaydı) sistemin varsayılan
-    organizasyonuna (slug='medex') düşer — organizations tablosu/alanı sistemde HER ZAMAN var,
-    yalnız bazı eski aday kayıtlarında org_id boş olabilir."""
+    """İŞ EMRİ — SABİT 'MEDEX' ADLARININ KURUM ADIYLA DEĞİŞTİRİLMESİ / TEMEL KURAL: kurum
+    biliniyorsa (candidate.org_id doluysa) o organizasyonun adı; kurum yoksa (eski/genel havuz
+    kaydı, org_id boş) doğrudan PLATFORM_FALLBACK_NAME ("MACS4") döner — MedeX organizasyonuna
+    düşme mantığı KALDIRILDI."""
     org_id = candidate["org_id"] if (candidate and "org_id" in candidate.keys()) else None
+    if not org_id:
+        return PLATFORM_FALLBACK_NAME
     db = get_db()
     try:
-        if org_id:
-            row = db.execute("SELECT name FROM organizations WHERE id=?", (org_id,)).fetchone()
-            if row and row["name"]:
-                return row["name"]
-        row = db.execute("SELECT name FROM organizations WHERE slug=?", ("medex",)).fetchone()
-        return row["name"] if row else "MedeX"
+        row = db.execute("SELECT name FROM organizations WHERE id=?", (org_id,)).fetchone()
+        return row["name"] if (row and row["name"]) else PLATFORM_FALLBACK_NAME
     finally:
         db.close()
 
@@ -5016,7 +5020,7 @@ def start_interview(payload=Depends(verify_token)):
         raise HTTPException(status_code=500, detail="Sistem yapılandırma hatası (API anahtarı eksik). Lütfen yöneticinize bildirin.")
 
     try:
-        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level, (candidate["interview_language"] if candidate and "interview_language" in candidate.keys() else "tr") or "tr", (candidate["report_language"] if candidate and "report_language" in candidate.keys() else "tr") or "tr", (candidate["depth_tier"] if candidate and "depth_tier" in candidate.keys() else "standart") or "standart", email=(candidate["email"] if candidate and "email" in candidate.keys() else None))
+        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level, (candidate["interview_language"] if candidate and "interview_language" in candidate.keys() else "tr") or "tr", (candidate["report_language"] if candidate and "report_language" in candidate.keys() else "tr") or "tr", (candidate["depth_tier"] if candidate and "depth_tier" in candidate.keys() else "standart") or "standart", email=(candidate["email"] if candidate and "email" in candidate.keys() else None), tenant_name=resolve_tenant_name(candidate))
         resp = openai_call("POST", "https://api.openai.com/v1/chat/completions",
                            json_body={"model": OPENAI_L1_INTERVIEW_MODEL,
                                       "messages": [{"role": "system", "content": system},
@@ -5127,7 +5131,7 @@ GÖREV:
     exit_requested_this_turn = False
 
     try:
-        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level, (candidate["interview_language"] if candidate and "interview_language" in candidate.keys() else "tr") or "tr", (candidate["report_language"] if candidate and "report_language" in candidate.keys() else "tr") or "tr", (candidate["depth_tier"] if candidate and "depth_tier" in candidate.keys() else "standart") or "standart", email=(candidate["email"] if candidate and "email" in candidate.keys() else None))
+        system = get_system_prompt(payload["position"], payload["name"], candidate["cv_text"] if candidate else None, candidate["ai_note"] if candidate else None, candidate["education"] if candidate else None, candidate["university"] if candidate else None, candidate["department"] if candidate else None, candidate["experience_years"] if candidate else None, level, (candidate["interview_language"] if candidate and "interview_language" in candidate.keys() else "tr") or "tr", (candidate["report_language"] if candidate and "report_language" in candidate.keys() else "tr") or "tr", (candidate["depth_tier"] if candidate and "depth_tier" in candidate.keys() else "standart") or "standart", email=(candidate["email"] if candidate and "email" in candidate.keys() else None), tenant_name=resolve_tenant_name(candidate))
 
         # KAPANIŞ İŞLEMİNİ ARKA PLANA ALMA: should_finish=True olduğunda bu tur zaten rapor
         # üretecek yavaş (4000 token) çağrıyı tetikleyecekti. Onun yerine adayın son cevabını
@@ -10148,7 +10152,7 @@ def finalize_interview(candidate_id: int, reply: str, terminated_reason: Optiona
                                {"final_score": score}, warnings=_score_warnings)
 
     if candidate:
-        send_report_email(candidate["name"], candidate["position"], report, score, recommendation, standard_cv, terminated_reason)
+        send_report_email(candidate["name"], candidate["position"], report, score, recommendation, standard_cv, terminated_reason, tenant_name=resolve_tenant_name(candidate))
 
     clean_reply = reply.replace("[MÜLAKATBİTTİ]", "").split("---RAPOR---")[0].strip()
     return {
@@ -10226,7 +10230,7 @@ def report_violation(data: ViolationReport, background_tasks: BackgroundTasks, p
 
     # L1 (metin): deferred AI raporu — ADİL değerlendirme (artık "düşük puan ver" YOK).
     try:
-        system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"], candidate_level, candidate["interview_language"] or "tr", candidate["report_language"] or "tr", (candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart") or "standart", email=(candidate["email"] if "email" in candidate.keys() else None))
+        system = get_system_prompt(candidate["position"], candidate["name"], candidate["cv_text"], candidate["ai_note"], candidate["education"], candidate["university"], candidate["department"], candidate["experience_years"], candidate_level, candidate["interview_language"] or "tr", candidate["report_language"] or "tr", (candidate["depth_tier"] if "depth_tier" in candidate.keys() else "standart") or "standart", email=(candidate["email"] if "email" in candidate.keys() else None), tenant_name=resolve_tenant_name(candidate))
         force_msg = (
             f"Mülakat, aday tarafında tespit edilen kural ihlali nedeniyle sonlandırıldı: {terminated_reason}. "
             "Şimdi bitir ve ELDEKİ veriyle ADİL bir rapor üret — ihlal TEK BAŞINA puanı düşürmez; hiç sorulamayan "
@@ -10871,7 +10875,7 @@ def finalize_incomplete_interview(candidate_id: int, report: str, terminated_rea
     db.commit(); db.close()
     _ensure_result_reason(candidate_id, level, None, "Değerlendirilemedi", terminated_reason)
     if candidate:
-        send_report_email(candidate["name"], candidate["position"], report, None, "Değerlendirilemedi", standard_cv, terminated_reason)
+        send_report_email(candidate["name"], candidate["position"], report, None, "Değerlendirilemedi", standard_cv, terminated_reason, tenant_name=resolve_tenant_name(candidate))
     return {"message": "Mülakat tamamlandı. Yeterli veri oluşmadığı için puanlama yapılmadı.", "completed": True, "score": None, "recommendation": "Değerlendirilemedi"}
 
 
@@ -14058,7 +14062,7 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     styles.add(ParagraphStyle(name="MiniHeading", parent=styles["BodyText"], fontName=font_bold, fontSize=9.5, leading=12, textColor=rl_colors.HexColor("#92400e"), spaceBefore=2, spaceAfter=4))
 
     story = []
-    story.append(Paragraph("MedeX AI Interview Report", styles["BrandTitle"]))
+    story.append(Paragraph(f"{resolve_tenant_name(candidate)} AI Interview Report", styles["BrandTitle"]))
     story.append(Paragraph("Aday mülakat değerlendirme raporu", styles["Subtitle"]))
     story.append(Spacer(1, 10))
 
@@ -14478,7 +14482,7 @@ def _make_report_pdf(candidate: dict, interview: dict, snapshots: list):
     # _report_created_raw ile AYNI öncelik: report_regenerated_at varsa o, yoksa report_generated_at)
     # ve AYNI Europe/Istanbul dönüşümünden üretiliyor — üst ve alt HER ZAMAN aynı anı gösterir.
     _gen_txt = f" (rapor {_report_created_at} tarihinde üretildi)" if _report_created_at else ""
-    story.append(Paragraph(f"Bu rapor MedeX AI Interview Platform tarafından oluşturulmuştur.{_gen_txt}", styles["Small"]))
+    story.append(Paragraph(f"Bu rapor {PLATFORM_FALLBACK_NAME} AI Interview Platform tarafından oluşturulmuştur.{_gen_txt}", styles["Small"]))
 
     # İş emri madde 19 — her sayfada sayfa numarası.
     def _add_page_number(canvas, _doc):
@@ -14791,7 +14795,7 @@ def regenerate_report(candidate_id: int, background_tasks: BackgroundTasks, leve
                                    cand["education"], cand["university"], cand["department"], cand["experience_years"],
                                    level, cand["interview_language"] or "tr", cand["report_language"] or "tr",
                                    (cand["depth_tier"] if "depth_tier" in cand.keys() else "standart") or "standart",
-                                   email=(cand["email"] if "email" in cand.keys() else None))
+                                   email=(cand["email"] if "email" in cand.keys() else None), tenant_name=resolve_tenant_name(cand))
         prompt = (f"GÖREV: Aşağıdaki tam transkriptten mülakatı bitir ve raporu üret (yönetici talebiyle YENİDEN üretim). "
                   f"Elindeki veriyle adil değerlendir; sorulmamış kriterleri 'değerlendirilemedi' işaretle. [MÜLAKATBİTTİ] etiketini kullan.{_regen_note_txt}\n\n"
                   f"=== TAM TRANSKRİPT ===\n{clean_transcript[:TRANSCRIPT_PROMPT_MAX_CHARS]}")
@@ -14829,8 +14833,10 @@ def download_interview_transcript(candidate_id: int, level: Optional[int] = None
     target_level = level if level is not None else (cand["level"] or 1)
     iv = db.execute("SELECT messages, started_at, completed_at FROM interviews WHERE candidate_id=? AND level=?", (candidate_id, target_level)).fetchone()
     view = build_transcript_view(iv["messages"] if iv else "[]", target_level, iv["started_at"] if iv else None)
-    header = f"MedeX Mülakat — Konuşma Metni\nAday: {cand['name']}\nSeviye: {target_level}\nBaşlangıç: {iv['started_at'] if iv else '-'}\nBitiş: {iv['completed_at'] if iv and iv['completed_at'] else '(tamamlanmadı)'}\n" + ("-" * 60) + "\n\n"
+    tenant_name = resolve_tenant_name({"org_id": scoped_org_id})
+    header = f"{tenant_name} Mülakat — Konuşma Metni\nAday: {cand['name']}\nSeviye: {target_level}\nBaşlangıç: {iv['started_at'] if iv else '-'}\nBitiş: {iv['completed_at'] if iv and iv['completed_at'] else '(tamamlanmadı)'}\n" + ("-" * 60) + "\n\n"
     body = transcript_to_text(view) or "(Bu mülakat için kayıtlı konuşma metni yok.)"
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", cand["name"] or "aday")
+    safe_tenant = re.sub(r"[^a-zA-Z0-9_-]", "_", tenant_name)
     return Response(content=(header + body), media_type="text/plain; charset=utf-8",
-                    headers={"Content-Disposition": f'attachment; filename="MedeX_Transkript_{safe_name}_L{target_level}.txt"'})
+                    headers={"Content-Disposition": f'attachment; filename="{safe_tenant}_Transkript_{safe_name}_L{target_level}.txt"'})

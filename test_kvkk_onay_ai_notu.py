@@ -47,6 +47,11 @@ try:
     # ============================================================
     tenant = m.resolve_tenant_name(candidate)
     check("1) org_id boş -> varsayılan tenant adı döner", bool(tenant))
+    # DÜZELTME — SABİT 'MEDEX' ADLARININ KURUM ADIYLA DEĞİŞTİRİLMESİ: org_id boşsa artık
+    # doğrudan "MACS4" döner (eski "MedeX" organizasyonuna düşme mantığı kaldırıldı).
+    check("1) org_id boş -> tam olarak 'MACS4' (eski MedeX fallback'i KALDIRILDI)", tenant == "MACS4")
+    admin_profile = m.get_admin_profile(payload={"admin_id": None, "email": "x", "org_id": None, "admin_role": "superadmin"})
+    check("1) /api/admin/profile org_id yok (superadmin) -> org_name == 'MACS4'", admin_profile.get("org_name") == "MACS4")
 
     # ============================================================
     # 2) Onay verilmeden mülakat başlamıyor (madde 1)
@@ -142,6 +147,24 @@ try:
     check("11) _format_istanbul_datetime 10:00 UTC -> 13:00 TR", ist == "01.01.2026 13:00")
     row_raw = m.get_db().execute("SELECT consent_at FROM consent_records WHERE candidate_id=?", (TEST_CID,)).fetchone()
     check("11) DB'deki ham consent_at DEĞİŞMEDİ (dönüşüm yalnız görünümde)", row_raw["consent_at"] == row["consent_at"])
+
+    # ============================================================
+    # 12) DÜZELTME — İŞ EMRİ: SABİT 'MEDEX' ADLARININ KURUM ADIYLA DEĞİŞTİRİLMESİ.
+    #     AI talimatı (get_system_prompt) ve davet e-postası (send_invite_email) artık
+    #     verilen tenant_name'i kullanıyor, sabit "MedeX" YAZMIYOR.
+    # ============================================================
+    prompt_tenant = m.get_system_prompt("Test Pozisyonu", "Test Aday", tenant_name="ACME Kurumu")
+    check("12) get_system_prompt 'Sen ACME Kurumu AI mülakat uzmanısın' içeriyor", "Sen ACME Kurumu AI mülakat uzmanısın" in prompt_tenant)
+    check("12) get_system_prompt sabit 'MedeX' İÇERMİYOR", "MedeX" not in prompt_tenant)
+
+    import unittest.mock as _mock
+    with _mock.patch("main.httpx.post") as mock_post:
+        mock_post.return_value.raise_for_status = lambda: None
+        m.send_invite_email("Test Aday", "test@example.com", "kullanici", "sifre123", "Test Pozisyonu", tenant_name="ACME Kurumu")
+        sent_json = mock_post.call_args.kwargs.get("json", {})
+    check("13) send_invite_email konusu kurum adını içeriyor", sent_json.get("subject", "").startswith("ACME Kurumu -"))
+    check("13) send_invite_email HTML'i sabit 'MedeX SMO' İÇERMİYOR", "MedeX SMO" not in sent_json.get("html", "")
+          and "ACME Kurumu" in sent_json.get("html", ""))
 
 finally:
     cleanup()
