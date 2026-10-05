@@ -911,6 +911,9 @@ class PositionCreate(BaseModel):
     category: str = "Genel"
     role_description: str = ""
     criteria: List[CriterionItem]
+    # İŞ EMRİ — SÜPERADMİN İÇİN "TÜM KURUMLARA EKLE" SEÇENEĞİ: yalnız create_position okur
+    # (update_position'da madde 3 gereği bu seçenek YOK — alan varsa bile sessizce yok sayılır).
+    apply_to_all_orgs: bool = False
 
 class PersonNoteCreate(BaseModel):
     body: str
@@ -3990,9 +3993,52 @@ def _validate_position_criteria(criteria):
     total = sum(c.weight for c in criteria)
     return None if total == 100 else f"Uyarı: kriter ağırlıkları toplamı {total}, 100 olması önerilir"
 
+def _first_free_position_name(db, org_id: int, base_name: str) -> str:
+    """İŞ EMRİ — SÜPERADMİN İÇİN 'TÜM KURUMLARA EKLE' madde 2: kurumda aynı adda pozisyon
+    zaten varsa (active durumuna BAKILMAKSIZIN — (org_id, name) UNIQUE kısıtı aktif/pasif
+    ayrımı yapmaz) "_2", "_3", ... ilk boş numara bulunur. base_name'in kendisi boşsa (ilk
+    seferde) AYNEN döner — numaralama yalnız çakışma VARSA devreye girer."""
+    existing = {r["name"] for r in db.execute("SELECT name FROM positions WHERE org_id=?", (org_id,)).fetchall()}
+    if base_name not in existing:
+        return base_name
+    i = 2
+    while f"{base_name}_{i}" in existing:
+        i += 1
+    return f"{base_name}_{i}"
+
 @app.post("/api/admin/positions")
 def create_position(data: PositionCreate, payload=Depends(verify_admin), db=Depends(db_dep)):
     warning = _validate_position_criteria(data.criteria)
+
+    # İŞ EMRİ — SÜPERADMİN İÇİN "TÜM KURUMLARA EKLE" SEÇENEĞİ madde 2 — yalnız süperadmin
+    # kullanabilir; kurum admini bu alanı gönderse bile reddedilir (sessizce yok sayılmaz —
+    # açıkça 403, "kendi başına karar verme" ilkesiyle kurum admininin isteği hiç işlenmez).
+    if data.apply_to_all_orgs:
+        if payload.get("admin_role") != "superadmin":
+            raise HTTPException(status_code=403, detail="Bu seçenek yalnız süperadmin için kullanılabilir")
+        orgs = db.execute("SELECT id, name FROM organizations ORDER BY name").fetchall()
+        criteria_json = json.dumps([c.dict() for c in data.criteria], ensure_ascii=False)
+        renamed = []
+        added_count = 0
+        for org in orgs:
+            final_name = _first_free_position_name(db, org["id"], data.name)
+            try:
+                db.execute(
+                    "INSERT INTO positions (name, category, role_description, criteria_json, org_id, is_customized) VALUES (?, ?, ?, ?, ?, 1)",
+                    (final_name, data.category, data.role_description, criteria_json, org["id"])
+                )
+                added_count += 1
+                if final_name != data.name:
+                    renamed.append({"org_name": org["name"], "new_name": final_name})
+            except (sqlite3.IntegrityError, psycopg.IntegrityError):
+                # Yarış durumu (aynı anda başka bir eklemeyle çakışma) — bu kurumu atla, diğerlerine devam et.
+                continue
+        db.commit()
+        summary = f"{added_count} kuruma eklendi."
+        if renamed:
+            summary += " " + f"{len(renamed)} kurumda farklı adla eklendi: " + "; ".join(f"{r['org_name']} → {r['new_name']}" for r in renamed)
+        return {"message": summary, "warning": warning, "added_to": added_count, "renamed": renamed}
+
     org_id = get_org_id_for_admin(db, payload)
     try:
         db.execute(
