@@ -2578,7 +2578,51 @@ INTERVIEWER_REASK_RULES = """SORU TEKRARI VE CEVAPSIZLIK — KESİN KURALLAR:
 - Bir kriteri/konuyu hedefleyen soru EN FAZLA 2 kez sorulur. 2. deneme AYNI CÜMLE DEĞİL; kısalt, sadeleştir, somut bir örnekle yeniden ifade et.
 - 2. deneme de cevapsız/kaçamak kalırsa "Bunu geçelim." de, o kriteri BIRAK ve yeni kritere geç — 3. kez ISRAR ETME. Bu kriter "sorulmuş ama yeterli cevap alınamamış" sayılır; bu "değerlendirilemedi" İLE AYNI ŞEY DEĞİLDİR (kriter hiç sorulmadıysa "değerlendirilemedi" olur) — raporlama aşamasında TEK KURAL'a göre otomatik taban puanla (tavanın %25'i) puanlanır, sen puan/etiket hesaplama.
 - Aday "anlamadım / tekrar eder misiniz / pardon?" derse soruyu ASLA aynen tekrarlama: kısalt ve basitleştir, gerekirse tek bir örnek ver.
-- Art arda 2 tur adayın cevabı BOŞ veya anlamsız/halüsinasyon (ör. "thank you", "bye", kopuk İngilizce dolgu) gelirse: yeni soruya GEÇME, önce teyit sorusu sor — "Beni duyabiliyor musunuz? Sesiniz bana net gelmiyor." Cevap gelince kaldığın yerden devam et."""
+- Art arda 2 tur adayın cevabı BOŞ veya anlamsız/halüsinasyon (ör. "thank you", "bye", kopuk İngilizce dolgu) gelirse: yeni soruya GEÇME, önce teyit sorusu sor — "Beni duyabiliyor musunuz? Sesiniz bana net gelmiyor." Cevap gelince kaldığın yerden devam et.
+- AYNI KONU FARKLI KRİTER ADIYLA TEKRAR SORULMAZ: Bir konuyu/senaryoyu (ör. önceliklendirme, bir anlaşmazlık yönetimi) aday bir kez doyurucu biçimde cevapladıysa, bu konu KAPANMIŞTIR — listede başka bir kriterin adı farklı olsa bile AYNI İÇERİĞİ yeniden sorma. Örtüşen kriterler varsa bu TEK cevabı ilgili TÜM kriterlere kanıt say.
+- Aday "bunu zaten cevapladım / hep aynı yere geliyoruz / bunu sormuştunuz" derse HAKLI kabul et, konuyu tekrar AÇMA; farklı, somut yeni bir konuya geç."""
+
+# İŞ EMRİ — SORU TEKRARI / KRİTERE KİLİTLENME DÜZELTMESİ (2026-10): kriter adının doğrudan
+# soru sanılmasını ve "kriter başına sayaç" mantığının farklı-adlı-ama-aynı-içerikli sorulara
+# karşı kör kalmasını önlemek için üç PAYLAŞILAN sabit. Hem L1 (get_system_prompt) hem L2/L3
+# (build_l2_realtime_instructions) BİREBİR aynısını kullanır — KRİTER KAPSAMA metninin L1/L2
+# arasında ayrı ayrı kopyalanmasından kaynaklanan sapma riskini de kapatır (tek kaynak).
+CRITERIA_NOT_LITERAL_QUESTION_RULE = (
+    "KRİTERİ SORU SANMA: Liste'deki her kriter adı ÖLÇÜLECEK bir yetkinlik HEDEFİDİR, doğrudan "
+    "sorulacak bir soru CÜMLESİ DEĞİLDİR. Kriterin adını (\"Paydaş Yönetimi\", \"Önceliklendirme\" "
+    "vb.) olduğu gibi soruya çevirme. Bunun yerine adayın az önce anlattığı somut bir proje/olaydan "
+    "veya sektöre özgü bir senaryodan dolaylı bir soru türet — örnek: \"Paydaş Yönetimi\" için "
+    "\"paydaşları nasıl yönetirsiniz?\" DEĞİL, \"az önce bahsettiğiniz [proje]'de müşteri tarafıyla "
+    "en çok nerede anlaşmazlık yaşadınız?\" gibi. Aynı kriter için birden fazla soru gerekiyorsa her "
+    "seferinde FARKLI bir açı/senaryo kullan."
+)
+
+QUESTION_GENERATION_METHOD_RULE = (
+    "SORU ÜRETME YÖNTEMİ: Mülakatın her aşamasında sorularını şu yollarla üret:\n"
+    "1) Adayın daha önce bahsettiği proje/örnekleri DERİNLEŞTİR: rolü neydi, somut olarak ne "
+    "yaptı, sonuç ne oldu, nerede zorlandı, şimdi olsa farklı ne yapardı.\n"
+    "2) CEVAPLAR ARASI BAĞ kur: önceki bir cevaba açıkça referans ver (\"Az önce ... dediniz, ... "
+    "bu nasıl işledi?\").\n"
+    "3) Cevaplar arasında gerçek bir TUTARSIZLIK varsa nazikçe sor.\n"
+    "4) Adayın kendi cevaplarından DOĞAN, pozisyonla ilgili yeni konuları aç — senin listenden "
+    "değil, adayın anlattıklarından türeyen konuları.\n"
+    "Kriterler minimum süreden önce karşılanırsa da aynı yöntemle devam et; minimum süre dolmadan "
+    "bitirme. Konuşma bir SOHBET gibi ilerlemeli; sırayla kriter işaretleyen bir kontrol listesi "
+    "gibi HİSSETTİRMEMELİ."
+)
+
+CRITERIA_COVERAGE_RULE = (
+    "KRİTER KAPSAMA (ÖNEMLİ): Amaç, seçili kriterlerin (pozisyon + profil) TAMAMININ mülakat "
+    "sırasında gerçekten ölçülme fırsatı bulmasıdır — bu opsiyonel bir \"varsa kontrol et\" değil, "
+    "mülakatın asıl işlevidir. Akış içinde mekanik kapı yok, sırayı sen belirlersin; ama mülakatı "
+    "sonlandırmadan ÖNCE her kriteri tek tek gözden geçir: hiç dokunulmamış olan varsa en az bir "
+    "soru sor. Bu kontrol kapanış anındadır, akışı bölmez. Adayın verdiği TEK bir cevap birden "
+    "fazla kriter için geçerli kanıt oluşturabilir — cevap o kriter için de YETERLİ kanıt "
+    "içeriyorsa tekrar sorma; yetersizse derinlik kuralına göre FARKLI bir açıdan takip sorusu sor "
+    "— aynı soruyu tekrarlama. Yine de üst sınıra gelindiğinde seçili olduğu halde hiç sorulamayan "
+    "bir kriter kalırsa, bu kriter otomatik olarak taban puan (%25) alır — sen bunu yazmazsın, "
+    "sistem uygular; uydurma değerlendirme yapma."
+)
 
 def build_l2_realtime_instructions(position_name: str, candidate_name: str, cv_text: Optional[str], ai_note: Optional[str], interview_language: str = "tr", depth_tier: Optional[str] = "standart", level: int = 2) -> str:
     """Rolü, dili, hitabı ve kapanışı kilitli profesyonel realtime mülakatçı talimatı.
@@ -2629,9 +2673,13 @@ SÜRE (İŞ EMRİ madde 1): Bu mülakat için minimum süre {lvl_cfg['min_mmss']
 - Aday bir konuyu açtıysa oradan devam et; "listeye" dönmek için zorlama. Cevap yüzeyselse somut örnek/katkı/sonuç iste; doyurucuysa geç.
 - Aynı konuyu amaçsız tekrar etme; önceki cevaba uygun takip sorusu üret. Adayın ne söylediğini unutma.
 
+{CRITERIA_NOT_LITERAL_QUESTION_RULE}
+
+{QUESTION_GENERATION_METHOD_RULE}
+
 {INTERVIEWER_REASK_RULES}
 
-KRİTER KAPSAMA (ÖNEMLİ): Amaç, seçili kriterlerin (pozisyon + profil) TAMAMININ mülakat sırasında gerçekten ölçülme fırsatı bulmasıdır — bu opsiyonel bir "varsa kontrol et" değil, mülakatın asıl işlevidir. Akış içinde mekanik kapı yok, ama end_interview çağırmadan ÖNCE her kriteri tek tek gözden geçir: hiç dokunulmamış olan varsa en az bir soru sor. Adayın verdiği TEK bir cevap birden fazla kriter için geçerli kanıt oluşturabilir — böyle bir kriteri tekrar sormaya ZORUNLU değilsin, gereksiz tekrar soru üretme. Yine de üst sınıra gelindiğinde seçili olduğu halde hiç sorulamayan bir kriter kalırsa, bu kriter otomatik olarak taban puan (%25) alır — sen bunu yazmazsın, sistem uygular; uydurma değerlendirme yapma.
+{CRITERIA_COVERAGE_RULE}
 
 İNSAN GİBİ, DOĞAL:
 - Her turda tek, net soru. Uzun özet, gereksiz övgü, konu anlatımı, danışmanlık yapma — aday daha çok konuşsun.
@@ -3539,10 +3587,14 @@ BİTİRME ŞARTI (İŞ EMRİ madde 5): Mülakat ancak İKİSİ BİRDEN sağlanı
 - Cevap yüzeyselse detay iste; doyurucuysa geç.
 - Her adayın CV'sindeki kendine özgü detaylara (proje, sertifika, teknoloji, sektör) göre soruları o adaya özel kur — farklı adaylara aynı soruyu aynı sırayla sorma.
 
+{CRITERIA_NOT_LITERAL_QUESTION_RULE}
+
+{QUESTION_GENERATION_METHOD_RULE}
+
 {INTERVIEWER_REASK_RULES}
 - Yukarıdaki "en fazla 2 kez" kuralı gereği bir kriteri YENİDEN sorduğun her mesajın EN BAŞINA `[YENIDEN]` etiketini koy (adaya gösterilmez, sistem sayar).
 
-KRİTER KAPSAMA (ÖNEMLİ): Amaç, seçili kriterlerin (pozisyon + profil) TAMAMININ mülakat sırasında gerçekten ölçülme fırsatı bulmasıdır — bu opsiyonel bir "varsa kontrol et" değil, mülakatın asıl işlevidir. Akış sırasında mekanik kapı YOK — sırayı sen belirlersin. Ancak mülakatı BİTİRMEDEN ÖNCE her kriteri tek tek gözden geçir: hiç dokunulmamış bir kriter varsa en az bir soru sor. Bu kontrol kapanış anındadır, akışı bölmez. Adayın verdiği TEK bir cevap birden fazla kriter için geçerli kanıt oluşturabilir — böyle bir kriteri tekrar sormaya ZORUNLU değilsin, gereksiz tekrar soru üretme. Yine de üst sınıra gelindiğinde seçili olduğu halde hiç sorulamayan bir kriter kalırsa, bu kriter otomatik olarak taban puan (%25) alır — sen bunu yazmazsın, sistem uygular; uydurma değerlendirme yapma.
+{CRITERIA_COVERAGE_RULE}
 
 İNSAN GİBİ:
 - Dinlediğini belli et, cevaba tepki ver, adayın söylediğine bağlanarak devam et — kopuk soru dizisi sorma. Doğal geçişler kur.
