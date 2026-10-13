@@ -2604,8 +2604,12 @@ QUESTION_GENERATION_METHOD_RULE = (
     "2) CEVAPLAR ARASI BAĞ kur: önceki bir cevaba açıkça referans ver (\"Az önce ... dediniz, ... "
     "bu nasıl işledi?\").\n"
     "3) Cevaplar arasında gerçek bir TUTARSIZLIK varsa nazikçe sor.\n"
-    "4) Adayın kendi cevaplarından DOĞAN, pozisyonla ilgili yeni konuları aç — senin listenden "
-    "değil, adayın anlattıklarından türeyen konuları.\n"
+    "4) Soru kaynağını duruma göre SEN seç; iki kaynağı karışık kullan: adayın anlattıkları ve "
+    "kriterin etrafındaki, pozisyonla ilgili ek konular. Öncelik kuralı: adayın anlattıklarında "
+    "açık nokta varsa (eksik, belirsiz, yüzeysel, somut örnek/sonuç/rol verilmemiş yer) önce "
+    "orayı derinleştir. Açık nokta yoksa kriterle ve pozisyonla ilgili ek bir konuya geç. Ek "
+    "konu tamamen alakasız olmasın. Örnek: \"Paydaş Yönetimi\" kapandıysa değişiklik talebi "
+    "yönetimi, beklenti yönetimi, onay süreçleri gibi yakın konulara geç.\n"
     "Kriterler minimum süreden önce karşılanırsa da aynı yöntemle devam et; minimum süre dolmadan "
     "bitirme. Konuşma bir SOHBET gibi ilerlemeli; sırayla kriter işaretleyen bir kontrol listesi "
     "gibi HİSSETTİRMEMELİ."
@@ -3203,6 +3207,83 @@ def parse_llm_report_sections(text: str) -> dict:
         out[key] = content
     return out
 
+# İŞ EMRİ — MÜLAKATÇI/SİSTEM KAYNAKLI SORUNLARIN ADAYA YAZILMAMASI (2026-10): rapor yazan HER
+# modele (L1/L2/L3 birincil — build_report_content_prompt üzerinden — ve L3 müfettiş —
+# run_report_reviewer üzerinden) BİREBİR aynı metinle girer.
+REPORT_INTERVIEWER_FAULT_ATTRIBUTION_RULE = (
+    "MÜLAKATÇI/SİSTEM KAYNAKLI SORUNLAR ADAYA YAZILMAZ (KESİN KURAL — TÜM BÖLÜMLER, POZİSYON VE "
+    "PROFİL KRİTERLERİ DAHİL): Adayın aleyhine bir bulgu/gerekçe yazmadan önce transkriptten "
+    "SEBEBİNİ kontrol et.\n"
+    "1) TEKRAR: Mülakatçı AYNI soruyu veya AYNI içeriği (farklı kelimelerle ya da farklı kriter "
+    "adıyla) yeniden sorduysa, adayın aynı/benzer cevabı KUSUR DEĞİLDİR — tutarlılık olarak da "
+    "okunabilir, olumsuz yazma. Ama mülakatçı GERÇEKTEN farklı bir açıdan takip sorusu sorduysa "
+    "(somut örnek/sonuç/rol/rakam istediyse) ve aday yine genel cevap verdiyse, bu GEÇERLİ bir "
+    "bulgudur (yüzeysellik/kaçamak) — yaz.\n"
+    "2) \"BUNU CEVAPLADIM\" İTİRAZI: Transkriptte gerçekten önceden cevaplanmışsa itiraz "
+    "HAKLIDIR, olumsuz yazma. Cevaplanmamışsa itiraz geçersizdir, normal değerlendir.\n"
+    "3) SÖZ KESME: Mülakatçı adayın cevabı bitmeden konuştuysa, yarım kalan cevap adayın "
+    "aleyhine yazılmaz.\n"
+    "4) TRANSKRİPSİYON: Yalnızca AÇIK işaretlerde (altyazı dolgusu, cümleyle ilgisiz İngilizce "
+    "dolgu, bağlama hiç uymayan tekil anlamsız kelime) transkripsiyon hatası varsay ve adayın "
+    "ifade bozukluğu olarak yazma. Adayın genel olarak dağınık/tekrarlı/konudan sapan anlatımı "
+    "transkripsiyon hatası DEĞİLDİR — normal değerlendir.\n"
+    "5) PUAN: Mülakatçı kaynaklı sorun adayın puanını DÜŞÜRMEZ. Ama kanıt UYDURMA, puan "
+    "YÜKSELTME — kanıt yetersizse mevcut puanlama kuralları (taban %25 vb.) aynen geçerlidir."
+)
+
+# İŞ EMRİ — aynı kuralın (madde 6) ADMIN-ONLY ek çıktı bloğu: birincil rapor çağrısı (L1/L2/L3),
+# ---RAPORSON---'dan SONRA, kendi ayraçlarıyla ayrı bir blok üretir. Bu blok ASLA interviews.report
+# veya raw_report'a girmez (bkz. _extract_and_strip_interviewer_fault_block, run_deferred_finish_job
+# içindeki çağrı sitesi) — yalnız record_system_decision (system_decision_json, admin panel) üzerinden
+# yöneticiye gider. Müfettiş (L3) bu listeyi AYRICA üretmez (iş emri kararı — tek kaynak birincil).
+_MULAKATCI_SORUNLARI_START = "---MULAKATCI_SORUNLARI---"
+_MULAKATCI_SORUNLARI_END = "---MULAKATCI_SORUNLARI_SON---"
+_MULAKATCI_SORUNLARI_OUTPUT_INSTRUCTION = (
+    f"MÜLAKATÇI/SİSTEM KAYNAKLI SORUNLAR — AYRI ÇIKTI BLOĞU (madde 6, YALNIZ YÖNETİCİ görür, "
+    f"müşteri raporuna HİÇ GİRMEZ): Yukarıdaki kuralın (1-4) GERÇEKTEN tespit ettirdiği bir "
+    f"mülakatçı/sistem kaynaklı sorun varsa, ---RAPORSON---'dan HEMEN SONRA (kullandığın format "
+    f"KISA ya da TAM olsun fark etmez) AYRI bir blok olarak şunu ekle:\n"
+    f"{_MULAKATCI_SORUNLARI_START}\n"
+    f"[mm:ss] <ne oldu, kısa>\n"
+    f"{_MULAKATCI_SORUNLARI_END}\n"
+    f"Böyle bir sorun YOKSA bu bloğu HİÇ YAZMA (boş blok da yazma — tamamen atla)."
+)
+
+def _extract_and_strip_interviewer_fault_block(reply: str):
+    """İş emri — MÜLAKATÇI/SİSTEM KAYNAKLI SORUNLAR (madde 6): modelin ---RAPORSON---'dan SONRA
+    ürettiği ---MULAKATCI_SORUNLARI---...---MULAKATCI_SORUNLARI_SON--- bloğunu HAM yanıttan
+    TAMAMEN çıkarır (raw_report ve interviews.report'a hiçbiri karışmasın diye bu, raw_report
+    yazılmadan ÖNCE çağrılmalıdır — bkz. çağrı sitesi) ve içeriği satır listesi olarak döner.
+    Blok yoksa/boşsa/'YOK' ise (reply, None) döner — hiçbir admin kaydı yazılmaz.
+    Kapanış marker'ı hiç gelmediyse (kesilme/hatalı yerleştirme) İKİ AYRI durum var:
+      - başlangıç marker'ı ---RAPORSON---'dan SONRAYSA (beklenen/tasarlanan konum): blok güvenle
+        TAMAMEN atılır (yarım bırakılmaz) — asıl rapor gövdesi zaten ---RAPORSON---'da bitmiş olur.
+      - başlangıç marker'ı ---RAPORSON---'dan ÖNCEYSE (rapor gövdesinin İÇİNDE, hatalı yerleşim)
+        VEYA ---RAPORSON--- hiç yoksa: NEREDE bittiği bilinmediği için raporun geri kalanını
+        SİLMEK riskli — yalnızca marker SATIRI silinir, geri kalan metne DOKUNULMAZ."""
+    if not reply or _MULAKATCI_SORUNLARI_START not in reply:
+        return reply, None
+    start_idx = reply.find(_MULAKATCI_SORUNLARI_START)
+    end_idx = reply.find(_MULAKATCI_SORUNLARI_END, start_idx)
+    if end_idx == -1:
+        raporson_idx = reply.find("---RAPORSON---")
+        if raporson_idx != -1 and start_idx > raporson_idx:
+            # Beklenen konum (RAPORSON'dan SONRA) ama yarım kalmış — güvenle TAMAMEN at.
+            return reply[:start_idx].rstrip(), None
+        # Beklenmeyen konum (RAPORSON'dan ÖNCE) veya RAPORSON hiç yok — yalnız marker SATIRINI sil,
+        # geri kalan metne (muhtemel gerçek rapor içeriği) DOKUNMA.
+        line_start = reply.rfind("\n", 0, start_idx) + 1
+        line_end = reply.find("\n", start_idx)
+        line_end = (line_end + 1) if line_end != -1 else len(reply)
+        return reply[:line_start] + reply[line_end:], None
+    content = reply[start_idx + len(_MULAKATCI_SORUNLARI_START):end_idx].strip()
+    cleaned = (reply[:start_idx] + reply[end_idx + len(_MULAKATCI_SORUNLARI_END):]).strip()
+    if not content or _tr_upper(content) in ("YOK", "YOK."):
+        return cleaned, None
+    items = [ln.strip("-• \t") for ln in content.splitlines() if ln.strip()]
+    items = [it for it in items if it and _tr_upper(it) not in ("YOK", "YOK.")]
+    return cleaned, (items or None)
+
 def build_report_content_prompt(criteria_table_filled: str, profile_table_filled: str, has_real_timestamps: bool = False, has_ai_note: bool = False) -> str:
     """Modelden istenen TEK gövde: 13 bölüm, ===BAŞLIK=== ayraçlı. L1/L2/L3 ORTAK — seviyeler
     arası içerik farkı yoktur; CV yoksa/kamera-ses yoksa ilgili içerik zaten deterministik
@@ -3229,6 +3310,8 @@ def build_report_content_prompt(criteria_table_filled: str, profile_table_filled
         "Somut bir şey yoksa YOK yaz."
     ) if has_ai_note else ""
     return f"""Aşağıdaki bölümleri, TAM OLARAK bu sırayla ve TAM OLARAK bu ayraçlarla üret. Ayraç satırlarını (===...===) AYNEN kopyala; başka hiçbir başlık/ayraç EKLEME. Bir bölümde yazacak GERÇEKTEN somut bir şey yoksa o bölümün içeriğine SADECE "YOK" yaz (sistem o bölümü rapordan çıkarır) — asla "belirtilecek bir şey yok" gibi dolgu cümle kurma, asla "-", "—" veya "bulunmamaktadır" yazma. Aşağıdaki HİÇBİR bölümde yasak kalıp (banned_phrase_hits — "daha fazla/somut/derin ... gerekmektedir/beklenmektedir/gerektiği" ailesi, "beklenmiştir" ailesi) KULLANMA; sistem bunu tespit edip o CÜMLEYİ siler. Hiçbir bölümde bir kriterin KANIT alanındaki veya Pozisyon/Profil tablolarındaki cümleyi AYNEN tekrar ETME. Sorulmamış bir konuda eksiklik/olumsuz yargı YAZMA.
+
+{REPORT_INTERVIEWER_FAULT_ATTRIBUTION_RULE}
 
 ===YÖNETİCİ ÖZETİ===
 2-3 kısa paragraf, TOPLAM yaklaşık 150-250 kelime (bu sınırı AŞMA). İçerik: aday kim, hangi deneyime sahip; mülakatta NEYİ SOMUT OLARAK gösterdi; hangi konularda güçlü, hangi konularda değil; pozisyona uygunluk açısından sonuç. Dakika damgası KULLANMA (detay aşağıdaki bölümlerde). Bir karar/öneri kelimesi (Reddet/İşe Al/Değerlendir vb.) YAZMA — karar ayrı, sistem tarafından üretilir. Aşağıdaki bölümlerdeki cümleleri AYNEN kopyalama.
@@ -3642,6 +3725,8 @@ GENEL:
 
 RAPOR UZUNLUĞU — MALİYET KURALI (KESİN):
 Rapor üretirken ÖNCE kabaca genel performansı değerlendir. Eğer toplam puan {total_weight} üzerinden %20'nin altında kalacaksa (yani aday temel bir yetkinlik bile gösteremediyse, veya veri neredeyse hiç toplanamadıysa), AŞAĞIDAKİ TAM FORMATI KULLANMA — bunun yerine KISA FORMAT'ı kullan. %20'yi geçen her durumda TAM FORMAT kullanılır.
+
+{_MULAKATCI_SORUNLARI_OUTPUT_INSTRUCTION}
 
 KISA FORMAT (puan %20 altındaysa) — ayraçları AYNEN koru, yalnız TOPLAM PUAN ve Yönetici Özeti içeriğini doldur:
 [MÜLAKATBİTTİ]
@@ -6824,6 +6909,8 @@ def run_report_reviewer(candidate_id: int, level: int, transcript_text: str, fin
 
 Görevin: birincil değerlendirmeyi transkript (ve varsa CV) karşısında BAĞIMSIZ OLARAK DENETLEMEK. Kararı veya puanı DOĞRUDAN DEĞİŞTİREMEZSİN — ama açık, kanıtlanabilir bir birincil hata bulursan bunu yalnız yorum olarak bırakmak YETERLİ DEĞİL: KRITER_PUAN/KRITER_GEREKCE ile somut, gerekçeli bir düzeltme öner (sistem bunu grounding'ini doğruladıktan SONRA kontrollü uygular).
 
+{REPORT_INTERVIEWER_FAULT_ATTRIBUTION_RULE}
+
 Şu hata sınıflarını ÖZELLİKLE kontrol et:
 1. Kanıt gerçekten ADAYA mı ait (mülakatçının sözü aday kanıtı gibi kullanılmış olabilir mi)?
 2. Kanıttaki [mm:ss] zaman damgası doğru mu?
@@ -9361,8 +9448,30 @@ GÖREV: Aday mülakatı sonlandırmak istediğini net şekilde belirtti (bu bir 
         else:
             raise RuntimeError(f"Bilinmeyen pending_finish_provider: {provider!r}")
 
+        # İŞ EMRİ — MÜLAKATÇI/SİSTEM KAYNAKLI SORUNLAR (madde 6): ---MULAKATCI_SORUNLARI--- bloğu
+        # raw_report'a (az aşağıda) VE interviews.report'a (finalize_interview, aynı `reply`
+        # üzerinden çalışır) YAZILMADAN ÖNCE ham yanıttan TAMAMEN çıkarılır. Yalnızca yapılandırılmış
+        # olarak record_system_decision'a (warnings — bkz. aşağıdaki not) gider, admin-only.
+        # Hata DURMASIN: ayıklama patlarsa rapor üretimi normal devam eder (reply değişmeden kalır).
+        try:
+            reply, _mulakatci_sorunlari = _extract_and_strip_interviewer_fault_block(reply)
+            if _mulakatci_sorunlari:
+                # NOT: record_system_decision'ın 'decision'/'reason'/'meta' alanları HER ÇAĞRIDA
+                # ÜZERİNE YAZILIR (son çağıran kazanır) — bu pipeline'da finalize_interview/
+                # append_reviewer_section sonradan BAŞKA decision'lar da yazıyor, bu yüzden bu
+                # bulgu 'meta'ya değil 'warnings' listesine verilir: o liste TEK alan olarak
+                # ÇAĞRILAR ARASI BİRİKİR (bkz. record_system_decision — merged_warnings), yani
+                # pipeline'ın geri kalanı başka decision'lar yazsa bile bu bulgu KAYBOLMAZ.
+                record_system_decision(candidate_id, level, "mulakatci_kaynakli_sorun_tespit_edildi",
+                                       "Rapor modeli mülakatçı/sistem kaynaklı bir sorun tespit etti "
+                                       "(madde 6) — müşteri raporuna YAZILMADI, yalnız yönetici kaydı.",
+                                       {}, warnings=[f"Mülakatçı/sistem kaynaklı: {it}" for it in _mulakatci_sorunlari])
+        except Exception as e:
+            print(f"UYARI (mülakatçı sorunları bloğu ayıklama c={candidate_id} L{level}): {type(e).__name__}: {e}")
+
         # item 6 — modelin İŞLENMEMİŞ çıktısını sakla (yalnız admin panel; ≤20000 kr). Denetçi /
         # bağımsız profil / puanlama doğrulaması / öneri hizalaması HİÇBİRİ uygulanmadan ÖNCEKİ hal.
+        # (Yukarıdaki ayıklamadan SONRA çalışır — MULAKATCI_SORUNLARI bloğu burada da görünmez.)
         try:
             _dbraw = get_db()
             _dbraw.execute("UPDATE interviews SET raw_report=? WHERE candidate_id=? AND level=?",
@@ -13695,6 +13804,8 @@ TEMEL KURALLAR:
 - HAM SAYI YASAĞI (KESİN): Rapor gövdesine ses/mimik/kamera METRİĞİ SAYISI (konuşma süresi sn, tur sayısı, yanıt gecikmesi sn, söz kesme sayısı, kare sayısı vb.) YAZMA — sistem bunu ayrı 'Görüntü ve Ses Gözlemi' bölümünde insan diliyle, ekte ham olarak veriyor. Rapor gövdesinde İZİN VERİLEN sayılar YALNIZCA: kriter puanları (16/20 gibi) ve dakika damgaları ([1:21] gibi).
 - En az üç anlamlı aday cevabı yoksa [DEĞERLENDİRİLEMEDİ] üret.
 - Derinlik “derin” ise rapor daha kapsamlı, daha fazla çapraz kanıtlı ve daha ayrıntılı olmalı; standart rapor da kesinlikle yüzeysel olmamalı.
+
+{_MULAKATCI_SORUNLARI_OUTPUT_INSTRUCTION}
 
 TAM FORMAT:
 [MÜLAKATBİTTİ]
